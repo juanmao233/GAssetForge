@@ -55,6 +55,7 @@ public sealed class ShellViewModel : ObservableObject
         _settings = settingsService.Load();
         _workbenchConsoleService = new WorkbenchConsoleService(settingsService.Paths);
         CommandConsole = new CommandConsoleViewModel(_workbenchConsoleService);
+        Blueprint = new BlueprintViewModel();
         if (!string.IsNullOrWhiteSpace(_settings.LastProjectPath) &&
             _projectWorkspaceService.TryLoad(
                 _settings.LastProjectPath,
@@ -272,6 +273,8 @@ public sealed class ShellViewModel : ObservableObject
     public AssetGenerationViewModel AssetGeneration { get; }
 
     public CommandConsoleViewModel CommandConsole { get; }
+
+    public BlueprintViewModel Blueprint { get; }
 
     public WorkflowDefinition CurrentWorkflow => _currentWorkflow;
 
@@ -1392,7 +1395,7 @@ public sealed class ShellViewModel : ObservableObject
             "state");
         CommandConsole.RegisterCommand(
             "show",
-            "show <console|project|generation|background|pixel|agent|style|tools|canvas|properties|layers>",
+            "show <console|project|generation|background|pixel|blueprint|agent|style|tools|canvas|properties|layers>",
             "拉起并聚焦指定的 AvalonDock 停靠页。",
             HandleConsoleShowAsync,
             "panel.show");
@@ -1443,7 +1446,7 @@ public sealed class ShellViewModel : ObservableObject
             !TryResolveConsolePanel(invocation.Arguments[0], out var contentId, out var title))
         {
             return ConsoleResult(CommandConsoleResult.Failure(
-                "用法：show <console|project|generation|background|pixel|agent|style|tools|canvas|properties|layers>"));
+                "用法：show <console|project|generation|background|pixel|blueprint|agent|style|tools|canvas|properties|layers>"));
         }
 
         PanelShowRequested?.Invoke(this, contentId);
@@ -1595,6 +1598,7 @@ public sealed class ShellViewModel : ObservableObject
                 ("background-removal", "背景剔除工具"),
             "pixel" or "pixel-grid" or "像素对齐" or "像素点对齐" =>
                 ("pixel-grid-alignment", "像素点对齐工具"),
+            "blueprint" or "graph" or "蓝图" => ("workflow-blueprint", "蓝图窗口"),
             "agent" or "mcp" => ("mcp-agent-connection", "MCP Agent 接入"),
             "style" or "风格" => ("art-style-library", "美术风格素材库"),
             "tools" or "工具" => ("ui-tools", "工具"),

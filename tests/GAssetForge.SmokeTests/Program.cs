@@ -65,6 +65,8 @@ internal static class Program
             Console.WriteLine("PASS  默认停靠布局包含可中央标签化的工具页、可关闭主视图及顶部标签拓扑");
             DockPanelsFloatHideAndRestoreFromViewMenu();
             Console.WriteLine("PASS  工具页可停靠中央，主视图可关闭并从视图菜单重新创建聚焦");
+            BlueprintDockPanelProvidesWorkflowCanvas();
+            Console.WriteLine("PASS  蓝图窗口可停靠、从视图菜单切换并提供 Agent 工作流画布");
             DockLayoutPersistsFloatingAndHiddenPanels();
             Console.WriteLine("PASS  浮动与隐藏面板状态可随 AvalonDock 布局持久化恢复");
             ThemeSwitchUpdatesWpfAndAvalonDockResources();
@@ -685,6 +687,16 @@ internal static class Program
             Equal(MainWindow.PixelAlignmentContentId, pixelAlignmentMenuItem.CommandParameter as string,
                 "像素点对齐工具开关的 ContentId");
 
+            var blueprintMenuItem = window.FindName("ShowBlueprintMenuItem") as MenuItem
+                ?? throw new SmokeTestException("视图菜单缺少蓝图窗口开关。");
+            blueprintMenuItem.GetBindingExpression(MenuItem.CommandProperty)?.UpdateTarget();
+            True(blueprintMenuItem.IsCheckable,
+                "蓝图窗口菜单应显示当前开启状态");
+            True(ReferenceEquals(shell.TogglePanelCommand, blueprintMenuItem.Command),
+                "蓝图窗口菜单应绑定 TogglePanelCommand");
+            Equal(MainWindow.BlueprintContentId, blueprintMenuItem.CommandParameter as string,
+                "蓝图窗口开关的 ContentId");
+
             var commandConsoleMenuItem = window.FindName("ShowCommandConsoleMenuItem") as MenuItem
                 ?? throw new SmokeTestException("视图菜单缺少指令日志开关。");
             commandConsoleMenuItem.GetBindingExpression(MenuItem.CommandProperty)?.UpdateTarget();
@@ -722,6 +734,7 @@ internal static class Program
                 MainWindow.AssetGenerationContentId,
                 MainWindow.BackgroundRemovalContentId,
                 MainWindow.PixelAlignmentContentId,
+                MainWindow.BlueprintContentId,
                 MainWindow.CommandConsoleContentId
             };
             foreach (var contentId in anchorableIds)
@@ -865,6 +878,76 @@ internal static class Program
         }
     }
 
+    private static void BlueprintDockPanelProvidesWorkflowCanvas()
+    {
+        var paths = new WorkspacePaths(Path.Combine(_temporaryRoot, "blueprint-dock-panel"));
+        var editor = new EditorWorkspaceViewModel(
+            new JsonProjectRepository(paths),
+            new DesktopFileDialogService(),
+            new ProjectHistoryService());
+        var shell = new ShellViewModel(new ThemeService(), new UserSettingsService(paths), editor);
+        shell.SelectWorkflow("tilemap");
+        var window = new MainWindow(shell, new AvalonDockLayoutService(paths));
+
+        try
+        {
+            window.Show();
+            window.UpdateLayout();
+            var manager = window.FindName("DockManager") as DockingManager
+                ?? throw new SmokeTestException("蓝图窗口测试未找到 DockManager。");
+            var blueprint = FindDockContent(manager, MainWindow.BlueprintContentId) as LayoutAnchorable
+                ?? throw new SmokeTestException("默认布局缺少蓝图窗口。");
+            var project = FindDockContent(manager, MainWindow.ProjectContentId) as LayoutAnchorable
+                ?? throw new SmokeTestException("蓝图窗口测试缺少项目面板。");
+
+            Equal("蓝图窗口", blueprint.Title, "蓝图窗口停靠标题");
+            True(ReferenceEquals(blueprint.Parent, project.Parent),
+                "蓝图窗口初始应与项目面板处于同一底部标签区");
+            True(blueprint.CanDockAsTabbedDocument,
+                "蓝图窗口应允许拖入中央文档标签区");
+
+            var host = blueprint.Content as ContentControl
+                ?? throw new SmokeTestException("蓝图窗口缺少稳定 ContentControl host。");
+            var view = host.Content as BlueprintView
+                ?? throw new SmokeTestException("蓝图窗口未承载 BlueprintView。");
+            True(ReferenceEquals(shell.Blueprint, view.DataContext),
+                "BlueprintView 应绑定 Shell 持有的单实例 BlueprintViewModel");
+            True(view.FindName("BlueprintCanvas") is Grid,
+                "蓝图窗口应提供可扩展的工作流画布");
+            var emptyStateTitle = view.FindName("BlueprintEmptyStateTitle") as TextBlock
+                ?? throw new SmokeTestException("蓝图窗口缺少首版空状态标题。");
+            Equal(shell.Blueprint.EmptyStateTitle, emptyStateTitle.Text,
+                "蓝图窗口空状态标题绑定");
+
+            var menuItem = window.FindName("ShowBlueprintMenuItem") as MenuItem
+                ?? throw new SmokeTestException("视图菜单缺少蓝图窗口入口。");
+            menuItem.GetBindingExpression(MenuItem.CommandProperty)?.UpdateTarget();
+            True(menuItem.IsCheckable, "蓝图窗口视图入口应可显示开启状态");
+            True(ReferenceEquals(shell.TogglePanelCommand, menuItem.Command),
+                "蓝图窗口视图入口应复用 TogglePanelCommand");
+            Equal(MainWindow.BlueprintContentId, menuItem.CommandParameter as string,
+                "蓝图窗口视图入口 ContentId");
+            True(menuItem.IsChecked, "蓝图窗口默认可见时视图入口应勾选");
+
+            menuItem.Command!.Execute(menuItem.CommandParameter);
+            PumpDispatcher();
+            True(blueprint.IsHidden, "点击视图入口后蓝图窗口应隐藏");
+            False(menuItem.IsChecked, "蓝图窗口隐藏后视图入口应取消勾选");
+
+            menuItem.Command.Execute(menuItem.CommandParameter);
+            PumpDispatcher();
+            False(blueprint.IsHidden, "再次点击视图入口应恢复蓝图窗口");
+            True(blueprint.IsVisible && blueprint.IsSelected && blueprint.IsActive,
+                "恢复后的蓝图窗口应可见、选中并激活");
+            True(menuItem.IsChecked, "蓝图窗口恢复后视图入口应重新勾选");
+        }
+        finally
+        {
+            window.Close();
+            shell.Shutdown();
+        }
+    }
+
     private static string CurrentPaletteSource()
     {
         var palette = Application.Current.Resources.MergedDictionaries.FirstOrDefault(dictionary =>
@@ -913,6 +996,7 @@ internal static class Program
                 [MainWindow.AssetGenerationContentId] = NewPanelHost(),
                 [MainWindow.BackgroundRemovalContentId] = NewPanelHost(),
                 [MainWindow.PixelAlignmentContentId] = NewPanelHost(),
+                [MainWindow.BlueprintContentId] = NewPanelHost(),
                 [MainWindow.AgentConnectionContentId] = NewPanelHost(),
                 [MainWindow.CommandConsoleContentId] = NewPanelHost()
             };
@@ -3951,6 +4035,7 @@ internal static class Program
                 [MainWindow.AssetGenerationContentId] = NewPanelHost(),
                 [MainWindow.BackgroundRemovalContentId] = NewPanelHost(),
                 [MainWindow.PixelAlignmentContentId] = NewPanelHost(),
+                [MainWindow.BlueprintContentId] = NewPanelHost(),
                 [MainWindow.AgentConnectionContentId] = NewPanelHost(),
                 [MainWindow.CommandConsoleContentId] = NewPanelHost()
             };
@@ -3967,6 +4052,22 @@ internal static class Program
                 True(ReferenceEquals(restoredContent[contentId], content.Content),
                     $"恢复后的 {contentId} 应绑定调用方提供的面板实例");
             }
+
+            var revisionNineLayout = File.ReadAllText(paths.LayoutPath);
+            var revisionEightLayout = revisionNineLayout.Replace(
+                "\"presetRevision\": 9",
+                "\"presetRevision\": 8",
+                StringComparison.Ordinal);
+            False(string.Equals(revisionNineLayout, revisionEightLayout, StringComparison.Ordinal),
+                "布局迁移测试必须真实降级 presetRevision");
+            File.WriteAllText(paths.LayoutPath, revisionEightLayout);
+            var revisionEightManager = new DockingManager();
+            False(layoutService.TryRestore(revisionEightManager, restoredContent),
+                "rev8 布局应在新增蓝图窗口后回退到 rev9 默认布局");
+            Equal("default", layoutService.LastRecoverySource,
+                "旧布局版本应明确标记为默认布局回退");
+            File.WriteAllText(paths.LayoutPath, revisionNineLayout);
+            layoutService = new AvalonDockLayoutService(paths);
 
             layoutService.Save(sourceManager);
             True(File.Exists(paths.LayoutBackupPath), "第二次保存有效布局后应产生备份");
@@ -4716,6 +4817,7 @@ internal static class Program
             MainWindow.AssetGenerationContentId,
             MainWindow.BackgroundRemovalContentId,
             MainWindow.PixelAlignmentContentId,
+            MainWindow.BlueprintContentId,
             MainWindow.AgentConnectionContentId,
             MainWindow.CommandConsoleContentId
         };
@@ -4776,6 +4878,7 @@ internal static class Program
         AssertPaneContains(center.Children[2], MainWindow.AssetGenerationContentId, "下方素材生成区");
         AssertPaneContains(center.Children[2], MainWindow.BackgroundRemovalContentId, "下方背景剔除工具区");
         AssertPaneContains(center.Children[2], MainWindow.PixelAlignmentContentId, "下方像素点对齐工具区");
+        AssertPaneContains(center.Children[2], MainWindow.BlueprintContentId, "下方蓝图窗口区");
         AssertPaneContains(center.Children[2], MainWindow.CommandConsoleContentId, "下方指令日志区");
 
         var right = root.Children[2] as LayoutPanel

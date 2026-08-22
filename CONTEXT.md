@@ -11,6 +11,8 @@ perspective, geometry, style, size, and delivery constraints.
   `ProjectSettings`; it is the authority for workflow and Tilemap parameters.
 - **Workflow** — a business template such as Tilemap, card, parallel-perspective object, UI design,
   or test. A workflow selects the main dock document and its constraint module.
+- **Blueprint workspace** — the dockable graph-editor shell for describing Agent and tool execution
+  trajectories. The first revision intentionally has no executable graph or persisted node model.
 - **Style library** — reusable groups of reference images plus human and AI-oriented style
   descriptions.
 - **Generation task** — one durable, single-image unit with frozen constraints, ownership, lease,

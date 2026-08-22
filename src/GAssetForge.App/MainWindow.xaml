@@ -321,6 +321,11 @@
                           IsCheckable="True"
                           Command="{Binding TogglePanelCommand}"
                           CommandParameter="pixel-grid-alignment" />
+                <MenuItem x:Name="ShowBlueprintMenuItem"
+                          Header="蓝图窗口"
+                          IsCheckable="True"
+                          Command="{Binding TogglePanelCommand}"
+                          CommandParameter="workflow-blueprint" />
                 <MenuItem x:Name="ShowCommandConsoleMenuItem"
                           Header="指令日志"
                           InputGestureText="F12"
