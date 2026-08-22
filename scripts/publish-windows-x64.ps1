@@ -23,6 +23,8 @@ dotnet publish $publishProjectPath `
     --runtime win-x64 `
     --self-contained true `
     --property:PublishProfile=Windows-x64 `
+    --property:NuGetLockFilePath=obj\packages.publish-win-x64.lock.json `
+    --property:RestoreForceEvaluate=true `
     --output $publishOutputPath
 
 if ($LASTEXITCODE -ne 0) {

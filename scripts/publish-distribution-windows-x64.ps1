@@ -24,6 +24,8 @@ dotnet publish $desktopProject `
     --runtime win-x64 `
     --self-contained true `
     --property:PublishProfile=Windows-x64 `
+    --property:NuGetLockFilePath=obj\packages.publish-win-x64.lock.json `
+    --property:RestoreForceEvaluate=true `
     --output $distributionOutputPath
 
 if ($LASTEXITCODE -ne 0) {
@@ -36,6 +38,8 @@ dotnet publish $mcpProject `
     --runtime win-x64 `
     --self-contained true `
     --property:PublishProfile=win-x64 `
+    --property:NuGetLockFilePath=obj\packages.publish-win-x64.lock.json `
+    --property:RestoreForceEvaluate=true `
     --output $distributionOutputPath
 
 if ($LASTEXITCODE -ne 0) {
