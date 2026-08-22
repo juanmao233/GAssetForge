@@ -1,0 +1,36 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.8.34330.188
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GAssetForge.Core", "src\GAssetForge.Core\GAssetForge.Core.csproj", "{4756794D-21A5-4D2D-9DF9-91C47C03FB0F}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GAssetForge.App", "src\GAssetForge.App\GAssetForge.App.csproj", "{FC293158-54DD-4AA4-A7D1-FE124269665D}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GAssetForge.McpServer", "src\GAssetForge.McpServer\GAssetForge.McpServer.csproj", "{B9FBE423-0A9E-4D90-A7EC-D4D1CB510190}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GAssetForge.SmokeTests", "tests\GAssetForge.SmokeTests\GAssetForge.SmokeTests.csproj", "{A2F47BB5-51B4-4D98-96AD-761E8FB79A50}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{4756794D-21A5-4D2D-9DF9-91C47C03FB0F}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{4756794D-21A5-4D2D-9DF9-91C47C03FB0F}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{4756794D-21A5-4D2D-9DF9-91C47C03FB0F}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{4756794D-21A5-4D2D-9DF9-91C47C03FB0F}.Release|Any CPU.Build.0 = Release|Any CPU
+		{FC293158-54DD-4AA4-A7D1-FE124269665D}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{FC293158-54DD-4AA4-A7D1-FE124269665D}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{FC293158-54DD-4AA4-A7D1-FE124269665D}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{FC293158-54DD-4AA4-A7D1-FE124269665D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{B9FBE423-0A9E-4D90-A7EC-D4D1CB510190}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{B9FBE423-0A9E-4D90-A7EC-D4D1CB510190}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{B9FBE423-0A9E-4D90-A7EC-D4D1CB510190}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{B9FBE423-0A9E-4D90-A7EC-D4D1CB510190}.Release|Any CPU.Build.0 = Release|Any CPU
+		{A2F47BB5-51B4-4D98-96AD-761E8FB79A50}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{A2F47BB5-51B4-4D98-96AD-761E8FB79A50}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{A2F47BB5-51B4-4D98-96AD-761E8FB79A50}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{A2F47BB5-51B4-4D98-96AD-761E8FB79A50}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+EndGlobal

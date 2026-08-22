@@ -1,0 +1,164 @@
+<UserControl x:Class="GAssetForge.App.Views.LayersView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             MinWidth="230">
+    <UserControl.Resources>
+        <HierarchicalDataTemplate x:Key="LayerTemplate" ItemsSource="{Binding Children}">
+            <Grid Height="30" Background="Transparent">
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="22" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="28" />
+                    <ColumnDefinition Width="28" />
+                </Grid.ColumnDefinitions>
+
+                <TextBlock FontFamily="Segoe MDL2 Assets"
+                           FontSize="13"
+                           Foreground="{DynamicResource App.TextMutedBrush}"
+                           HorizontalAlignment="Center"
+                           VerticalAlignment="Center">
+                    <TextBlock.Style>
+                        <Style TargetType="TextBlock">
+                            <Setter Property="Text" Value="&#xE81E;" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsGroup}" Value="True">
+                                    <Setter Property="Text" Value="&#xE8B7;" />
+                                    <Setter Property="Foreground" Value="{DynamicResource App.AccentBrush}" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding IsText}" Value="True">
+                                    <Setter Property="Text" Value="&#xE8D2;" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
+
+                <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+                    <TextBlock Text="{Binding Name}"
+                               Foreground="{DynamicResource App.TextPrimaryBrush}"
+                               FontSize="12"
+                               TextTrimming="CharacterEllipsis"
+                               VerticalAlignment="Center" />
+                    <TextBlock Margin="6,0,0,0"
+                               Text="{Binding TypeLabel}"
+                               Foreground="{DynamicResource App.TextMutedBrush}"
+                               FontSize="9"
+                               VerticalAlignment="Center" />
+                </StackPanel>
+
+                <CheckBox Grid.Column="2"
+                          IsChecked="{Binding IsVisible, UpdateSourceTrigger=PropertyChanged}"
+                          ToolTip="显示 / 隐藏图层"
+                          HorizontalAlignment="Center"
+                          VerticalAlignment="Center">
+                    <TextBlock Text="&#xE890;"
+                               FontFamily="Segoe MDL2 Assets"
+                               FontSize="12"
+                               Foreground="{DynamicResource App.TextSecondaryBrush}" />
+                </CheckBox>
+                <CheckBox Grid.Column="3"
+                          IsChecked="{Binding IsLocked, UpdateSourceTrigger=PropertyChanged}"
+                          ToolTip="锁定 / 解锁图层"
+                          HorizontalAlignment="Center"
+                          VerticalAlignment="Center">
+                    <TextBlock Text="&#xE72E;"
+                               FontFamily="Segoe MDL2 Assets"
+                               FontSize="12"
+                               Foreground="{DynamicResource App.TextSecondaryBrush}" />
+                </CheckBox>
+            </Grid>
+        </HierarchicalDataTemplate>
+    </UserControl.Resources>
+
+    <Grid Background="{DynamicResource App.SurfaceBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <Border Padding="12,10"
+                BorderBrush="{DynamicResource App.BorderBrush}"
+                BorderThickness="0,0,0,1">
+            <Grid>
+                <TextBlock Text="图层"
+                           Foreground="{DynamicResource App.TextPrimaryBrush}"
+                           FontWeight="SemiBold" />
+                <TextBlock Text="{Binding LayerCountText}"
+                           Foreground="{DynamicResource App.TextMutedBrush}"
+                           FontSize="10"
+                           HorizontalAlignment="Right"
+                           VerticalAlignment="Center" />
+            </Grid>
+        </Border>
+
+        <Border Grid.Row="1" Padding="8"
+                BorderBrush="{DynamicResource App.BorderBrush}"
+                BorderThickness="0,0,0,1">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                    <ColumnDefinition Width="Auto" />
+                </Grid.ColumnDefinitions>
+                <Button Height="28"
+                        Padding="9,0"
+                        HorizontalAlignment="Left"
+                        Command="{Binding NewLayerCommand}"
+                        Style="{DynamicResource App.ToolbarButtonStyle}">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="＋" FontSize="14" />
+                        <TextBlock Margin="4,0,0,0" Text="新建图层" />
+                    </StackPanel>
+                </Button>
+                <Button Grid.Column="1" Width="30" Height="28" Margin="4,0,0,0"
+                        Command="{Binding NewFolderCommand}"
+                        Content="&#xE8B7;"
+                        FontFamily="Segoe MDL2 Assets"
+                        Style="{DynamicResource App.IconButtonStyle}"
+                        ToolTip="新建图层文件夹" />
+                <Button Grid.Column="2" Width="30" Height="28" Margin="4,0,0,0"
+                        Command="{Binding DeleteSelectedCommand}"
+                        Content="&#xE74D;"
+                        FontFamily="Segoe MDL2 Assets"
+                        Style="{DynamicResource App.IconButtonStyle}"
+                        ToolTip="删除所选图层" />
+            </Grid>
+        </Border>
+
+        <TreeView x:Name="LayersTree"
+                  Grid.Row="2"
+                  AllowDrop="True"
+                  Padding="4,6"
+                  Background="Transparent"
+                  BorderThickness="0"
+                  ItemsSource="{Binding LayerRoots}"
+                  ItemTemplate="{StaticResource LayerTemplate}"
+                  SelectedItemChanged="LayersTree_OnSelectedItemChanged"
+                  PreviewMouseLeftButtonDown="LayersTree_OnPreviewMouseLeftButtonDown"
+                  PreviewMouseMove="LayersTree_OnPreviewMouseMove"
+                  PreviewDragOver="LayersTree_OnPreviewDragOver"
+                  PreviewDrop="LayersTree_OnPreviewDrop"
+                  ScrollViewer.HorizontalScrollBarVisibility="Auto"
+                  ScrollViewer.VerticalScrollBarVisibility="Auto">
+            <TreeView.ItemContainerStyle>
+                <Style TargetType="TreeViewItem">
+                    <Setter Property="IsExpanded" Value="{Binding IsExpanded, Mode=TwoWay}" />
+                    <Setter Property="Foreground" Value="{DynamicResource App.TextPrimaryBrush}" />
+                    <Setter Property="Padding" Value="1" />
+                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                </Style>
+            </TreeView.ItemContainerStyle>
+        </TreeView>
+
+        <Border Grid.Row="3" Padding="10,7"
+                BorderBrush="{DynamicResource App.BorderBrush}"
+                BorderThickness="0,1,0,0">
+            <TextBlock Text="拖到文件夹内归组 · 拖到图层前排序 · Shift 拖到文件夹前排序"
+                       Foreground="{DynamicResource App.TextMutedBrush}"
+                       FontSize="9"
+                       TextWrapping="Wrap" />
+        </Border>
+    </Grid>
+</UserControl>

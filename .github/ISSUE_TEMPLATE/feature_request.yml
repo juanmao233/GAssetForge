@@ -1,0 +1,24 @@
+name: Feature request
+description: Propose a workflow or tooling improvement
+title: "[Feature]: "
+labels: [needs-triage]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem to solve
+      description: Describe the art-production problem, not only the desired UI.
+    validations:
+      required: true
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Proposed workflow
+      description: Explain inputs, deterministic local steps, Agent/model steps, and expected outputs.
+    validations:
+      required: true
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility or migration concerns
+      description: Mention project schema, task queue, MCP, output folders, or existing assets if relevant.

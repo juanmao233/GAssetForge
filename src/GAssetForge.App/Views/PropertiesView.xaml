@@ -1,0 +1,238 @@
+<UserControl x:Class="GAssetForge.App.Views.PropertiesView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             MinWidth="230">
+    <UserControl.Resources>
+        <Style x:Key="PropertySectionStyle" TargetType="Border">
+            <Setter Property="Padding" Value="12" />
+            <Setter Property="BorderBrush" Value="{DynamicResource App.BorderBrush}" />
+            <Setter Property="BorderThickness" Value="0,0,0,1" />
+        </Style>
+        <Style x:Key="PropertyLabelStyle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource App.TextMutedBrush}" />
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+    </UserControl.Resources>
+
+    <Grid Background="{DynamicResource App.SurfaceBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Border Padding="12,10"
+                BorderBrush="{DynamicResource App.BorderBrush}"
+                BorderThickness="0,0,0,1">
+            <Grid>
+                <TextBlock Text="属性"
+                           Foreground="{DynamicResource App.TextPrimaryBrush}"
+                           FontWeight="SemiBold" />
+                <TextBlock Text="{Binding SelectedLayerType}"
+                           Foreground="{DynamicResource App.TextMutedBrush}"
+                           FontSize="10"
+                           HorizontalAlignment="Right"
+                           VerticalAlignment="Center" />
+            </Grid>
+        </Border>
+
+        <Grid Grid.Row="1">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <ContentControl Content="{Binding SelectedLayer}">
+                    <ContentControl.ContentTemplate>
+                        <DataTemplate>
+                            <StackPanel>
+                                <Border Style="{StaticResource PropertySectionStyle}">
+                                    <StackPanel>
+                                        <TextBlock Text="图层"
+                                                   Foreground="{DynamicResource App.TextPrimaryBrush}"
+                                                   FontWeight="SemiBold"
+                                                   FontSize="12" />
+                                        <TextBlock Margin="0,10,0,4" Text="名称"
+                                                   Style="{StaticResource PropertyLabelStyle}" />
+                                        <TextBox Text="{Binding Name, UpdateSourceTrigger=LostFocus}"
+                                                 IsEnabled="{Binding IsEditable}"
+                                                 Style="{DynamicResource App.TextBoxStyle}" />
+                                        <Grid Margin="0,10,0,0">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <CheckBox IsChecked="{Binding IsVisible}"
+                                                      Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                                      Content="可见" />
+                                            <CheckBox Grid.Column="1"
+                                                      IsChecked="{Binding IsLocked}"
+                                                      Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                                      Content="锁定" />
+                                        </Grid>
+                                    </StackPanel>
+                                </Border>
+
+                                <Border IsEnabled="{Binding IsEditable}">
+                                    <Border.Style>
+                                        <Style TargetType="Border" BasedOn="{StaticResource PropertySectionStyle}">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsDrawable}" Value="False">
+                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Border.Style>
+                                    <StackPanel>
+                                        <TextBlock Text="变换"
+                                                   Foreground="{DynamicResource App.TextPrimaryBrush}"
+                                                   FontWeight="SemiBold"
+                                                   FontSize="12" />
+                                        <Grid Margin="0,10,0,0">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="22" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="12" />
+                                                <ColumnDefinition Width="22" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="X" Style="{StaticResource PropertyLabelStyle}" />
+                                            <TextBox Grid.Column="1"
+                                                     Text="{Binding X, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.##}}"
+                                                     Style="{DynamicResource App.TextBoxStyle}" />
+                                            <TextBlock Grid.Column="3" Text="Y" Style="{StaticResource PropertyLabelStyle}" />
+                                            <TextBox Grid.Column="4"
+                                                     Text="{Binding Y, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.##}}"
+                                                     Style="{DynamicResource App.TextBoxStyle}" />
+                                        </Grid>
+                                        <Grid Margin="0,8,0,0">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="22" />
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="12" />
+                                                <ColumnDefinition Width="22" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="W" Style="{StaticResource PropertyLabelStyle}" />
+                                            <TextBox Grid.Column="1"
+                                                     Text="{Binding Width, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.##}}"
+                                                     Style="{DynamicResource App.TextBoxStyle}" />
+                                            <TextBlock Grid.Column="3" Text="H" Style="{StaticResource PropertyLabelStyle}" />
+                                            <TextBox Grid.Column="4"
+                                                     Text="{Binding Height, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.##}}"
+                                                     Style="{DynamicResource App.TextBoxStyle}" />
+                                        </Grid>
+                                    </StackPanel>
+                                </Border>
+
+                                <Border Style="{StaticResource PropertySectionStyle}"
+                                        IsEnabled="{Binding IsEditable}">
+                                    <StackPanel>
+                                        <TextBlock Text="外观"
+                                                   Foreground="{DynamicResource App.TextPrimaryBrush}"
+                                                   FontWeight="SemiBold"
+                                                   FontSize="12" />
+                                        <Grid Margin="0,10,0,0">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="74" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="透明度" Style="{StaticResource PropertyLabelStyle}" />
+                                            <Grid Grid.Column="1">
+                                                <Grid.ColumnDefinitions>
+                                                    <ColumnDefinition Width="*" />
+                                                    <ColumnDefinition Width="52" />
+                                                </Grid.ColumnDefinitions>
+                                                <Slider Minimum="0" Maximum="100"
+                                                        Value="{Binding OpacityPercent}"
+                                                        VerticalAlignment="Center" />
+                                                <TextBox Grid.Column="1" Margin="6,0,0,0"
+                                                         Text="{Binding OpacityPercent, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0}}"
+                                                         Style="{DynamicResource App.TextBoxStyle}" />
+                                            </Grid>
+                                        </Grid>
+                                        <Grid Margin="0,8,0,0">
+                                            <Grid.Style>
+                                                <Style TargetType="Grid">
+                                                    <Setter Property="Visibility" Value="Visible" />
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding IsDrawable}" Value="False">
+                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Grid.Style>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="74" />
+                                                <ColumnDefinition Width="*" />
+                                            </Grid.ColumnDefinitions>
+                                            <TextBlock Text="圆角" Style="{StaticResource PropertyLabelStyle}" />
+                                            <TextBox Grid.Column="1"
+                                                     Text="{Binding Radius, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.##}}"
+                                                     Style="{DynamicResource App.TextBoxStyle}" />
+                                        </Grid>
+                                    </StackPanel>
+                                </Border>
+
+                                <Border IsEnabled="{Binding IsEditable}">
+                                    <Border.Style>
+                                        <Style TargetType="Border" BasedOn="{StaticResource PropertySectionStyle}">
+                                            <Setter Property="Visibility" Value="Collapsed" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding IsText}" Value="True">
+                                                    <Setter Property="Visibility" Value="Visible" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </Border.Style>
+                                    <StackPanel>
+                                        <TextBlock Text="文字"
+                                                   Foreground="{DynamicResource App.TextPrimaryBrush}"
+                                                   FontWeight="SemiBold"
+                                                   FontSize="12" />
+                                        <TextBox Margin="0,10,0,0"
+                                                 MinHeight="70"
+                                                 AcceptsReturn="True"
+                                                 TextWrapping="Wrap"
+                                                 VerticalScrollBarVisibility="Auto"
+                                                 Text="{Binding TextValue, UpdateSourceTrigger=LostFocus}"
+                                                 Style="{DynamicResource App.TextBoxStyle}" />
+                                    </StackPanel>
+                                </Border>
+
+                                <Border Margin="12" Padding="10"
+                                        Background="{DynamicResource App.SurfaceRaisedBrush}"
+                                        CornerRadius="5">
+                                    <StackPanel>
+                                        <TextBlock Text="组件类型"
+                                                   Foreground="{DynamicResource App.TextMutedBrush}"
+                                                   FontSize="10" />
+                                        <TextBlock Margin="0,3,0,0"
+                                                   Text="{Binding ComponentType}"
+                                                   Foreground="{DynamicResource App.TextSecondaryBrush}" />
+                                    </StackPanel>
+                                </Border>
+                            </StackPanel>
+                        </DataTemplate>
+                    </ContentControl.ContentTemplate>
+                </ContentControl>
+            </ScrollViewer>
+
+            <TextBlock Text="在画布或图层面板中选择一个图层"
+                       Foreground="{DynamicResource App.TextMutedBrush}"
+                       TextAlignment="Center"
+                       TextWrapping="Wrap"
+                       Margin="28"
+                       HorizontalAlignment="Center"
+                       VerticalAlignment="Center">
+                <TextBlock.Style>
+                    <Style TargetType="TextBlock">
+                        <Setter Property="Visibility" Value="Collapsed" />
+                        <Style.Triggers>
+                            <DataTrigger Binding="{Binding HasSelectedLayer}" Value="False">
+                                <Setter Property="Visibility" Value="Visible" />
+                            </DataTrigger>
+                        </Style.Triggers>
+                    </Style>
+                </TextBlock.Style>
+            </TextBlock>
+        </Grid>
+    </Grid>
+</UserControl>

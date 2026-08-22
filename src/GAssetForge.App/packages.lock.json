@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "dependencies": {
+    "net8.0-windows7.0": {
+      "Dirkster.AvalonDock": {
+        "type": "Direct",
+        "requested": "[4.74.1, )",
+        "resolved": "4.74.1",
+        "contentHash": "Wf3tjZmN8cjepp5m3dlI68TzDGBnkbxLmbdGD4BkgmbpTPHC0SUSiCTI/BY55KFwWXov714DDbebSCUnl2w97Q=="
+      },
+      "Dirkster.AvalonDock.Themes.VS2013": {
+        "type": "Direct",
+        "requested": "[4.74.1, )",
+        "resolved": "4.74.1",
+        "contentHash": "CDEvJeUM10m96BnffmqkjEKb8ipgHlimkrSyxAhHyer/v03rBU3h/NoB9UI/vUv3NqsJKl3Yof8XsgSkU0cvvA==",
+        "dependencies": {
+          "Dirkster.AvalonDock": "4.74.1"
+        }
+      },
+      "Microsoft.NET.ILLink.Tasks": {
+        "type": "Direct",
+        "requested": "[8.0.1, )",
+        "resolved": "8.0.1",
+        "contentHash": "ADdJXuKNjwZDfBmybMnpvwd5CK3gp92WkWqqeQhW4W+q4MO3Qaa9QyW2DcFLAvCDMcCWxT5hRXqGdv13oon7nA=="
+      },
+      "SixLabors.ImageSharp": {
+        "type": "Transitive",
+        "resolved": "3.1.12",
+        "contentHash": "iAg6zifihXEFS/t7fiHhZBGAdCp3FavsF4i2ZIDp0JfeYeDVzvmlbY1CNhhIKimaIzrzSi5M/NBFcWvZT2rB/A=="
+      },
+      "gassetforge.core": {
+        "type": "Project",
+        "dependencies": {
+          "SixLabors.ImageSharp": "[3.1.12, )"
+        }
+      }
+    },
+    "net8.0-windows7.0/win-x64": {}
+  }
+}

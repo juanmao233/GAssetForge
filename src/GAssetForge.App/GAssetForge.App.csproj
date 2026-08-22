@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+    <RootNamespace>GAssetForge.App</RootNamespace>
+    <AssemblyName>GAssetForge</AssemblyName>
+    <Title>GAssetForge</Title>
+    <Product>GAssetForge 游戏美术资产生成工作台</Product>
+    <Description>面向游戏美术资产制作的透视约束、工作流编排与 AI 生成桌面工具。</Description>
+    <Company>GAssetForge</Company>
+    <Authors>GAssetForge</Authors>
+    <Copyright>Copyright © GAssetForge 2026</Copyright>
+    <NeutralLanguage>zh-CN</NeutralLanguage>
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+    <InformationalVersion>1.0.0</InformationalVersion>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\GAssetForge.Core\GAssetForge.Core.csproj" />
+    <PackageReference Include="Dirkster.AvalonDock" Version="4.74.1" />
+    <PackageReference Include="Dirkster.AvalonDock.Themes.VS2013" Version="4.74.1" />
+  </ItemGroup>
+</Project>

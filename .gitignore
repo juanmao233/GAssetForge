@@ -1,0 +1,49 @@
+# .NET build and publish output
+**/bin/
+**/obj/
+dist/
+artifacts/
+TestResults/
+coverage/
+*.coverage
+*.coveragexml
+*.trx
+
+# IDE and editor state
+.vs/
+.idea/
+.vscode/
+*.user
+*.suo
+*.rsuser
+*.userosscache
+*.sln.docstates
+
+# Local logs, crash dumps and temporary work
+*.log
+*.dmp
+*.tmp
+*.temp
+tmp/
+output/
+
+# Local app/project data accidentally created in the repository
+/Assets/
+/Generation/
+/Projects/
+/Settings/
+/Workspace/
+/Packages/
+/ProjectSettings/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+mcp-config.json
+*.local.json
+
+# OS metadata
+Thumbs.db
+Desktop.ini
+.DS_Store

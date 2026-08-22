@@ -1,0 +1,79 @@
+<ResourceDictionary
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+
+    <Color x:Key="Color.WindowBackground">#EEF1F5</Color>
+    <Color x:Key="Color.Surface">#FAFBFC</Color>
+    <Color x:Key="Color.SurfaceAlt">#E5EAF0</Color>
+    <Color x:Key="Color.SurfaceHover">#D8E0E9</Color>
+    <Color x:Key="Color.Border">#CCD3DC</Color>
+    <Color x:Key="Color.BorderStrong">#A9B4C1</Color>
+    <Color x:Key="Color.TextPrimary">#202631</Color>
+    <Color x:Key="Color.TextSecondary">#536070</Color>
+    <Color x:Key="Color.TextMuted">#7D8998</Color>
+    <Color x:Key="Color.Accent">#287DCE</Color>
+    <Color x:Key="Color.AccentHover">#176DBD</Color>
+    <Color x:Key="Color.AccentPressed">#0F5C9F</Color>
+    <Color x:Key="Color.Selection">#C9E1F8</Color>
+    <Color x:Key="Color.CanvasBackground">#D8DDE4</Color>
+    <Color x:Key="Color.InputBackground">#FFFFFF</Color>
+    <Color x:Key="Color.Danger">#C94249</Color>
+    <Color x:Key="Color.Success">#25865C</Color>
+    <Color x:Key="Color.Warning">#A96D12</Color>
+    <Color x:Key="Color.Overlay">#9E1D2632</Color>
+    <Color x:Key="Color.TilemapGridBackground">#D9DEE5</Color>
+    <Color x:Key="Color.TilemapMinorGrid">#C8CED6</Color>
+    <Color x:Key="Color.TilemapMajorGrid">#ADB7C2</Color>
+    <Color x:Key="Color.TilemapXAxis">#C95555</Color>
+    <Color x:Key="Color.TilemapYAxis">#378C5B</Color>
+    <Color x:Key="Color.TilemapGuide">#178E87</Color>
+    <Color x:Key="Color.TilemapHoverCell">#3053D4C8</Color>
+    <Color x:Key="Color.TilemapOverlay">#EBFAFBFC</Color>
+
+    <SolidColorBrush x:Key="App.BackgroundBrush" Color="{StaticResource Color.WindowBackground}" />
+    <SolidColorBrush x:Key="App.SurfaceBrush" Color="{StaticResource Color.Surface}" />
+    <SolidColorBrush x:Key="App.SurfaceRaisedBrush" Color="{StaticResource Color.SurfaceAlt}" />
+    <SolidColorBrush x:Key="App.SurfaceHoverBrush" Color="{StaticResource Color.SurfaceHover}" />
+    <SolidColorBrush x:Key="App.BorderBrush" Color="{StaticResource Color.Border}" />
+    <SolidColorBrush x:Key="App.BorderStrongBrush" Color="{StaticResource Color.BorderStrong}" />
+    <SolidColorBrush x:Key="App.TextPrimaryBrush" Color="{StaticResource Color.TextPrimary}" />
+    <SolidColorBrush x:Key="App.TextSecondaryBrush" Color="{StaticResource Color.TextSecondary}" />
+    <SolidColorBrush x:Key="App.TextMutedBrush" Color="{StaticResource Color.TextMuted}" />
+    <SolidColorBrush x:Key="App.AccentBrush" Color="{StaticResource Color.Accent}" />
+    <SolidColorBrush x:Key="App.AccentHoverBrush" Color="{StaticResource Color.AccentHover}" />
+    <SolidColorBrush x:Key="App.AccentPressedBrush" Color="{StaticResource Color.AccentPressed}" />
+    <SolidColorBrush x:Key="App.SelectionBrush" Color="{StaticResource Color.Selection}" />
+    <SolidColorBrush x:Key="App.CanvasBackgroundBrush" Color="{StaticResource Color.CanvasBackground}" />
+    <SolidColorBrush x:Key="App.InputBackgroundBrush" Color="{StaticResource Color.InputBackground}" />
+    <SolidColorBrush x:Key="App.DangerBrush" Color="{StaticResource Color.Danger}" />
+    <SolidColorBrush x:Key="App.SuccessBrush" Color="{StaticResource Color.Success}" />
+    <SolidColorBrush x:Key="App.WarningBrush" Color="{StaticResource Color.Warning}" />
+    <SolidColorBrush x:Key="App.OverlayBrush" Color="{StaticResource Color.Overlay}" />
+    <SolidColorBrush x:Key="App.TilemapGridBackgroundBrush" Color="{StaticResource Color.TilemapGridBackground}" />
+    <SolidColorBrush x:Key="App.TilemapMinorGridBrush" Color="{StaticResource Color.TilemapMinorGrid}" />
+    <SolidColorBrush x:Key="App.TilemapMajorGridBrush" Color="{StaticResource Color.TilemapMajorGrid}" />
+    <SolidColorBrush x:Key="App.TilemapXAxisBrush" Color="{StaticResource Color.TilemapXAxis}" />
+    <SolidColorBrush x:Key="App.TilemapYAxisBrush" Color="{StaticResource Color.TilemapYAxis}" />
+    <SolidColorBrush x:Key="App.TilemapGuideBrush" Color="{StaticResource Color.TilemapGuide}" />
+    <SolidColorBrush x:Key="App.TilemapHoverCellBrush" Color="{StaticResource Color.TilemapHoverCell}" />
+    <SolidColorBrush x:Key="App.TilemapOverlayBrush" Color="{StaticResource Color.TilemapOverlay}" />
+
+    <!-- Theme the popup chrome used by the stock WPF Menu and ComboBox templates. -->
+    <SolidColorBrush x:Key="{x:Static SystemColors.MenuBrushKey}" Color="{StaticResource Color.SurfaceAlt}" />
+    <SolidColorBrush x:Key="{x:Static SystemColors.MenuTextBrushKey}" Color="{StaticResource Color.TextPrimary}" />
+    <SolidColorBrush x:Key="{x:Static SystemColors.WindowBrushKey}" Color="{StaticResource Color.InputBackground}" />
+    <SolidColorBrush x:Key="{x:Static SystemColors.WindowTextBrushKey}" Color="{StaticResource Color.TextPrimary}" />
+    <SolidColorBrush x:Key="{x:Static SystemColors.ControlTextBrushKey}" Color="{StaticResource Color.TextPrimary}" />
+    <SolidColorBrush x:Key="{x:Static SystemColors.HighlightBrushKey}" Color="{StaticResource Color.Selection}" />
+    <SolidColorBrush x:Key="{x:Static SystemColors.HighlightTextBrushKey}" Color="{StaticResource Color.TextPrimary}" />
+
+    <!-- Stable short aliases used by the desktop shell. -->
+    <SolidColorBrush x:Key="WindowBackgroundBrush" Color="{StaticResource Color.WindowBackground}" />
+    <SolidColorBrush x:Key="SurfaceBrush" Color="{StaticResource Color.Surface}" />
+    <SolidColorBrush x:Key="SurfaceAltBrush" Color="{StaticResource Color.SurfaceAlt}" />
+    <SolidColorBrush x:Key="BorderBrush" Color="{StaticResource Color.Border}" />
+    <SolidColorBrush x:Key="TextPrimaryBrush" Color="{StaticResource Color.TextPrimary}" />
+    <SolidColorBrush x:Key="TextSecondaryBrush" Color="{StaticResource Color.TextSecondary}" />
+    <SolidColorBrush x:Key="AccentBrush" Color="{StaticResource Color.Accent}" />
+    <SolidColorBrush x:Key="DangerBrush" Color="{StaticResource Color.Danger}" />
+</ResourceDictionary>

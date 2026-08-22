@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "gasset-forge": {
+      "command": "D:\\Absolute\\Path\\GAssetForge.McpServer.exe",
+      "args": []
+    }
+  }
+}
