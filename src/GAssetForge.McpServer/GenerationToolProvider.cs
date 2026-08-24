@@ -1,4 +1,5 @@
 using System.Text.Json;
+using GAssetForge.Core;
 using GAssetForge.Core.Generation;
 
 namespace GAssetForge.McpServer;
@@ -229,7 +230,7 @@ internal sealed class GenerationToolProvider(
         return Task.FromResult<object?>(new
         {
             name = "GAssetForge",
-            version = "1.0.0",
+            version = ProductIdentity.GetAssemblyInformationalVersion(typeof(GenerationToolProvider).Assembly),
             transport = options.UsesHttp
                 ? "streamable-http-jsonrpc-2.0"
                 : "stdio-jsonrpc-2.0-line-delimited",

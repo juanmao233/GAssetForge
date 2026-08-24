@@ -200,7 +200,8 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
                             {
                                 name = "GAssetForge",
                                 title = "GAssetForge",
-                                version = "1.0.0"
+                                version = ProductIdentity.GetAssemblyInformationalVersion(
+                                    typeof(CodexAppServerTransport).Assembly)
                             },
                             capabilities = new
                             {

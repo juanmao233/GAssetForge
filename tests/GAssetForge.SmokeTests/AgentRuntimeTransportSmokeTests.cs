@@ -6,6 +6,7 @@ using System.Text.Json;
 using System.Threading.Channels;
 using GAssetForge.App.Services;
 using GAssetForge.App.Services.AgentRuntime;
+using GAssetForge.Core;
 
 namespace GAssetForge.SmokeTests;
 
@@ -221,7 +222,7 @@ internal static class AgentRuntimeTransportSmokeTests
                 "initialize clientInfo.name");
             Equal("GAssetForge", clientInfo.GetProperty("title").GetString(),
                 "initialize clientInfo.title");
-            Equal("1.0.0", clientInfo.GetProperty("version").GetString(),
+            Equal(ProductIdentity.InformationalVersion, clientInfo.GetProperty("version").GetString(),
                 "initialize clientInfo.version");
             var capabilities = parameters.GetProperty("capabilities");
             False(capabilities.GetProperty("experimentalApi").GetBoolean(),

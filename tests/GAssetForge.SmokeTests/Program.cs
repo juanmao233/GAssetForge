@@ -62,6 +62,8 @@ internal static class Program
             Console.WriteLine("PASS  Tilemap 0° 使用水平/垂直屏幕坐标基准，45° 再整体顺时针旋转");
             ProductIdentityCompatibilitySmokeTests.Run();
             Console.WriteLine("PASS  GAssetForge 新标识与旧数据、项目、MCP 和调度身份兼容");
+            ReleaseVersionConsistencySmokeTests.RunAsync(_temporaryRoot).GetAwaiter().GetResult();
+            Console.WriteLine("PASS  server_info、MCP initialize 与 EXE ProductVersion 使用同一正式程序集版本");
             DefaultDockLayoutHasStableTopology();
             Console.WriteLine("PASS  默认停靠布局包含可中央标签化的工具页、可关闭主视图及顶部标签拓扑");
             DockPanelsFloatHideAndRestoreFromViewMenu();
@@ -76,10 +78,10 @@ internal static class Program
             Console.WriteLine("PASS  浮动与隐藏面板状态可随 AvalonDock 布局持久化恢复");
             ThemeSwitchUpdatesWpfAndAvalonDockResources();
             Console.WriteLine("PASS  暗亮主题同步切换 WPF 与 AvalonDock 资源");
-            FiveWorkflowsSwitchAndGateUiCommands();
-            Console.WriteLine("PASS  五工作流可切换且 Tilemap 使用独立工作区");
+            BusinessWorkspaceContextsSwitchAndGateUiCommands();
+            Console.WriteLine("PASS  四个正式业务窗口可共存且活动标签正确切换侧栏上下文");
             NewProjectFlowCreatesIsolatedUnityStyleWorkspace();
-            Console.WriteLine("PASS  文件菜单新建项目可创建独立目录、切换业务并恢复当前项目");
+            Console.WriteLine("PASS  新建项目可创建独立目录并只聚焦初始业务窗口，不替换共享项目环境");
             ProjectWorkspaceRecoversBackupsAndKeepsLockedAssetBoundary();
             Console.WriteLine("PASS  正式项目可从损坏主文件恢复并在 Assets 丢失时保持项目边界");
             TilemapWorkflowShowsParameterizedDiamondGrid();
@@ -107,7 +109,7 @@ internal static class Program
             AssetGenerationRunsImmutableMcpDeliveryAndRejectsInvalidRasterOutputs();
             Console.WriteLine("PASS  素材生成经真实 MCP 握手完成风格快照、固定交付与透明 PNG 校验闭环");
             McpAgentConnectionDockPanelBindsProfilesAndPersistsSettings();
-            Console.WriteLine("PASS  MCP 顶部菜单、Agent 停靠面板、Codex/OpenCode 配置与即时持久化可用");
+            Console.WriteLine("PASS  MCP Agent 接入已合并到视图菜单且停靠、配置与持久化可用");
             McpServerProcessServiceRunsHttpHandshakeAndStopsCleanly();
             Console.WriteLine("PASS  桌面 MCP 服务可启动真实 HTTP 子进程、握手、列出工具并可靠停止");
             McpBearerAuthenticationSmokeTests.Run();
@@ -163,7 +165,7 @@ internal static class Program
             ProjectValidatorRejectsDuplicateLayerMounts();
             Console.WriteLine("PASS  项目校验拒绝重复挂载的图层引用");
             AvalonDockLayoutSaveRestoreRoundTripsByContentId();
-            Console.WriteLine("PASS  AvalonDock 布局可按 ContentId 往返并从备份恢复");
+            Console.WriteLine("PASS  AvalonDock 多业务文档布局可按 ContentId 往返、保留关闭状态并从备份恢复");
             DarkThemePopupItemsKeepReadableContrast();
             Console.WriteLine("PASS  暗色主题菜单与 Agent 下拉项在弹出层保持可读对比度");
             return 0;
@@ -389,6 +391,7 @@ internal static class Program
             var manager = window.FindName("DockManager") as DockingManager
                 ?? throw new SmokeTestException("MainWindow 未暴露名为 DockManager 的 AvalonDock 容器。");
             AssertDefaultTopology(manager);
+            AssertBusinessDocumentViews(manager);
             AssertAnchorableTabsUseTopHeaders(window, manager);
         }
         finally
@@ -475,15 +478,11 @@ internal static class Program
                 "视图菜单缺少工具面板项。");
             RecordFailure(() => AssertPopupItemContrast(viewMenu, showToolsMenuItem, "视图菜单项"));
 
-            var mcpMenu = RequireNamedElement<MenuItem>(
+            var agentMenuItem = RequireNamedElement<MenuItem>(
                 mainWindow,
-                "McpAccessMenu",
-                "顶部菜单缺少 MCP 接入入口。");
-            var addAgentMenuItem = RequireNamedElement<MenuItem>(
-                mainWindow,
-                "AddAgentConnectionMenuItem",
-                "MCP 接入菜单缺少打开 Agent 连接面板项。");
-            RecordFailure(() => AssertPopupItemContrast(mcpMenu, addAgentMenuItem, "MCP 接入菜单项"));
+                "ShowAgentConnectionMenuItem",
+                "视图菜单缺少 MCP Agent 接入项。");
+            RecordFailure(() => AssertPopupItemContrast(viewMenu, agentMenuItem, "MCP Agent 接入菜单项"));
 
             var agentSelector = new ComboBox
             {
@@ -640,7 +639,6 @@ internal static class Program
             var menuEntries = new[]
             {
                 (Name: "ShowToolsMenuItem", ContentId: MainWindow.ToolsContentId),
-                (Name: "ShowCanvasMenuItem", ContentId: MainWindow.CanvasContentId),
                 (Name: "ShowPropertiesMenuItem", ContentId: MainWindow.PropertiesContentId),
                 (Name: "ShowLayersMenuItem", ContentId: MainWindow.LayersContentId),
                 (Name: "ShowProjectMenuItem", ContentId: MainWindow.ProjectContentId)
@@ -652,6 +650,25 @@ internal static class Program
                 menuItem.GetBindingExpression(MenuItem.CommandProperty)?.UpdateTarget();
                 True(ReferenceEquals(shell.ShowPanelCommand, menuItem.Command),
                     $"{entry.Name} 应绑定 ShowPanelCommand");
+                Equal(entry.ContentId, menuItem.CommandParameter as string,
+                    $"{entry.Name} 的 ContentId");
+            }
+
+            var workflowMenuEntries = new[]
+            {
+                (Name: "ShowUiWorkspaceMenuItem", ContentId: MainWindow.CanvasContentId),
+                (Name: "ShowTilemapWorkspaceMenuItem", ContentId: MainWindow.TilemapWorkspaceContentId),
+                (Name: "ShowCardDesignWorkspaceMenuItem", ContentId: MainWindow.CardDesignWorkspaceContentId),
+                (Name: "ShowParallelPerspectiveWorkspaceMenuItem", ContentId: MainWindow.ParallelPerspectiveWorkspaceContentId)
+            };
+            foreach (var entry in workflowMenuEntries)
+            {
+                var menuItem = window.FindName(entry.Name) as MenuItem
+                    ?? throw new SmokeTestException($"视图菜单缺少 {entry.Name}。");
+                menuItem.GetBindingExpression(MenuItem.CommandProperty)?.UpdateTarget();
+                True(menuItem.IsCheckable, $"{entry.Name} 应显示业务窗口开启状态");
+                True(ReferenceEquals(shell.TogglePanelCommand, menuItem.Command),
+                    $"{entry.Name} 应绑定 TogglePanelCommand");
                 Equal(entry.ContentId, menuItem.CommandParameter as string,
                     $"{entry.Name} 的 ContentId");
             }
@@ -718,6 +735,16 @@ internal static class Program
             Equal("F12", commandConsoleMenuItem.InputGestureText,
                 "指令日志菜单应提示正式控制台快捷键");
 
+            var agentConnectionMenuItem = window.FindName("ShowAgentConnectionMenuItem") as MenuItem
+                ?? throw new SmokeTestException("视图菜单缺少 MCP Agent 接入开关。");
+            agentConnectionMenuItem.GetBindingExpression(MenuItem.CommandProperty)?.UpdateTarget();
+            True(agentConnectionMenuItem.IsCheckable,
+                "MCP Agent 接入菜单应显示当前开启状态");
+            True(ReferenceEquals(shell.TogglePanelCommand, agentConnectionMenuItem.Command),
+                "MCP Agent 接入菜单应绑定 TogglePanelCommand");
+            Equal(MainWindow.AgentConnectionContentId, agentConnectionMenuItem.CommandParameter as string,
+                "MCP Agent 接入菜单的 ContentId");
+
             var commandConsoleShortcut = window.InputBindings
                 .OfType<KeyBinding>()
                 .SingleOrDefault(binding =>
@@ -744,6 +771,7 @@ internal static class Program
                 MainWindow.BackgroundRemovalContentId,
                 MainWindow.PixelAlignmentContentId,
                 MainWindow.BlueprintContentId,
+                MainWindow.AgentConnectionContentId,
                 MainWindow.CommandConsoleContentId
             };
             foreach (var contentId in anchorableIds)
@@ -856,13 +884,13 @@ internal static class Program
             PumpDispatcher();
             True(FindDockContent(manager, MainWindow.CanvasContentId) is null,
                 "关闭主界面后布局中不应残留 ui-canvas 文档模型");
-            var emptyDocumentPane = manager.Layout.Descendents()
+            var documentPane = manager.Layout.Descendents()
                 .OfType<LayoutDocumentPane>()
                 .FirstOrDefault(pane => !pane.IsHostedInFloatingWindow);
-            True(emptyDocumentPane is not null,
-                "关闭主界面后中央仍应保留可接收任意标签页的空白 LayoutDocumentPane");
-            Equal(0, emptyDocumentPane!.ChildrenCount,
-                "关闭唯一主视图后中央文档区应为空白，而不是残留占位文档");
+            True(documentPane is not null,
+                "关闭页面 UI 文档后中央仍应保留可接收任意标签页的 LayoutDocumentPane");
+            Equal(3, documentPane!.ChildrenCount,
+                "关闭一个业务窗口不应销毁其它 Tilemap、卡牌和平行透视文档");
 
             shell.ShowPanelCommand.Execute(MainWindow.CanvasContentId);
             var restoredCanvas = FindDockContent(manager, MainWindow.CanvasContentId) as LayoutDocument
@@ -873,8 +901,8 @@ internal static class Program
                 "恢复主界面时应复用原有工作区 host，避免业务状态丢失");
             True(restoredCanvas.CanClose && restoredCanvas.CanFloat && restoredCanvas.CanMove,
                 "恢复后的主界面仍应可关闭、浮动与拖动");
-            True(ReferenceEquals(restoredCanvas.Parent, emptyDocumentPane),
-                "恢复后的主界面应重新插入原中央空白 LayoutDocumentPane");
+            True(ReferenceEquals(restoredCanvas.Parent, documentPane),
+                "恢复后的主界面应重新插入原中央业务文档区");
             True(restoredCanvas.IsSelected, "主界面经视图菜单恢复后应被选中");
             True(restoredCanvas.IsActive, "主界面经视图菜单恢复后应被激活");
             True(ReferenceEquals(manager.Layout.ActiveContent, restoredCanvas),
@@ -1234,6 +1262,9 @@ internal static class Program
             {
                 [MainWindow.ToolsContentId] = NewPanelHost(),
                 [MainWindow.CanvasContentId] = NewPanelHost(),
+                [MainWindow.TilemapWorkspaceContentId] = NewPanelHost(),
+                [MainWindow.CardDesignWorkspaceContentId] = NewPanelHost(),
+                [MainWindow.ParallelPerspectiveWorkspaceContentId] = NewPanelHost(),
                 [MainWindow.PropertiesContentId] = NewPanelHost(),
                 [MainWindow.LayersContentId] = NewPanelHost(),
                 [MainWindow.ProjectContentId] = NewPanelHost(),
@@ -1275,7 +1306,7 @@ internal static class Program
         }
     }
 
-    private static void FiveWorkflowsSwitchAndGateUiCommands()
+    private static void BusinessWorkspaceContextsSwitchAndGateUiCommands()
     {
         var paths = new WorkspacePaths(Path.Combine(_temporaryRoot, "workflow-gating"));
         var editor = new EditorWorkspaceViewModel(
@@ -1283,6 +1314,10 @@ internal static class Program
             new DesktopFileDialogService(),
             new ProjectHistoryService());
         var shell = new ShellViewModel(new ThemeService(), new UserSettingsService(paths), editor);
+        if (shell.IsNewProjectDialogOpen)
+        {
+            shell.CloseNewProjectCommand.Execute(null);
+        }
         shell.PropertyChanged += (_, eventArgs) =>
         {
             if (eventArgs.PropertyName is nameof(ShellViewModel.CurrentWorkflow)
@@ -1295,9 +1330,11 @@ internal static class Program
 
         try
         {
-            Equal(5, shell.Workflows.Count, "业务工作流数量");
-            Equal(5, shell.Workflows.Select(workflow => workflow.Key).Distinct(StringComparer.Ordinal).Count(),
+            Equal(4, shell.Workflows.Count, "正式业务窗口数量");
+            Equal(4, shell.Workflows.Select(workflow => workflow.Key).Distinct(StringComparer.Ordinal).Count(),
                 "业务工作流 Key 应稳定且唯一");
+            True(shell.Workflows.All(workflow => workflow.Kind != WorkflowKind.Test),
+                "测试模板不得注册为正式业务窗口");
 
             foreach (var workflow in shell.Workflows)
             {
@@ -1314,6 +1351,9 @@ internal static class Program
                     shell.OpenNewProjectCommand.Execute(null);
                     False(shell.UiSaveCommand.CanExecute(null), "新建项目页打开时应暂停 UI 命令");
                     shell.SelectWorkflow(workflow);
+                    False(shell.UiSaveCommand.CanExecute(null),
+                        "激活业务窗口不应隐式关闭新建项目页");
+                    shell.CloseNewProjectCommand.Execute(null);
                     True(shell.UiSaveCommand.CanExecute(null), "关闭新建项目页后应恢复 UI 命令");
                 }
                 else if (workflow.Kind == WorkflowKind.Tilemap)
@@ -1433,7 +1473,17 @@ internal static class Program
             True(AssetRootService.PathEquals(projectRoot, shell.CurrentProjectPath!),
                 "Shell 当前项目路径应切换到新目录");
             Equal("Tilemap Demo", shell.CurrentProjectDisplayName, "顶部当前项目名称");
-            Equal("tilemap", shell.CurrentWorkflow.Key, "创建 Tilemap 项目后切换主视图");
+            Equal("tilemap", shell.CurrentWorkflow.Key, "创建项目后应激活所选 Tilemap 业务窗口");
+            var manager = window.FindName("DockManager") as DockingManager
+                ?? throw new SmokeTestException("新建项目模板回归未找到 DockManager。");
+            var tilemapDocument = FindDockContent(manager, MainWindow.TilemapWorkspaceContentId) as LayoutDocument
+                ?? throw new SmokeTestException("创建 Tilemap 项目后缺少 Tilemap 业务窗口。");
+            True(tilemapDocument.IsSelected && tilemapDocument.IsActive,
+                "新建项目模板只应帮助打开并聚焦对应业务窗口");
+            True(FindDockContent(manager, MainWindow.CanvasContentId) is LayoutDocument &&
+                 FindDockContent(manager, MainWindow.CardDesignWorkspaceContentId) is LayoutDocument &&
+                 FindDockContent(manager, MainWindow.ParallelPerspectiveWorkspaceContentId) is LayoutDocument,
+                "创建项目不得替换或销毁其它业务窗口");
             True(Directory.Exists(projectPaths.AssetDirectory), "新项目应创建 Assets");
             True(Directory.Exists(projectPaths.GeneratedAssetDirectory), "新项目应创建 Assets/Generated");
             True(Directory.Exists(projectPaths.PackagesDirectory), "新项目应创建 Packages");
@@ -1475,11 +1525,31 @@ internal static class Program
             True(projectService.TryLoad(projectRoot, out var manifest, out _, out var loadReason),
                 $"新项目 manifest 应可重新加载：{loadReason}");
             Equal("tilemap", manifest.WorkflowKey, "manifest 业务模板");
+            var uiDocument = FindDockContent(manager, MainWindow.CanvasContentId) as LayoutDocument
+                ?? throw new SmokeTestException("新建项目模板回归缺少页面 UI 业务窗口。");
+            uiDocument.IsSelected = true;
+            uiDocument.IsActive = true;
+            manager.ActiveContent = uiDocument.Content;
+            PumpDispatcher();
+            Equal("ui", shell.CurrentWorkflow.Key,
+                "激活页面 UI 标签只应切换当前窗口上下文");
+            True(AssetRootService.PathEquals(projectRoot, shell.CurrentProjectPath!),
+                "切换业务窗口不得替换当前项目环境");
+            True(shell.Blueprint.PersistenceText.Contains("tilemap.gafgraph.json", StringComparison.OrdinalIgnoreCase),
+                "切换业务窗口不得替换项目级蓝图存储上下文");
+            True(projectService.TryLoad(projectRoot, out var unchangedTemplateManifest, out _, out loadReason),
+                $"切换业务窗口后的 manifest 应可加载：{loadReason}");
+            Equal("tilemap", unchangedTemplateManifest.WorkflowKey,
+                "激活其它业务窗口不得改写项目初始模板");
+            Equal("tilemap", settings.Load().ActiveWorkflowKey,
+                "普通标签切换不得覆盖新建项目选择的初始模板设置");
             shell.TilemapWorkspace.GridUnitSize = 96d;
             True(projectService.TryLoad(projectRoot, out var updatedManifest, out _, out loadReason),
                 $"更新 Tilemap 参数后的 manifest 应可加载：{loadReason}");
             Near(96d, updatedManifest.Tilemap.GridUnitSize, 0.000001,
                 "Tilemap 参数应按当前项目持久化");
+            Equal("tilemap", updatedManifest.WorkflowKey,
+                "保存 Tilemap 参数不得用当前活动标签污染项目初始模板");
 
             Throws<ArgumentException>(
                 () => projectService.Create(projectsParent, "CON", "ui"),
@@ -1618,9 +1688,11 @@ internal static class Program
             window.UpdateLayout();
             var manager = window.FindName("DockManager") as DockingManager
                 ?? throw new SmokeTestException("Tilemap 网格测试未找到 DockManager。");
-            var canvas = FindDockContent(manager, MainWindow.CanvasContentId) as LayoutDocument
+            var canvas = FindDockContent(manager, MainWindow.TilemapWorkspaceContentId) as LayoutDocument
                 ?? throw new SmokeTestException("Tilemap 网格测试未找到中央文档。");
             Equal("Tilemap 制作", canvas.Title, "Tilemap 中央文档标题");
+            True(canvas.IsSelected && canvas.IsActive,
+                "启动时应根据当前业务上下文选中 Tilemap 文档标签");
 
             var host = canvas.Content as ContentControl
                 ?? throw new SmokeTestException("Tilemap 中央文档内容必须由 ContentControl 承载。");
@@ -1931,14 +2003,20 @@ internal static class Program
                 ?? throw new SmokeTestException("亮色 Tilemap 网格背景必须是 SolidColorBrush。");
             False(darkBackground == lightBackground, "暗亮主题应实际切换 Tilemap 网格背景颜色");
 
+            var uiDocument = FindDockContent(manager, MainWindow.CanvasContentId) as LayoutDocument
+                ?? throw new SmokeTestException("Tilemap 测试缺少独立页面 UI 文档。");
+            var uiHost = uiDocument.Content as ContentControl
+                ?? throw new SmokeTestException("页面 UI 文档必须由稳定 ContentControl 承载。");
             shell.SelectWorkflow("ui");
-            True(host.Content is CanvasDocumentView, "切回 UI 工作流应恢复 UI 画布");
+            True(uiHost.Content is CanvasDocumentView, "页面 UI 文档应保持独立 UI 画布");
+            True(ReferenceEquals(tilemapView, host.Content),
+                "切换活动业务上下文不得替换 Tilemap 文档内容");
             True(propertiesHost.Content is PropertiesView, "切回 UI 工作流应恢复 UI 属性面板");
             uiZoomToolbar.UpdateLayout();
             Equal(Visibility.Visible, uiZoomToolbar.Visibility,
                 "UI 工作流应显示顶部 UI 编辑器缩放工具栏");
             shell.SelectWorkflow("tilemap");
-            True(ReferenceEquals(tilemapView, host.Content), "再次进入 Tilemap 应复用网格工作区实例");
+            True(ReferenceEquals(tilemapView, host.Content), "再次进入 Tilemap 应复用独立网格工作区实例");
             True(ReferenceEquals(tilemapPropertiesView, propertiesHost.Content),
                 "再次进入 Tilemap 应复用参数属性面板实例");
         }
@@ -1992,23 +2070,27 @@ internal static class Program
             True(agentView.MinWidth <= 320d && agentView.MinHeight <= 260d,
                 "AgentConnectionView 应允许低分辨率停靠区压缩并通过滚动访问内容");
 
-            var mcpMenu = window.FindName("McpAccessMenu") as MenuItem
-                ?? throw new SmokeTestException("顶部菜单缺少 MCP 接入入口。");
-            var addAgentMenuItem = window.FindName("AddAgentConnectionMenuItem") as MenuItem
-                ?? throw new SmokeTestException("MCP 接入菜单缺少打开 Agent 连接面板项。");
-            Equal("MCP 接入(_M)", mcpMenu.Header as string, "MCP 顶部菜单标题");
-            Equal("打开 Agent 连接面板", addAgentMenuItem.Header as string, "Agent 连接菜单标题");
+            True(window.FindName("McpAccessMenu") is null,
+                "顶部不应再保留独立 MCP 接入菜单");
+            var addAgentMenuItem = window.FindName("ShowAgentConnectionMenuItem") as MenuItem
+                ?? throw new SmokeTestException("视图菜单缺少 MCP Agent 接入项。");
+            var viewMenu = window.FindName("ViewMenu") as MenuItem
+                ?? throw new SmokeTestException("顶部菜单缺少视图入口。");
+            True(viewMenu.Items.Contains(addAgentMenuItem),
+                "MCP Agent 接入项必须合并到视图菜单中");
+            Equal("MCP Agent 接入", addAgentMenuItem.Header as string, "视图菜单 Agent 连接标题");
             addAgentMenuItem.GetBindingExpression(MenuItem.CommandProperty)?.UpdateTarget();
-            True(ReferenceEquals(shell.OpenAgentConnectionCommand, addAgentMenuItem.Command),
-                "打开 Agent 连接面板菜单应绑定 Shell.OpenAgentConnectionCommand");
+            True(addAgentMenuItem.IsCheckable,
+                "视图菜单的 MCP Agent 接入项应显示窗口开启状态");
+            True(ReferenceEquals(shell.TogglePanelCommand, addAgentMenuItem.Command),
+                "MCP Agent 接入项应绑定 Shell.TogglePanelCommand");
+            Equal(MainWindow.AgentConnectionContentId, addAgentMenuItem.CommandParameter as string,
+                "MCP Agent 接入项 ContentId");
             True(addAgentMenuItem.Command?.CanExecute(addAgentMenuItem.CommandParameter) == true,
-                "打开 Agent 连接面板菜单命令应可执行");
+                "MCP Agent 接入菜单命令应可执行");
 
-            var requestCount = 0;
-            shell.AgentConnectionRequested += (_, _) => requestCount++;
             var windowCountBeforeOpen = Application.Current.Windows.Count;
             addAgentMenuItem.Command!.Execute(addAgentMenuItem.CommandParameter);
-            Equal(1, requestCount, "打开 Agent 连接面板菜单应发布一次拉起请求");
             False(agentPanel.IsHidden, "菜单应拉起默认隐藏的 MCP Agent 接入面板");
             True(agentPanel.IsVisible && agentPanel.IsSelected && agentPanel.IsActive,
                 "菜单拉起后 MCP Agent 接入面板应可见、选中并激活");
@@ -2020,9 +2102,11 @@ internal static class Program
                 "拉起 MCP Agent 接入面板不应创建额外 Window");
 
             addAgentMenuItem.Command.Execute(addAgentMenuItem.CommandParameter);
-            Equal(2, requestCount, "重复点击菜单应再次发布聚焦请求");
+            True(agentPanel.IsHidden, "再次点击视图菜单应隐藏 MCP Agent 接入面板");
+            addAgentMenuItem.Command.Execute(addAgentMenuItem.CommandParameter);
+            False(agentPanel.IsHidden, "第三次点击视图菜单应恢复 MCP Agent 接入面板");
             True(ReferenceEquals(agentPanel, FindDockContent(manager, MainWindow.AgentConnectionContentId)),
-                "重复点击菜单应复用同一个 MCP Agent 接入 LayoutAnchorable");
+                "视图菜单切换应复用同一个 MCP Agent 接入 LayoutAnchorable");
             True(ReferenceEquals(agentView, agentHost.Content),
                 "重复点击菜单应复用同一个 AgentConnectionView");
 
@@ -2058,7 +2142,6 @@ internal static class Program
             PumpDispatcher();
             True(agentPanel.IsHidden, "浮动的 MCP Agent 接入面板应可隐藏");
             addAgentMenuItem.Command.Execute(addAgentMenuItem.CommandParameter);
-            Equal(3, requestCount, "隐藏后点击菜单应再次发布恢复请求");
             var restoredAgentPanel = FindDockContent(manager, MainWindow.AgentConnectionContentId) as LayoutAnchorable
                 ?? throw new SmokeTestException("菜单未恢复 MCP Agent 接入面板。");
             True(ReferenceEquals(agentPanel, restoredAgentPanel),
@@ -2502,7 +2585,8 @@ internal static class Program
         var paths = new WorkspacePaths(dataRoot);
         new UserSettingsService(paths).Save(new UserSettingsModel
         {
-            ActiveWorkflowKey = "tilemap",
+            ActiveWorkflowKey = "ui",
+            AssetGenerationStepKey = "tilemap",
             HasCompletedWorkflowSelection = true,
             TilemapGridUnitSize = 100d,
             TilemapArtImageWidth = 1024,
@@ -2602,7 +2686,7 @@ internal static class Program
             var contextPayload = context.RootElement.GetProperty("result").GetProperty("structuredContent");
             Equal("tilemap",
                 contextPayload.GetProperty("activeWorkflow").GetProperty("key").GetString(),
-                "MCP 应读取桌面端当前 Tilemap 工作流");
+                "MCP 应读取素材生成步骤，而不是当前可见业务标签");
             var constraints = contextPayload.GetProperty("generationConstraints").Clone();
             Equal("imagegen", constraints.GetProperty("preferredSkill").GetString(),
                 "MCP Tilemap 约束应指定图像生成技能");
@@ -4381,6 +4465,9 @@ internal static class Program
             {
                 [MainWindow.ToolsContentId] = NewPanelHost(),
                 [MainWindow.CanvasContentId] = NewPanelHost(),
+                [MainWindow.TilemapWorkspaceContentId] = NewPanelHost(),
+                [MainWindow.CardDesignWorkspaceContentId] = NewPanelHost(),
+                [MainWindow.ParallelPerspectiveWorkspaceContentId] = NewPanelHost(),
                 [MainWindow.PropertiesContentId] = NewPanelHost(),
                 [MainWindow.LayersContentId] = NewPanelHost(),
                 [MainWindow.ProjectContentId] = NewPanelHost(),
@@ -4406,20 +4493,41 @@ internal static class Program
                     $"恢复后的 {contentId} 应绑定调用方提供的面板实例");
             }
 
-            var revisionNineLayout = File.ReadAllText(paths.LayoutPath);
-            var revisionEightLayout = revisionNineLayout.Replace(
+            var cardDocument = FindDockContent(restoredManager, MainWindow.CardDesignWorkspaceContentId)
+                as LayoutDocument
+                ?? throw new SmokeTestException("可选业务文档布局测试缺少卡牌文档。");
+            cardDocument.Close();
+            var optionalPaths = new WorkspacePaths(Path.Combine(_temporaryRoot, "layout-optional-documents"));
+            var optionalLayoutService = new AvalonDockLayoutService(optionalPaths);
+            optionalLayoutService.Save(restoredManager);
+            var optionalContent = restoredContent.Keys.ToDictionary(
+                contentId => contentId,
+                _ => (object)NewPanelHost(),
+                StringComparer.Ordinal);
+            var optionalManager = new DockingManager();
+            True(optionalLayoutService.TryRestore(optionalManager, optionalContent),
+                "关闭单个业务文档后保存的布局仍应有效");
+            True(FindDockContent(optionalManager, MainWindow.CardDesignWorkspaceContentId) is null,
+                "关闭的卡牌业务文档不应在布局恢复时被强制重新打开");
+            True(FindDockContent(optionalManager, MainWindow.CanvasContentId) is LayoutDocument &&
+                 FindDockContent(optionalManager, MainWindow.TilemapWorkspaceContentId) is LayoutDocument &&
+                 FindDockContent(optionalManager, MainWindow.ParallelPerspectiveWorkspaceContentId) is LayoutDocument,
+                "关闭一个业务文档不得影响其它业务文档的布局恢复");
+
+            var revisionTenLayout = File.ReadAllText(paths.LayoutPath);
+            var revisionNineLayout = revisionTenLayout.Replace(
+                "\"presetRevision\": 10",
                 "\"presetRevision\": 9",
-                "\"presetRevision\": 8",
                 StringComparison.Ordinal);
-            False(string.Equals(revisionNineLayout, revisionEightLayout, StringComparison.Ordinal),
+            False(string.Equals(revisionTenLayout, revisionNineLayout, StringComparison.Ordinal),
                 "布局迁移测试必须真实降级 presetRevision");
-            File.WriteAllText(paths.LayoutPath, revisionEightLayout);
-            var revisionEightManager = new DockingManager();
-            False(layoutService.TryRestore(revisionEightManager, restoredContent),
-                "rev8 布局应在新增蓝图窗口后回退到 rev9 默认布局");
+            File.WriteAllText(paths.LayoutPath, revisionNineLayout);
+            var revisionNineManager = new DockingManager();
+            False(layoutService.TryRestore(revisionNineManager, restoredContent),
+                "单一主画布的 rev9 布局应回退到多业务文档 rev10 默认布局");
             Equal("default", layoutService.LastRecoverySource,
                 "旧布局版本应明确标记为默认布局回退");
-            File.WriteAllText(paths.LayoutPath, revisionNineLayout);
+            File.WriteAllText(paths.LayoutPath, revisionTenLayout);
             layoutService = new AvalonDockLayoutService(paths);
 
             layoutService.Save(sourceManager);
@@ -5154,6 +5262,38 @@ internal static class Program
         throw new SmokeTestException($"图层树中未找到 {layerId}。");
     }
 
+    private static void AssertBusinessDocumentViews(DockingManager manager)
+    {
+        var uiHost = FindDockContent(manager, MainWindow.CanvasContentId)?.Content as ContentControl
+            ?? throw new SmokeTestException("页面 UI 业务文档缺少稳定 host。");
+        var tilemapHost = FindDockContent(manager, MainWindow.TilemapWorkspaceContentId)?.Content as ContentControl
+            ?? throw new SmokeTestException("Tilemap 业务文档缺少稳定 host。");
+        var cardHost = FindDockContent(manager, MainWindow.CardDesignWorkspaceContentId)?.Content as ContentControl
+            ?? throw new SmokeTestException("卡牌设计业务文档缺少稳定 host。");
+        var parallelHost = FindDockContent(manager, MainWindow.ParallelPerspectiveWorkspaceContentId)?.Content as ContentControl
+            ?? throw new SmokeTestException("平行透视业务文档缺少稳定 host。");
+        True(uiHost.Content is CanvasDocumentView,
+            "页面 UI 业务文档应承载独立 CanvasDocumentView");
+        True(tilemapHost.Content is TilemapWorkspaceView,
+            "Tilemap 业务文档应承载独立 TilemapWorkspaceView");
+        True(cardHost.Content is WorkflowPlaceholderView
+             {
+                 DataContext: WorkflowPlaceholderViewModel
+                 {
+                     Workflow.Kind: WorkflowKind.CardDesign
+                 }
+             },
+            "卡牌设计应拥有稳定的正常业务文档页");
+        True(parallelHost.Content is WorkflowPlaceholderView
+             {
+                 DataContext: WorkflowPlaceholderViewModel
+                 {
+                     Workflow.Kind: WorkflowKind.ParallelPerspective
+                 }
+             },
+            "平行透视角物体制作应拥有稳定的正常业务文档页");
+    }
+
     private static void AssertDefaultTopology(DockingManager manager)
     {
         var contents = manager.Layout.Descendents()
@@ -5163,6 +5303,9 @@ internal static class Program
         {
             MainWindow.ToolsContentId,
             MainWindow.CanvasContentId,
+            MainWindow.TilemapWorkspaceContentId,
+            MainWindow.CardDesignWorkspaceContentId,
+            MainWindow.ParallelPerspectiveWorkspaceContentId,
             MainWindow.PropertiesContentId,
             MainWindow.LayersContentId,
             MainWindow.ProjectContentId,
@@ -5181,14 +5324,23 @@ internal static class Program
             True(contents.ContainsKey(contentId), $"默认布局缺少 {contentId}");
         }
 
-        var canvas = contents[MainWindow.CanvasContentId] as LayoutDocument
-            ?? throw new SmokeTestException("ui-canvas 必须是 LayoutDocument。");
-        True(canvas.CanClose, "ui-canvas 可从顶部文档标签关闭");
-        True(canvas.CanFloat, "ui-canvas 可浮动");
-        True(canvas.CanMove, "ui-canvas 可拖动");
+        var documentIds = new[]
+        {
+            MainWindow.CanvasContentId,
+            MainWindow.TilemapWorkspaceContentId,
+            MainWindow.CardDesignWorkspaceContentId,
+            MainWindow.ParallelPerspectiveWorkspaceContentId
+        };
+        foreach (var contentId in documentIds)
+        {
+            var document = contents[contentId] as LayoutDocument
+                ?? throw new SmokeTestException($"{contentId} 必须是 LayoutDocument。");
+            True(document.CanClose, $"{contentId} 可从顶部文档标签关闭");
+            True(document.CanFloat, $"{contentId} 可浮动");
+            True(document.CanMove, $"{contentId} 可拖动");
+        }
 
-        foreach (var contentId in expectedIds.Where(contentId =>
-                     !string.Equals(contentId, MainWindow.CanvasContentId, StringComparison.Ordinal)))
+        foreach (var contentId in expectedIds.Except(documentIds, StringComparer.Ordinal))
         {
             var anchorable = contents[contentId] as LayoutAnchorable
                 ?? throw new SmokeTestException($"{contentId} 必须是 LayoutAnchorable。");
@@ -5223,7 +5375,10 @@ internal static class Program
         Equal(3, center.Children.Count, "中间布局分区数");
         True(center.Children[0] is LayoutDocumentPane,
             "中央主工作区必须由 LayoutDocumentPane 承载顶部文档标签");
-        AssertPaneContains(center.Children[0], MainWindow.CanvasContentId, "中央画布区");
+        foreach (var documentId in documentIds)
+        {
+            AssertPaneContains(center.Children[0], documentId, "中央业务窗口区");
+        }
         True(center.Children[1] is LayoutAnchorablePane,
             "中央下方应保留 MCP Agent 接入停靠区域");
         AssertPaneContains(center.Children[2], MainWindow.ProjectContentId, "下方 Project 区");

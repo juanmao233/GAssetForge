@@ -291,14 +291,29 @@
                 <Separator />
                 <MenuItem Header="删除所选图层" InputGestureText="Delete" Command="{Binding UiDeleteCommand}" />
             </MenuItem>
-            <MenuItem x:Name="McpAccessMenu" Header="MCP 接入(_M)">
-                <MenuItem x:Name="AddAgentConnectionMenuItem"
-                          Header="打开 Agent 连接面板"
-                          Command="{Binding OpenAgentConnectionCommand}" />
-            </MenuItem>
             <MenuItem x:Name="ViewMenu" Header="视图(_V)" SubmenuOpened="ViewMenu_OnSubmenuOpened">
+                <MenuItem x:Name="ShowUiWorkspaceMenuItem"
+                          Header="页面 UI 设计工具"
+                          IsCheckable="True"
+                          Command="{Binding TogglePanelCommand}"
+                          CommandParameter="ui-canvas" />
+                <MenuItem x:Name="ShowTilemapWorkspaceMenuItem"
+                          Header="Tilemap 制作"
+                          IsCheckable="True"
+                          Command="{Binding TogglePanelCommand}"
+                          CommandParameter="workspace-tilemap" />
+                <MenuItem x:Name="ShowCardDesignWorkspaceMenuItem"
+                          Header="卡牌设计"
+                          IsCheckable="True"
+                          Command="{Binding TogglePanelCommand}"
+                          CommandParameter="workspace-card-design" />
+                <MenuItem x:Name="ShowParallelPerspectiveWorkspaceMenuItem"
+                          Header="平行透视角物体制作"
+                          IsCheckable="True"
+                          Command="{Binding TogglePanelCommand}"
+                          CommandParameter="workspace-parallel-perspective" />
+                <Separator />
                 <MenuItem x:Name="ShowToolsMenuItem" Header="工具面板" Command="{Binding ShowPanelCommand}" CommandParameter="ui-tools" />
-                <MenuItem x:Name="ShowCanvasMenuItem" Header="主界面" Command="{Binding ShowPanelCommand}" CommandParameter="ui-canvas" />
                 <MenuItem x:Name="ShowPropertiesMenuItem" Header="属性面板" Command="{Binding ShowPanelCommand}" CommandParameter="ui-properties" />
                 <MenuItem x:Name="ShowLayersMenuItem" Header="图层面板" Command="{Binding ShowPanelCommand}" CommandParameter="ui-layers" />
                 <MenuItem x:Name="ShowProjectMenuItem" Header="项目面板" Command="{Binding ShowPanelCommand}" CommandParameter="ui-project" />
@@ -333,6 +348,11 @@
                           IsCheckable="True"
                           Command="{Binding TogglePanelCommand}"
                           CommandParameter="command-console" />
+                <MenuItem x:Name="ShowAgentConnectionMenuItem"
+                          Header="MCP Agent 接入"
+                          IsCheckable="True"
+                          Command="{Binding TogglePanelCommand}"
+                          CommandParameter="mcp-agent-connection" />
                 <Separator />
                 <MenuItem Header="恢复默认停靠布局" Command="{Binding ResetLayoutCommand}" />
                 <MenuItem Header="切换暗色 / 亮色" Command="{Binding ToggleThemeCommand}" />
@@ -487,7 +507,7 @@
                             <TextBlock FontSize="24" FontWeight="SemiBold" Text="新建项目" />
                             <TextBlock Margin="0,7,0,0"
                                        Foreground="{DynamicResource TextSecondaryBrush}"
-                                       Text="选择业务模板与保存位置，创建独立的 Assets、Packages 和 ProjectSettings 项目目录。" />
+                                       Text="选择项目保存位置和首次打开的业务窗口。模板只决定初始窗口布局，不限制项目可用工具。" />
                         </StackPanel>
                     </DockPanel>
                     <Border Grid.Row="1" Height="1" Margin="0,22" Background="{DynamicResource BorderBrush}" />
@@ -565,7 +585,7 @@
                                         </DockPanel>
                                         <TextBlock Grid.Row="1" Margin="0,12,0,0" FontSize="17" FontWeight="SemiBold" Text="{Binding Label}" TextWrapping="Wrap" />
                                         <TextBlock Grid.Row="2" Margin="0,9,0,12" Foreground="{DynamicResource TextSecondaryBrush}" Text="{Binding Description}" TextWrapping="Wrap" />
-                                        <TextBlock Grid.Row="3" Foreground="{Binding Accent}" Text="选择此模板" />
+                                        <TextBlock Grid.Row="3" Foreground="{Binding Accent}" Text="创建后打开此窗口" />
                                     </Grid>
                                 </DataTemplate>
                             </ListBox.ItemTemplate>
@@ -576,7 +596,7 @@
                                 MinWidth="138"
                                 Height="38"
                                 Command="{Binding CreateNewProjectCommand}"
-                                Content="创建并进入项目" />
+                                Content="创建项目并打开窗口" />
                         <Button DockPanel.Dock="Right"
                                 MinWidth="86"
                                 Height="38"

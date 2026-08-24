@@ -1,3 +1,5 @@
+using System.Reflection;
+
 namespace GAssetForge.Core;
 
 /// <summary>
@@ -30,6 +32,18 @@ public static class ProductIdentity
 
     public const string DispatchReconcilerAgentId = "gassetforge:dispatch-reconciler";
     public const string LegacyDispatchReconcilerAgentId = "perspective-forge:dispatch-reconciler";
+
+    public static string InformationalVersion { get; } =
+        GetAssemblyInformationalVersion(typeof(ProductIdentity).Assembly);
+
+    public static string GetAssemblyInformationalVersion(Assembly assembly)
+    {
+        ArgumentNullException.ThrowIfNull(assembly);
+        return assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()
+            ?.InformationalVersion
+            ?? throw new InvalidOperationException(
+                $"程序集 {assembly.GetName().Name} 缺少 AssemblyInformationalVersion。");
+    }
 
     public static bool IsKnownMcpServerName(string? value) =>
         string.Equals(value, McpServerName, StringComparison.OrdinalIgnoreCase) ||

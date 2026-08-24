@@ -78,7 +78,7 @@ public sealed class ShellViewModel : ObservableObject
             _settings.LastProjectPath = null;
         }
 
-        var initialWorkflow = WorkflowCatalog.Find(
+        var initialWorkflow = WorkflowCatalog.FindDockable(
             initialProject?.Manifest.WorkflowKey ?? _settings.ActiveWorkflowKey);
         if (initialProject is not null)
         {
@@ -88,7 +88,7 @@ public sealed class ShellViewModel : ObservableObject
                 initialProject = null;
                 _settings.LastProjectPath = null;
                 startupSettingsChanged = true;
-                initialWorkflow = WorkflowCatalog.Find(_settings.ActiveWorkflowKey);
+                initialWorkflow = WorkflowCatalog.FindDockable(_settings.ActiveWorkflowKey);
             }
             else if (!AssetRootService.PathEquals(
                          EditorWorkspace.ProjectRoot,
@@ -108,7 +108,7 @@ public sealed class ShellViewModel : ObservableObject
                     initialProject = null;
                     _settings.LastProjectPath = null;
                     startupSettingsChanged = true;
-                    initialWorkflow = WorkflowCatalog.Find(_settings.ActiveWorkflowKey);
+                    initialWorkflow = WorkflowCatalog.FindDockable(_settings.ActiveWorkflowKey);
                 }
             }
         }
@@ -271,9 +271,6 @@ public sealed class ShellViewModel : ObservableObject
                 PanelToggleRequested?.Invoke(this, contentId);
             }
         });
-        OpenAgentConnectionCommand = new RelayCommand(() =>
-            AgentConnectionRequested?.Invoke(this, EventArgs.Empty));
-
         UiSaveCommand = Gate(EditorWorkspace.SaveCommand);
         UiImportCommand = Gate(EditorWorkspace.ImportCommand);
         UiExportCommand = Gate(EditorWorkspace.ExportCommand);
@@ -303,9 +300,9 @@ public sealed class ShellViewModel : ObservableObject
     public event EventHandler<string>? PanelShowRequested;
     public event EventHandler<string>? PanelToggleRequested;
     public event Action<WorkflowDefinition>? WorkflowChanged;
-    public event EventHandler? AgentConnectionRequested;
+    public event Action<WorkflowDefinition>? WorkflowDocumentRequested;
 
-    public IReadOnlyList<WorkflowDefinition> Workflows => WorkflowCatalog.All;
+    public IReadOnlyList<WorkflowDefinition> Workflows => WorkflowCatalog.Dockable;
 
     public EditorWorkspaceViewModel EditorWorkspace { get; }
 
@@ -455,7 +452,6 @@ public sealed class ShellViewModel : ObservableObject
     public ICommand ResetLayoutCommand { get; }
     public ICommand ShowPanelCommand { get; }
     public ICommand TogglePanelCommand { get; }
-    public ICommand OpenAgentConnectionCommand { get; }
     public ICommand UiSaveCommand { get; }
     public ICommand UiImportCommand { get; }
     public ICommand UiExportCommand { get; }
@@ -466,61 +462,38 @@ public sealed class ShellViewModel : ObservableObject
     public ICommand UiZoomOutCommand { get; }
     public ICommand UiResetZoomCommand { get; }
 
-    public void SelectWorkflow(string key) => SelectWorkflow(WorkflowCatalog.Find(key));
+    public void SelectWorkflow(string key) => ActivateWorkspaceDocument(WorkflowCatalog.FindDockable(key));
 
-    public void SelectWorkflow(WorkflowDefinition workflow)
+    public void SelectWorkflow(WorkflowDefinition workflow) => ActivateWorkspaceDocument(workflow);
+
+    public void ActivateWorkspaceDocument(WorkflowDefinition workflow)
     {
         ArgumentNullException.ThrowIfNull(workflow);
-
-        var previousWorkflow = _currentWorkflow;
-        var projectRoot = _currentProject?.Paths.RootDirectory;
-        if (!Blueprint.Activate(projectRoot, workflow.Key))
+        if (workflow.Kind == WorkflowKind.Test)
         {
-            return;
+            throw new ArgumentException("测试模板不注册为正式业务窗口。", nameof(workflow));
         }
 
-        if (_currentProject is not null)
-        {
-            try
-            {
-                _currentProject = _projectWorkspaceService.UpdateWorkflowAndTilemap(
-                    _currentProject.Paths.RootDirectory,
-                    workflow.Key,
-                    BuildProjectTilemapSettings());
-            }
-            catch (Exception exception)
-            {
-                var rollbackSucceeded = Blueprint.Activate(projectRoot, previousWorkflow.Key);
-                var message = rollbackSucceeded
-                    ? $"工作流“{workflow.Label}”未能写入项目清单，切换已取消并恢复到“{previousWorkflow.Label}”：{exception.Message}"
-                    : $"工作流“{workflow.Label}”的项目清单写入失败，且旧蓝图上下文回滚失败。请立即停止编辑并重启 GAssetForge，避免继续写入错误项目。";
-                _workbenchConsoleService.WriteError("Project", message, exception);
-                return;
-            }
-        }
-
-        CommitWorkflowSelection(workflow);
+        CommitWorkspaceDocumentContext(workflow);
     }
 
-    private void CommitWorkflowSelection(WorkflowDefinition workflow)
+    private void CommitWorkspaceDocumentContext(WorkflowDefinition workflow)
     {
         SetWorkspaceState(workflow);
         ProjectBrowser.SetPrefabLibraryAvailability(workflow.Kind == WorkflowKind.UiDesign);
-        _settings.ActiveWorkflowKey = workflow.Key;
-        _settings.HasCompletedWorkflowSelection = true;
-        IsNewProjectDialogOpen = false;
         OnPropertyChanged(nameof(IsUiWorkspace));
         OnPropertyChanged(nameof(IsTilemapWorkspace));
         OnPropertyChanged(nameof(IsPlaceholderWorkspace));
         OnPropertyChanged(nameof(WorkspaceStatusText));
         RaiseUiCommandState();
-        SaveSettings();
         WorkflowChanged?.Invoke(workflow);
     }
 
     private void OpenNewProject()
     {
-        SelectedNewProjectWorkflow = CurrentWorkflow;
+        SelectedNewProjectWorkflow = CurrentWorkflow.Kind == WorkflowKind.Test
+            ? WorkflowCatalog.UiDesign
+            : CurrentWorkflow;
         NewProjectParentPath = ResolveInitialProjectParentPath();
         NewProjectName = CreateAvailableProjectName(NewProjectParentPath);
         IsNewProjectDialogOpen = true;
@@ -550,7 +523,7 @@ public sealed class ShellViewModel : ObservableObject
 
         IsCreatingNewProject = true;
         var previousProject = _currentProject;
-        var previousWorkflow = _currentWorkflow;
+        var previousBlueprintWorkflowKey = previousProject?.Manifest.WorkflowKey ?? _settings.ActiveWorkflowKey;
         var previousBrowserRoot = ProjectBrowser.ConfiguredRootPath;
         var previousBrowserPath = ProjectBrowser.CurrentPath;
         var previousBrowserLock = ProjectBrowser.IsRootSelectionLocked;
@@ -595,13 +568,16 @@ public sealed class ShellViewModel : ObservableObject
 
             ProjectBrowser.SetRootSelectionLock(true);
             ApplyProjectTilemapSettings(workspace.Manifest.Tilemap);
-            CommitWorkflowSelection(SelectedNewProjectWorkflow);
+            _settings.ActiveWorkflowKey = SelectedNewProjectWorkflow.Key;
+            _settings.HasCompletedWorkflowSelection = true;
+            ActivateWorkspaceDocument(SelectedNewProjectWorkflow);
             OnPropertyChanged(nameof(CurrentProjectPath));
             OnPropertyChanged(nameof(CurrentProjectDisplayName));
             OnPropertyChanged(nameof(WorkspaceStatusText));
             IsNewProjectDialogOpen = false;
             NewProjectValidationMessage = $"项目已创建：{workspace.Paths.RootDirectory}";
             SaveSettings();
+            WorkflowDocumentRequested?.Invoke(SelectedNewProjectWorkflow);
             await ResetAgentDispatchForWorkingDirectoryAsync(workspace.Paths.RootDirectory)
                 .ConfigureAwait(false);
         }
@@ -620,7 +596,7 @@ public sealed class ShellViewModel : ObservableObject
 
                     ProjectBrowser.SetRootSelectionLock(previousBrowserLock);
                     if (blueprintSwitched &&
-                        !Blueprint.Activate(previousProject?.Paths.RootDirectory, previousWorkflow.Key))
+                        !Blueprint.Activate(previousProject?.Paths.RootDirectory, previousBlueprintWorkflowKey))
                     {
                         rollbackIncomplete = true;
                         _workbenchConsoleService.WriteError(
@@ -714,7 +690,7 @@ public sealed class ShellViewModel : ObservableObject
         if (!keepFailureMessage || !isFailureMessage)
         {
             NewProjectValidationMessage = TryValidateNewProjectInput(out _, out var reason)
-                ? $"将以“{SelectedNewProjectWorkflow.Label}”创建独立项目目录。"
+                ? $"将创建独立项目目录，并首次打开“{SelectedNewProjectWorkflow.Label}”；其它业务窗口仍可随时从“视图”菜单拉起。"
                 : reason;
         }
 
@@ -962,7 +938,6 @@ public sealed class ShellViewModel : ObservableObject
             }
 
             _settings.Theme = CurrentTheme;
-            _settings.ActiveWorkflowKey = CurrentWorkflow.Key;
             _settings.LastProjectPath = CurrentProjectPath;
             _settings.AssetRootPath = ProjectBrowser.ConfiguredRootPath;
             _settings.AssetCurrentPath = ProjectBrowser.CurrentPath;
@@ -977,9 +952,8 @@ public sealed class ShellViewModel : ObservableObject
             {
                 try
                 {
-                    _currentProject = _projectWorkspaceService.UpdateWorkflowAndTilemap(
+                    _currentProject = _projectWorkspaceService.UpdateTilemap(
                         _currentProject.Paths.RootDirectory,
-                        CurrentWorkflow.Key,
                         BuildProjectTilemapSettings());
                 }
                 catch
@@ -1099,9 +1073,8 @@ public sealed class ShellViewModel : ObservableObject
             {
                 try
                 {
-                    _currentProject = _projectWorkspaceService.UpdateWorkflowAndTilemap(
+                    _currentProject = _projectWorkspaceService.UpdateTilemap(
                         _currentProject.Paths.RootDirectory,
-                        CurrentWorkflow.Key,
                         BuildProjectTilemapSettings());
                 }
                 catch

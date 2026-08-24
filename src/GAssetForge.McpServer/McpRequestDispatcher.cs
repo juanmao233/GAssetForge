@@ -1,4 +1,5 @@
 using System.Text.Json;
+using GAssetForge.Core;
 
 namespace GAssetForge.McpServer;
 
@@ -214,7 +215,7 @@ internal sealed class McpRequestDispatcher(McpToolCatalog toolCatalog)
                     {
                         name = "GAssetForge",
                         title = "GAssetForge AI Art Generation Queue",
-                        version = "1.0.0"
+                        version = ProductIdentity.GetAssemblyInformationalVersion(typeof(McpRequestDispatcher).Assembly)
                     },
                     instructions = "读取 get_current_context 获取桌面工作流约束；领取生成任务后，必须把产物保存到返回的有效 Assets 根目录内，再调用 complete_generation_task。"
                 };

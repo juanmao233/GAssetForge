@@ -16,8 +16,14 @@ public static class WorkflowCatalog
             "保留原 HTML 三套视觉原型作为迁移参考，不再作为桌面主线运行时。", "#9678FF", false)
     ];
 
+    public static IReadOnlyList<WorkflowDefinition> Dockable { get; } =
+        All.Where(item => item.Kind != WorkflowKind.Test).ToArray();
+
     public static WorkflowDefinition UiDesign => All.Single(item => item.Kind == WorkflowKind.UiDesign);
 
     public static WorkflowDefinition Find(string? key) =>
         All.FirstOrDefault(item => string.Equals(item.Key, key, StringComparison.OrdinalIgnoreCase)) ?? UiDesign;
+
+    public static WorkflowDefinition FindDockable(string? key) =>
+        Dockable.FirstOrDefault(item => string.Equals(item.Key, key, StringComparison.OrdinalIgnoreCase)) ?? UiDesign;
 }

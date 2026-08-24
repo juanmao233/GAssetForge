@@ -11,10 +11,14 @@ namespace GAssetForge.App.Services;
 public sealed class AvalonDockLayoutService(WorkspacePaths paths)
 {
     private const int SchemaVersion = 1;
-    private const int PresetRevision = 9;
+    private const int PresetRevision = 10;
     private const string Engine = "AvalonDock";
     private static readonly string[] RequiredContentIds =
-        ["ui-tools", "ui-canvas", "ui-properties", "ui-layers", "ui-project", "art-style-library", "asset-generation", "background-removal", "pixel-grid-alignment", "workflow-blueprint", "mcp-agent-connection", "command-console"];
+        ["ui-tools", "ui-properties", "ui-layers", "ui-project", "art-style-library", "asset-generation", "background-removal", "pixel-grid-alignment", "workflow-blueprint", "mcp-agent-connection", "command-console"];
+    private static readonly string[] OptionalDocumentContentIds =
+        ["ui-canvas", "workspace-tilemap", "workspace-card-design", "workspace-parallel-perspective"];
+    private static readonly string[] KnownContentIds =
+        [.. RequiredContentIds, .. OptionalDocumentContentIds];
 
     private static readonly JsonSerializerOptions Options = new()
     {
@@ -54,7 +58,7 @@ public sealed class AvalonDockLayoutService(WorkspacePaths paths)
             PresetRevision = PresetRevision,
             Engine = Engine,
             SavedAt = DateTimeOffset.Now,
-            KnownContentIds = [.. RequiredContentIds],
+            KnownContentIds = [.. KnownContentIds],
             LayoutXml = writer.ToString()
         };
 
@@ -85,8 +89,9 @@ public sealed class AvalonDockLayoutService(WorkspacePaths paths)
     {
         try
         {
-            if (!RequiredContentIds.All(contentId =>
-                    envelope.KnownContentIds.Contains(contentId, StringComparer.Ordinal) &&
+            if (!KnownContentIds.All(contentId =>
+                    envelope.KnownContentIds.Contains(contentId, StringComparer.Ordinal)) ||
+                !RequiredContentIds.All(contentId =>
                     envelope.LayoutXml.Contains(contentId, StringComparison.Ordinal)))
             {
                 return false;
@@ -113,9 +118,12 @@ public sealed class AvalonDockLayoutService(WorkspacePaths paths)
                 .Concat(manager.Layout.Hidden)
                 .Distinct()
                 .ToArray();
-            return restoredContents.Length == RequiredContentIds.Length &&
+            return restoredContents.All(content =>
+                       KnownContentIds.Contains(content.ContentId, StringComparer.Ordinal)) &&
                    RequiredContentIds.All(requiredId => restoredContents.Count(content =>
-                       string.Equals(content.ContentId, requiredId, StringComparison.Ordinal)) == 1);
+                       string.Equals(content.ContentId, requiredId, StringComparison.Ordinal)) == 1) &&
+                   OptionalDocumentContentIds.All(optionalId => restoredContents.Count(content =>
+                       string.Equals(content.ContentId, optionalId, StringComparison.Ordinal)) <= 1);
         }
         catch
         {

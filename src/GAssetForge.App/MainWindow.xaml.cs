@@ -17,6 +17,9 @@ public partial class MainWindow : Window
 {
     public const string ToolsContentId = "ui-tools";
     public const string CanvasContentId = "ui-canvas";
+    public const string TilemapWorkspaceContentId = "workspace-tilemap";
+    public const string CardDesignWorkspaceContentId = "workspace-card-design";
+    public const string ParallelPerspectiveWorkspaceContentId = "workspace-parallel-perspective";
     public const string PropertiesContentId = "ui-properties";
     public const string LayersContentId = "ui-layers";
     public const string ProjectContentId = "ui-project";
@@ -31,6 +34,7 @@ public partial class MainWindow : Window
     private readonly ShellViewModel _viewModel;
     private readonly AvalonDockLayoutService _layoutService;
     private readonly Dictionary<string, ContentControl> _panelHosts = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, ContentControl> _documentHosts = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FrameworkElement> _sharedPanelViews = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FrameworkElement> _uiPanelViews = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FrameworkElement> _tilemapPanelViews = new(StringComparer.Ordinal);
@@ -60,19 +64,20 @@ public partial class MainWindow : Window
         _viewModel.LayoutResetRequested += OnLayoutResetRequested;
         _viewModel.PanelShowRequested += OnPanelShowRequested;
         _viewModel.PanelToggleRequested += OnPanelToggleRequested;
-        _viewModel.AgentConnectionRequested += OnAgentConnectionRequested;
+        _viewModel.WorkflowDocumentRequested += OnWorkflowDocumentRequested;
         _viewModel.PropertyChanged += OnShellPropertyChanged;
         DockManager.DocumentClosed += OnDocumentClosed;
         DockManager.ActiveContentChanged += OnDockManagerActiveContentChanged;
     }
 
     private IReadOnlyDictionary<string, object> PanelContent =>
-        _panelHosts.ToDictionary(pair => pair.Key, pair => (object)pair.Value, StringComparer.Ordinal);
+        _panelHosts
+            .Concat(_documentHosts)
+            .ToDictionary(pair => pair.Key, pair => (object)pair.Value, StringComparer.Ordinal);
 
     private void CreatePanelHosts()
     {
         _panelHosts[ToolsContentId] = CreateHost();
-        _panelHosts[CanvasContentId] = CreateHost();
         _panelHosts[PropertiesContentId] = CreateHost();
         _panelHosts[LayersContentId] = CreateHost();
         _panelHosts[ProjectContentId] = CreateHost();
@@ -84,9 +89,13 @@ public partial class MainWindow : Window
         _panelHosts[AgentConnectionContentId] = CreateHost();
         _panelHosts[CommandConsoleContentId] = CreateHost();
 
+        _documentHosts[CanvasContentId] = CreateHost();
+        _documentHosts[TilemapWorkspaceContentId] = CreateHost();
+        _documentHosts[CardDesignWorkspaceContentId] = CreateHost();
+        _documentHosts[ParallelPerspectiveWorkspaceContentId] = CreateHost();
+
         _uiPanelViews[ToolsContentId] = new ToolPaletteView { DataContext = _viewModel.EditorWorkspace };
         _blueprintToolPaletteView = new BlueprintToolPaletteView { DataContext = _viewModel.Blueprint };
-        _uiPanelViews[CanvasContentId] = new CanvasDocumentView { DataContext = _viewModel.EditorWorkspace };
         _uiPanelViews[PropertiesContentId] = new PropertiesView { DataContext = _viewModel.EditorWorkspace };
         _uiPanelViews[LayersContentId] = new LayersView { DataContext = _viewModel.EditorWorkspace };
         _sharedPanelViews[ProjectContentId] = new ProjectBrowserView { DataContext = _viewModel.ProjectBrowser };
@@ -118,13 +127,28 @@ public partial class MainWindow : Window
         {
             DataContext = _viewModel.CommandConsole
         };
-        _tilemapPanelViews[CanvasContentId] = new TilemapWorkspaceView
-        {
-            DataContext = _viewModel.TilemapWorkspace
-        };
         _tilemapPanelViews[PropertiesContentId] = new TilemapPropertiesView
         {
             DataContext = _viewModel.TilemapWorkspace
+        };
+
+        _documentHosts[CanvasContentId].Content = new CanvasDocumentView
+        {
+            DataContext = _viewModel.EditorWorkspace
+        };
+        _documentHosts[TilemapWorkspaceContentId].Content = new TilemapWorkspaceView
+        {
+            DataContext = _viewModel.TilemapWorkspace
+        };
+        _documentHosts[CardDesignWorkspaceContentId].Content = new WorkflowPlaceholderView
+        {
+            DataContext = new WorkflowPlaceholderViewModel(
+                WorkflowCatalog.Dockable.Single(workflow => workflow.Kind == WorkflowKind.CardDesign))
+        };
+        _documentHosts[ParallelPerspectiveWorkspaceContentId].Content = new WorkflowPlaceholderView
+        {
+            DataContext = new WorkflowPlaceholderViewModel(
+                WorkflowCatalog.Dockable.Single(workflow => workflow.Kind == WorkflowKind.ParallelPerspective))
         };
     }
 
@@ -157,14 +181,7 @@ public partial class MainWindow : Window
                 continue;
             }
 
-            if (string.Equals(contentId, CanvasContentId, StringComparison.Ordinal))
-            {
-                host.Content = new WorkflowPlaceholderView { DataContext = _viewModel.PlaceholderWorkspace };
-            }
-            else
-            {
-                host.Content = CreateUnavailablePanel(GetPanelTitle(contentId));
-            }
+            host.Content = CreateUnavailablePanel(GetPanelTitle(contentId));
         }
 
         _workflowToolPaletteView = _panelHosts[ToolsContentId].Content as FrameworkElement;
@@ -217,17 +234,29 @@ public partial class MainWindow : Window
         var blueprint = CreateAnchorable(BlueprintContentId);
         var agentConnection = CreateAnchorable(AgentConnectionContentId);
         var commandConsole = CreateAnchorable(CommandConsoleContentId);
-        var canvas = CreateCanvasDocument();
-        canvas.IsActive = true;
+        var workflowDocuments = WorkflowCatalog.Dockable
+            .Select(CreateWorkflowDocument)
+            .ToArray();
+        var activeDocument = workflowDocuments.First(document =>
+            string.Equals(
+                document.ContentId,
+                GetWorkflowDocumentContentId(_viewModel.CurrentWorkflow),
+                StringComparison.Ordinal));
+        activeDocument.IsSelected = true;
+        activeDocument.IsActive = true;
 
         var toolsPane = new LayoutAnchorablePane(tools)
         {
             DockWidth = new GridLength(112)
         };
-        var documentPane = new LayoutDocumentPane(canvas)
+        var documentPane = new LayoutDocumentPane
         {
             ShowHeader = true
         };
+        foreach (var document in workflowDocuments)
+        {
+            documentPane.Children.Add(document);
+        }
         var projectPane = new LayoutAnchorablePane
         {
             DockHeight = new GridLength(340)
@@ -281,17 +310,21 @@ public partial class MainWindow : Window
         agentConnection.Hide();
     }
 
-    private LayoutDocument CreateCanvasDocument() => new()
+    private LayoutDocument CreateWorkflowDocument(WorkflowDefinition workflow)
     {
-        ContentId = CanvasContentId,
-        Title = CanvasTitle(),
-        Content = _panelHosts[CanvasContentId],
-        CanClose = true,
-        CanFloat = true,
-        CanMove = true,
-        FloatingWidth = 1100,
-        FloatingHeight = 760
-    };
+        var contentId = GetWorkflowDocumentContentId(workflow);
+        return new LayoutDocument
+        {
+            ContentId = contentId,
+            Title = GetWorkflowDocumentTitle(workflow),
+            Content = _documentHosts[contentId],
+            CanClose = true,
+            CanFloat = true,
+            CanMove = true,
+            FloatingWidth = 1100,
+            FloatingHeight = 760
+        };
+    }
 
     private LayoutAnchorable CreateAnchorable(string contentId)
     {
@@ -348,6 +381,7 @@ public partial class MainWindow : Window
 
         ApplyDockingCapabilities();
         ObserveBlueprintVisibility(FindContent(BlueprintContentId) as LayoutAnchorable);
+        SyncActiveWorkflowContextFromLayout();
         SyncActiveToolContextFromLayout();
         RefreshPanelContents();
         SyncToggleMenuStates();
@@ -410,7 +444,7 @@ public partial class MainWindow : Window
             _viewModel.LayoutResetRequested -= OnLayoutResetRequested;
             _viewModel.PanelShowRequested -= OnPanelShowRequested;
             _viewModel.PanelToggleRequested -= OnPanelToggleRequested;
-            _viewModel.AgentConnectionRequested -= OnAgentConnectionRequested;
+            _viewModel.WorkflowDocumentRequested -= OnWorkflowDocumentRequested;
             _viewModel.PropertyChanged -= OnShellPropertyChanged;
             DockManager.DocumentClosed -= OnDocumentClosed;
             DockManager.ActiveContentChanged -= OnDockManagerActiveContentChanged;
@@ -487,7 +521,20 @@ public partial class MainWindow : Window
 
     private void OnPanelToggleRequested(object? sender, string contentId)
     {
-        var content = FindContent(contentId) ?? RestoreMissingContent(contentId);
+        var content = FindContent(contentId);
+        if (content is null)
+        {
+            ShowPanel(contentId);
+            return;
+        }
+
+        if (content is LayoutDocument visibleDocument)
+        {
+            visibleDocument.Close();
+            SyncToggleMenuStates();
+            return;
+        }
+
         if (content is LayoutAnchorable { IsHidden: false, IsVisible: true } visibleAnchorable)
         {
             visibleAnchorable.Hide();
@@ -534,6 +581,11 @@ public partial class MainWindow : Window
 
     private void SyncToggleMenuStates()
     {
+        ShowUiWorkspaceMenuItem.IsChecked = FindContent(CanvasContentId) is LayoutDocument;
+        ShowTilemapWorkspaceMenuItem.IsChecked = FindContent(TilemapWorkspaceContentId) is LayoutDocument;
+        ShowCardDesignWorkspaceMenuItem.IsChecked = FindContent(CardDesignWorkspaceContentId) is LayoutDocument;
+        ShowParallelPerspectiveWorkspaceMenuItem.IsChecked =
+            FindContent(ParallelPerspectiveWorkspaceContentId) is LayoutDocument;
         var styleLibrary = FindContent(StyleLibraryContentId) as LayoutAnchorable;
         ShowStyleLibraryMenuItem.IsChecked = styleLibrary is { IsHidden: false, IsVisible: true };
         var assetGeneration = FindContent(AssetGenerationContentId) as LayoutAnchorable;
@@ -546,16 +598,18 @@ public partial class MainWindow : Window
         ShowBlueprintMenuItem.IsChecked = blueprint is { IsHidden: false, IsVisible: true };
         var commandConsole = FindContent(CommandConsoleContentId) as LayoutAnchorable;
         ShowCommandConsoleMenuItem.IsChecked = commandConsole is { IsHidden: false, IsVisible: true };
+        var agentConnection = FindContent(AgentConnectionContentId) as LayoutAnchorable;
+        ShowAgentConnectionMenuItem.IsChecked = agentConnection is { IsHidden: false, IsVisible: true };
     }
 
-    private void OnAgentConnectionRequested(object? sender, EventArgs e)
+    private void OnWorkflowDocumentRequested(WorkflowDefinition workflow)
     {
-        ShowPanel(AgentConnectionContentId);
+        ShowPanel(GetWorkflowDocumentContentId(workflow));
     }
 
     private void OnDocumentClosed(object? sender, DocumentClosedEventArgs e)
     {
-        if (!string.Equals(e.Document.ContentId, CanvasContentId, StringComparison.Ordinal))
+        if (!IsWorkflowDocument(e.Document.ContentId))
         {
             return;
         }
@@ -563,22 +617,24 @@ public partial class MainWindow : Window
         Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
         {
             EnsurePrimaryDocumentPane();
+            SyncActiveWorkflowContextFromLayout();
+            SyncToggleMenuStates();
             DockManager.Focus();
         });
     }
 
     private LayoutContent? RestoreMissingContent(string contentId)
     {
-        if (!_panelHosts.ContainsKey(contentId))
+        if (!_panelHosts.ContainsKey(contentId) && !_documentHosts.ContainsKey(contentId))
         {
             return null;
         }
 
         try
         {
-            if (string.Equals(contentId, CanvasContentId, StringComparison.Ordinal))
+            if (TryGetWorkflowForDocument(contentId, out var workflow))
             {
-                var document = CreateCanvasDocument();
+                var document = CreateWorkflowDocument(workflow);
                 var documentPane = EnsurePrimaryDocumentPane();
                 if (documentPane is null)
                 {
@@ -635,8 +691,7 @@ public partial class MainWindow : Window
 
         foreach (var content in contents)
         {
-            if (content is LayoutDocument document &&
-                string.Equals(document.ContentId, CanvasContentId, StringComparison.Ordinal))
+            if (content is LayoutDocument document && IsWorkflowDocument(document.ContentId))
             {
                 document.CanClose = true;
                 document.CanFloat = true;
@@ -726,7 +781,7 @@ public partial class MainWindow : Window
 
     private void OnShellPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(ShellViewModel.CurrentWorkspace))
+        if (e.PropertyName is nameof(ShellViewModel.CurrentWorkspace) or nameof(ShellViewModel.CurrentWorkflow))
         {
             RefreshPanelContents();
         }
@@ -752,9 +807,17 @@ public partial class MainWindow : Window
     private void OnDockManagerActiveContentChanged(object? sender, EventArgs e)
     {
         var contentId = DockManager.Layout.ActiveContent?.ContentId;
-        if (contentId is BlueprintContentId or CanvasContentId)
+        if (TryGetWorkflowForDocument(contentId, out var workflow))
         {
-            _activeToolContextContentId = contentId;
+            _activeToolContextContentId = contentId!;
+            _viewModel.ActivateWorkspaceDocument(workflow);
+            RefreshActiveToolPalette();
+            return;
+        }
+
+        if (string.Equals(contentId, BlueprintContentId, StringComparison.Ordinal))
+        {
+            _activeToolContextContentId = BlueprintContentId;
             RefreshActiveToolPalette();
             return;
         }
@@ -762,7 +825,7 @@ public partial class MainWindow : Window
         if (contentId is StyleLibraryContentId or AssetGenerationContentId or
             BackgroundRemovalContentId or PixelAlignmentContentId or AgentConnectionContentId)
         {
-            _activeToolContextContentId = CanvasContentId;
+            _activeToolContextContentId = GetWorkflowDocumentContentId(_viewModel.CurrentWorkflow);
             RefreshActiveToolPalette();
             return;
         }
@@ -818,7 +881,7 @@ public partial class MainWindow : Window
 
         if (string.Equals(_activeToolContextContentId, BlueprintContentId, StringComparison.Ordinal))
         {
-            _activeToolContextContentId = CanvasContentId;
+            _activeToolContextContentId = GetWorkflowDocumentContentId(_viewModel.CurrentWorkflow);
             RefreshActiveToolPalette();
         }
     }
@@ -845,7 +908,25 @@ public partial class MainWindow : Window
             BlueprintContentId,
             StringComparison.Ordinal)
             ? BlueprintContentId
-            : CanvasContentId;
+            : GetWorkflowDocumentContentId(_viewModel.CurrentWorkflow);
+    }
+
+    private void SyncActiveWorkflowContextFromLayout()
+    {
+        var contentId = DockManager.Layout.ActiveContent?.ContentId;
+        if (!TryGetWorkflowForDocument(contentId, out var workflow))
+        {
+            var selectedDocument = DockManager.Layout.Descendents()
+                .OfType<LayoutDocument>()
+                .FirstOrDefault(document => document.IsSelected && IsWorkflowDocument(document.ContentId));
+            if (selectedDocument is null ||
+                !TryGetWorkflowForDocument(selectedDocument.ContentId, out workflow))
+            {
+                return;
+            }
+        }
+
+        _viewModel.ActivateWorkspaceDocument(workflow);
     }
 
     private LayoutContent? FindContent(string contentId)
@@ -864,20 +945,62 @@ public partial class MainWindow : Window
 
     private void UpdateLayoutTitles()
     {
-        var canvas = FindContent(CanvasContentId);
-        if (canvas is not null)
+        foreach (var workflow in WorkflowCatalog.Dockable)
         {
-            canvas.Title = CanvasTitle();
+            var document = FindContent(GetWorkflowDocumentContentId(workflow));
+            if (document is not null)
+            {
+                document.Title = GetWorkflowDocumentTitle(workflow);
+            }
         }
     }
 
-    private string CanvasTitle() => _viewModel.CurrentWorkflow.Kind == WorkflowKind.UiDesign
-        ? _viewModel.EditorWorkspace.DocumentTitle
-        : _viewModel.CurrentWorkflow.Label;
+    private string GetWorkflowDocumentTitle(WorkflowDefinition workflow) => workflow.Kind switch
+    {
+        WorkflowKind.UiDesign => _viewModel.EditorWorkspace.DocumentTitle,
+        WorkflowKind.Tilemap => workflow.Label,
+        WorkflowKind.CardDesign => workflow.Label,
+        WorkflowKind.ParallelPerspective => workflow.Label,
+        _ => "业务窗口"
+    };
+
+    private static string GetWorkflowDocumentContentId(WorkflowDefinition workflow) => workflow.Kind switch
+    {
+        WorkflowKind.UiDesign => CanvasContentId,
+        WorkflowKind.Tilemap => TilemapWorkspaceContentId,
+        WorkflowKind.CardDesign => CardDesignWorkspaceContentId,
+        WorkflowKind.ParallelPerspective => ParallelPerspectiveWorkspaceContentId,
+        _ => throw new ArgumentException("测试模板不注册为正式业务窗口。", nameof(workflow))
+    };
+
+    private static bool TryGetWorkflowForDocument(
+        string? contentId,
+        out WorkflowDefinition workflow)
+    {
+        var kind = contentId switch
+        {
+            CanvasContentId => WorkflowKind.UiDesign,
+            TilemapWorkspaceContentId => WorkflowKind.Tilemap,
+            CardDesignWorkspaceContentId => WorkflowKind.CardDesign,
+            ParallelPerspectiveWorkspaceContentId => WorkflowKind.ParallelPerspective,
+            _ => (WorkflowKind?)null
+        };
+        workflow = kind is null
+            ? WorkflowCatalog.UiDesign
+            : WorkflowCatalog.Dockable.Single(candidate => candidate.Kind == kind.Value);
+        return kind is not null;
+    }
+
+    private static bool IsWorkflowDocument(string? contentId) =>
+        TryGetWorkflowForDocument(contentId, out _);
 
     private static string GetPanelTitle(string contentId) => contentId switch
     {
         ToolsContentId => "工具",
+        CanvasContentId => "页面 UI 设计工具",
+        TilemapWorkspaceContentId => "Tilemap 制作",
+        CardDesignWorkspaceContentId => "卡牌设计",
+        ParallelPerspectiveWorkspaceContentId => "平行透视角物体制作",
         PropertiesContentId => "属性",
         LayersContentId => "图层",
         ProjectContentId => "项目",

@@ -366,19 +366,19 @@ internal static class BlueprintRegressionSmokeTests
                 shell.SelectWorkflow("card");
             }
 
-            Equal("tilemap", shell.CurrentWorkflow.Key,
-                "manifest 写入失败时 Shell 不得提交候选工作流");
+            Equal("card", shell.CurrentWorkflow.Key,
+                "激活普通业务窗口不应依赖项目 manifest 可写状态");
             True(shell.Blueprint.PersistenceText.Contains("tilemap.gafgraph.json", StringComparison.OrdinalIgnoreCase),
-                "manifest 写入失败时蓝图必须回滚到原工作流文件");
+                "普通业务窗口切换不得替换项目级蓝图文件");
 
             shell.Blueprint.SelectedAddNodeType = FindType(shell.Blueprint, BlueprintNodeType.Tool);
             var invalidTool = shell.Blueprint.AddNode(700d, 300d);
             invalidTool.TagsText = "force-pending-save";
             invalidTool.Model.ToolContractId = "gassetforge.invalid.contract";
 
-            shell.SelectWorkflow("card");
-            Equal("tilemap", shell.CurrentWorkflow.Key,
-                "普通工作流蓝图激活失败时 Shell 不得提前提交新工作流");
+            shell.SelectWorkflow("parallel");
+            Equal("parallel", shell.CurrentWorkflow.Key,
+                "业务窗口激活不得被当前蓝图保存状态阻断");
             True(projectService.TryLoad(
                     originalProject.Paths.RootDirectory,
                     out var unchangedManifest,
@@ -402,8 +402,8 @@ internal static class BlueprintRegressionSmokeTests
 
             True(PathEquals(originalProject.Paths.RootDirectory, shell.CurrentProjectPath),
                 "新项目蓝图激活失败时必须保留旧项目上下文");
-            Equal("tilemap", shell.CurrentWorkflow.Key,
-                "新项目蓝图激活失败时必须保留旧工作流");
+            Equal("parallel", shell.CurrentWorkflow.Key,
+                "新项目蓝图激活失败时必须保留原活动业务窗口");
             True(PathEquals(originalProject.Paths.RootDirectory, editor.ProjectRoot),
                 "新项目蓝图激活失败时 EditorWorkspace 不得切到候选项目");
             True(PathEquals(originalProject.Paths.AssetDirectory, shell.ProjectBrowser.RootPath),

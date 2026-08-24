@@ -58,7 +58,8 @@ internal sealed class WorkspaceContextResolver(ServerOptions options)
         }
 
         var assets = ResolveAssetRoot(settings.AssetRootPath, settings.AssetCurrentPath);
-        var workflow = WorkflowCatalog.Find(settings.ActiveWorkflowKey);
+        var workflow = WorkflowCatalog.Find(
+            settings.AssetGenerationStepKey ?? settings.ActiveWorkflowKey);
         var tilemap = new TilemapSettings(
             ClampFinite(settings.TilemapGridUnitSize, DefaultGridUnitSize, 8d, 512d),
             Math.Clamp(settings.TilemapArtImageWidth ?? DefaultArtImageWidth, 16, 8192),
@@ -239,6 +240,7 @@ internal sealed class WorkspaceContextResolver(ServerOptions options)
         return new SettingsSnapshot
         {
             ActiveWorkflowKey = ReadString(root, "activeWorkflowKey"),
+            AssetGenerationStepKey = ReadString(root, "assetGenerationStepKey"),
             AssetRootPath = ReadString(root, "assetRootPath"),
             AssetCurrentPath = ReadString(root, "assetCurrentPath"),
             TilemapGridUnitSize = ReadDouble(root, "tilemapGridUnitSize"),
@@ -414,6 +416,7 @@ internal sealed class WorkspaceContextResolver(ServerOptions options)
     private sealed class SettingsSnapshot
     {
         public string? ActiveWorkflowKey { get; init; }
+        public string? AssetGenerationStepKey { get; init; }
         public string? AssetRootPath { get; init; }
         public string? AssetCurrentPath { get; init; }
         public double? TilemapGridUnitSize { get; init; }
