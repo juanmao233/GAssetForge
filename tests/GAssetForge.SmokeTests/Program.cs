@@ -9,6 +9,7 @@ using GAssetForge.App.Services;
 using GAssetForge.App.ViewModels;
 using GAssetForge.App.Views;
 using GAssetForge.Core.ArtStyles;
+using GAssetForge.Core.Blueprints;
 using GAssetForge.Core.Generation;
 using GAssetForge.Core.Projects;
 using GAssetForge.Core.Workflows;
@@ -67,6 +68,10 @@ internal static class Program
             Console.WriteLine("PASS  工具页可停靠中央，主视图可关闭并从视图菜单重新创建聚焦");
             BlueprintDockPanelProvidesWorkflowCanvas();
             Console.WriteLine("PASS  蓝图窗口可停靠、从视图菜单切换并提供 Agent 工作流画布");
+            BlueprintWorkflowSmokeTests.RunAsync(_temporaryRoot).GetAwaiter().GetResult();
+            Console.WriteLine("PASS  蓝图四类节点、项目隔离、连线校验、稳定 Harness 计划与运行落盘可用");
+            BlueprintRegressionSmokeTests.RunAsync(_temporaryRoot).GetAwaiter().GetResult();
+            Console.WriteLine("PASS  蓝图激活事务、端点规则、顺序、边界与 JSONL 回归约束稳定");
             DockLayoutPersistsFloatingAndHiddenPanels();
             Console.WriteLine("PASS  浮动与隐藏面板状态可随 AvalonDock 布局持久化恢复");
             ThemeSwitchUpdatesWpfAndAvalonDockResources();
@@ -107,6 +112,8 @@ internal static class Program
             Console.WriteLine("PASS  桌面 MCP 服务可启动真实 HTTP 子进程、握手、列出工具并可靠停止");
             McpBearerAuthenticationSmokeTests.Run();
             Console.WriteLine("PASS  HTTP MCP 使用临时 Bearer Token 认证且 health 不泄密");
+            AgentConnectionLifecycleSmokeTests.RunAll(_temporaryRoot);
+            Console.WriteLine("PASS  MCP Server 可独立启停，Runtime 失败保留健康服务并可复用重试");
             AgentRuntimeTransportSmokeTests.RunAllAsync().GetAwaiter().GetResult();
             Console.WriteLine("PASS  Codex App Server/Exec Agent Runtime 的协议、降级、取消与 Token 隔离可用");
             AgentActivityParserSmokeTests.Run();
@@ -377,6 +384,8 @@ internal static class Program
             window.Show();
             window.UpdateLayout();
             PumpDispatcher();
+            True(window.Icon is { Width: > 0d, Height: > 0d },
+                "GAssetForge 主窗口必须加载正式品牌图标资源");
             var manager = window.FindName("DockManager") as DockingManager
                 ?? throw new SmokeTestException("MainWindow 未暴露名为 DockManager 的 AvalonDock 容器。");
             AssertDefaultTopology(manager);
@@ -906,18 +915,165 @@ internal static class Program
             True(blueprint.CanDockAsTabbedDocument,
                 "蓝图窗口应允许拖入中央文档标签区");
 
+            blueprint.IsSelected = true;
+            blueprint.IsActive = true;
+            PumpDispatcher();
+            window.UpdateLayout();
+
             var host = blueprint.Content as ContentControl
                 ?? throw new SmokeTestException("蓝图窗口缺少稳定 ContentControl host。");
             var view = host.Content as BlueprintView
                 ?? throw new SmokeTestException("蓝图窗口未承载 BlueprintView。");
             True(ReferenceEquals(shell.Blueprint, view.DataContext),
                 "BlueprintView 应绑定 Shell 持有的单实例 BlueprintViewModel");
-            True(view.FindName("BlueprintCanvas") is Grid,
-                "蓝图窗口应提供可扩展的工作流画布");
-            var emptyStateTitle = view.FindName("BlueprintEmptyStateTitle") as TextBlock
-                ?? throw new SmokeTestException("蓝图窗口缺少首版空状态标题。");
-            Equal(shell.Blueprint.EmptyStateTitle, emptyStateTitle.Text,
-                "蓝图窗口空状态标题绑定");
+            var blueprintCanvas = view.FindName("BlueprintCanvas") as Grid
+                ?? throw new SmokeTestException("蓝图窗口缺少根画布。");
+            var blueprintWorldCanvas = view.FindName("BlueprintWorldCanvas") as Canvas
+                ?? throw new SmokeTestException("蓝图窗口缺少世界画布。");
+            True(
+                 view.FindName("BlueprintPlacementGhost") is Grid &&
+                 view.FindName("BlueprintConnectionPreviewPath") is System.Windows.Shapes.Path,
+                "蓝图窗口应提供支持视口变换、节点预放置与临时连线的真实画布");
+            view.UpdateLayout();
+            var nodeHeader = VisualDescendants<Border>(view)
+                .FirstOrDefault(element => element.Name == "NodeDragHandle")
+                ?? throw new SmokeTestException("蓝图节点未呈现彩色标题栏。");
+            var nodeHeaderTitle = VisualDescendants<TextBox>(nodeHeader)
+                .FirstOrDefault(element => element.Name == "NodeHeaderTitleEditor")
+                ?? throw new SmokeTestException("蓝图节点标题栏缺少标题编辑器。");
+            var nodeHeaderType = VisualDescendants<TextBlock>(nodeHeader)
+                .FirstOrDefault(element => element.Name == "NodeHeaderTypeLabel")
+                ?? throw new SmokeTestException("蓝图节点标题栏缺少类型说明。");
+            var nodeHeaderTextStack = VisualDescendants<StackPanel>(nodeHeader)
+                .FirstOrDefault(element => element.Name == "NodeHeaderTextStack")
+                ?? throw new SmokeTestException("蓝图节点标题栏缺少文字布局容器。");
+            var titleBounds = nodeHeaderTitle.TransformToAncestor(nodeHeader).TransformBounds(
+                new Rect(0d, 0d, nodeHeaderTitle.ActualWidth, nodeHeaderTitle.ActualHeight));
+            var typeBounds = nodeHeaderType.TransformToAncestor(nodeHeader).TransformBounds(
+                new Rect(0d, 0d, nodeHeaderType.ActualWidth, nodeHeaderType.ActualHeight));
+            var headerContentBounds = new Rect(
+                nodeHeader.Padding.Left,
+                nodeHeader.Padding.Top,
+                Math.Max(0d, nodeHeader.ActualWidth - nodeHeader.Padding.Left - nodeHeader.Padding.Right),
+                Math.Max(0d, nodeHeader.ActualHeight - nodeHeader.Padding.Top - nodeHeader.Padding.Bottom));
+            True(PresentationSource.FromVisual(nodeHeader) is not null && nodeHeader.IsVisible,
+                "蓝图节点标题栏回归测试必须检查已接入真实窗口的可见元素");
+            True(Math.Abs(nodeHeader.ActualHeight - BlueprintNodeLayoutMetrics.HeaderHeight) <= 0.1d,
+                "蓝图节点彩色标题栏必须使用统一布局高度");
+            True(nodeHeaderTitle.ActualWidth > 0d && nodeHeaderTitle.ActualHeight > 0d &&
+                 nodeHeaderType.ActualWidth > 0d && nodeHeaderType.ActualHeight > 0d,
+                "蓝图节点标题和类型说明必须完成真实布局");
+            True(titleBounds.Left >= headerContentBounds.Left - 0.1d &&
+                 titleBounds.Top >= headerContentBounds.Top - 0.1d &&
+                 titleBounds.Right <= headerContentBounds.Right + 0.1d &&
+                 titleBounds.Bottom <= headerContentBounds.Bottom + 0.1d,
+                "蓝图节点标题必须完整位于彩色标题栏内");
+            True(typeBounds.Left >= headerContentBounds.Left - 0.1d &&
+                 typeBounds.Top >= headerContentBounds.Top - 0.1d &&
+                 typeBounds.Right <= headerContentBounds.Right + 0.1d &&
+                 typeBounds.Bottom <= headerContentBounds.Bottom + 0.1d,
+                "蓝图节点类型说明必须完整位于彩色标题栏内，不能被下一行遮挡");
+            True(titleBounds.Bottom <= typeBounds.Top + 0.1d,
+                "蓝图节点标题和类型说明不得互相覆盖");
+            True(VisualTreeHelper.GetClip(nodeHeaderTextStack) is null,
+                "蓝图节点标题文字容器不得因高度不足而被裁剪");
+            var interactiveSourceClassifier = typeof(BlueprintView).GetMethod(
+                "IsInteractiveSource",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)
+                ?? throw new SmokeTestException("蓝图窗口缺少交互源分类器。");
+            False(
+                (bool)(interactiveSourceClassifier.Invoke(view, [blueprintWorldCanvas]) ?? true),
+                "蓝图世界画布不得因 AvalonDock 外层控件而被误判为输入控件，否则添加左键和右键平移会同时失效");
+            True(blueprintCanvas.ActualWidth > 80d && blueprintCanvas.ActualHeight > 80d,
+                "蓝图输入回归测试必须运行在真实可见画布上");
+            var emptyCanvasPoint = new Point(
+                Math.Max(1d, blueprintCanvas.ActualWidth - 24d),
+                Math.Max(1d, blueprintCanvas.ActualHeight - 24d));
+            var emptyCanvasHit = VisualTreeHelper.HitTest(blueprintCanvas, emptyCanvasPoint)?.VisualHit
+                ?? throw new SmokeTestException("蓝图可见空白区域未产生视觉命中。");
+            False(
+                (bool)(interactiveSourceClassifier.Invoke(view, [emptyCanvasHit]) ?? true),
+                "蓝图空白区域的真实命中目标不得被 AvalonDock 容器误判为输入控件");
+            var interactiveButton = VisualDescendants<ButtonBase>(view).FirstOrDefault()
+                ?? throw new SmokeTestException("蓝图输入回归测试缺少真实按钮控件。");
+            True(
+                (bool)(interactiveSourceClassifier.Invoke(view, [interactiveButton]) ?? false),
+                "蓝图画布内的真实按钮仍必须被识别为输入控件");
+            var emptyCanvasInputTarget = emptyCanvasHit as UIElement;
+            for (var ancestor = emptyCanvasHit;
+                 emptyCanvasInputTarget is null && ancestor is not null;
+                 ancestor = VisualTreeHelper.GetParent(ancestor))
+            {
+                emptyCanvasInputTarget = ancestor as UIElement;
+            }
+            if (emptyCanvasInputTarget is null)
+            {
+                throw new SmokeTestException("蓝图空白命中目标不能接收 WPF 输入事件。");
+            }
+
+            void RaiseCanvasMouseButton(RoutedEvent routedEvent, MouseButton button)
+            {
+                var eventArgs = new MouseButtonEventArgs(Mouse.PrimaryDevice, Environment.TickCount, button)
+                {
+                    RoutedEvent = routedEvent,
+                    Source = emptyCanvasInputTarget
+                };
+                emptyCanvasInputTarget.RaiseEvent(eventArgs);
+                PumpDispatcher();
+            }
+
+            var blueprintViewModel = shell.Blueprint;
+            Equal(1, blueprintViewModel.Nodes.Count(node => node.IsStart),
+                "每个工作流默认应创建一个系统起始蓝图");
+            True(blueprintViewModel.Nodes.Single(node => node.IsStart).InputPorts.Count == 0,
+                "系统起始蓝图不能拥有输入端点");
+
+            blueprintViewModel.SelectedAddNodeType = blueprintViewModel.AddNodeTypes.Single(option =>
+                option.Type == BlueprintNodeType.Description);
+            blueprintViewModel.SelectToolCommand.Execute("add");
+            var nodeIdsBeforeCanvasAdd = blueprintViewModel.Nodes
+                .Select(node => node.Id)
+                .ToHashSet(StringComparer.Ordinal);
+            RaiseCanvasMouseButton(Mouse.PreviewMouseDownEvent, MouseButton.Left);
+            True(blueprintViewModel.HasPlacementPreview,
+                "添加工具在真实 AvalonDock 画布首次左键后应进入虚影预览状态");
+            Equal(nodeIdsBeforeCanvasAdd.Count, blueprintViewModel.Nodes.Count,
+                "添加工具首次左键不得提前创建节点");
+            RaiseCanvasMouseButton(Mouse.PreviewMouseDownEvent, MouseButton.Left);
+            True(!blueprintViewModel.HasPlacementPreview,
+                "添加工具在真实 AvalonDock 画布第二次左键后应提交虚影");
+            Equal(nodeIdsBeforeCanvasAdd.Count + 1, blueprintViewModel.Nodes.Count,
+                "添加工具第二次左键应真实创建一个蓝图节点");
+            var canvasAddedNode = blueprintViewModel.Nodes.Single(node => !nodeIdsBeforeCanvasAdd.Contains(node.Id));
+            blueprintViewModel.RemoveNode(canvasAddedNode);
+
+            blueprintViewModel.SelectToolCommand.Execute("pointer");
+            True(blueprintViewModel.IsPointerTool,
+                "默认鼠标工具应能在真实 AvalonDock 蓝图页激活");
+            False(
+                (bool)(interactiveSourceClassifier.Invoke(view, [emptyCanvasHit]) ?? true),
+                "默认鼠标右键平移入口不得再次被 AvalonDock 外层 Selector 拦截");
+
+            blueprintViewModel.SelectedAddNodeType = blueprintViewModel.AddNodeTypes.Single(option =>
+                option.Type == BlueprintNodeType.Description);
+            var sourceNode = blueprintViewModel.AddNode(720d, 180d);
+            sourceNode.AddOutputPortCommand.Execute(null);
+            sourceNode.AddOutputPortCommand.Execute(null);
+            var targetNode = blueprintViewModel.AddNode(1_120d, 240d);
+            blueprintViewModel.SelectToolCommand.Execute("connect");
+            blueprintViewModel.HandlePortClicked(sourceNode.OutputPorts[2]);
+            blueprintViewModel.HandlePortClicked(targetNode.InputPorts[0]);
+            var visualOrderConnection = blueprintViewModel.Connections.Single(connection =>
+                string.Equals(connection.Model.SourceNodeId, sourceNode.Id, StringComparison.Ordinal) &&
+                string.Equals(connection.Model.TargetNodeId, targetNode.Id, StringComparison.Ordinal));
+            var sourceYBeforePortRemoval = ((PathGeometry)visualOrderConnection.Geometry).Figures[0].StartPoint.Y;
+            var stablePortOrder = sourceNode.OutputPorts[2].Order;
+            sourceNode.OutputPorts[1].RemoveCommand.Execute(null);
+            Equal(stablePortOrder, sourceNode.OutputPorts[1].Order,
+                "删除中间端点后必须保留剩余端点的稳定 Order");
+            var sourceYAfterPortRemoval = ((PathGeometry)visualOrderConnection.Geometry).Figures[0].StartPoint.Y;
+            Equal(sourceYBeforePortRemoval - 27d, sourceYAfterPortRemoval,
+                "连线几何必须使用连续视觉索引，不能使用删除后稀疏的稳定 Order");
 
             var menuItem = window.FindName("ShowBlueprintMenuItem") as MenuItem
                 ?? throw new SmokeTestException("视图菜单缺少蓝图窗口入口。");
@@ -940,6 +1096,95 @@ internal static class Program
             True(blueprint.IsVisible && blueprint.IsSelected && blueprint.IsActive,
                 "恢复后的蓝图窗口应可见、选中并激活");
             True(menuItem.IsChecked, "蓝图窗口恢复后视图入口应重新勾选");
+
+            var tools = FindDockContent(manager, MainWindow.ToolsContentId) as LayoutAnchorable
+                ?? throw new SmokeTestException("蓝图动态工具测试缺少工具面板。");
+            var toolsHost = tools.Content as ContentControl
+                ?? throw new SmokeTestException("工具面板缺少稳定 ContentControl host。");
+            var blueprintTools = toolsHost.Content as BlueprintToolPaletteView
+                ?? throw new SmokeTestException("蓝图成为活动页面时工具面板未切换为蓝图工具栏。");
+            True(ReferenceEquals(shell.Blueprint, blueprintTools.DataContext),
+                "蓝图工具栏应绑定当前蓝图 ViewModel");
+            foreach (var controlName in new[]
+                     {
+                         "BlueprintPointerToolButton",
+                         "BlueprintAddToolButton",
+                         "BlueprintConnectToolButton",
+                         "BlueprintMoveNodeToolButton"
+                     })
+            {
+                True(blueprintTools.FindName(controlName) is FrameworkElement,
+                    $"蓝图工具栏缺少 {controlName}");
+            }
+            True(!VisualDescendants<ComboBox>(blueprintTools).Any(),
+                "蓝图工具栏不应常驻占用空间的蓝图类型下拉框");
+
+            var moveNodeToolButton = blueprintTools.FindName("BlueprintMoveNodeToolButton") as ToggleButton
+                ?? throw new SmokeTestException("蓝图工具栏缺少对象移动按钮。");
+            True(VisualDescendants<TextBlock>(moveNodeToolButton)
+                    .Any(text => text.Text.Contains("对象移动", StringComparison.Ordinal)),
+                "节点拖拽工具的可视文案应明确显示为对象移动");
+            True(moveNodeToolButton.ToolTip?.ToString()?.Contains("对象移动", StringComparison.Ordinal) == true,
+                "节点拖拽工具提示应明确说明对象移动语义");
+
+            var addToolButton = blueprintTools.FindName("BlueprintAddToolButton") as ToggleButton
+                ?? throw new SmokeTestException("蓝图工具栏缺少添加蓝图按钮。");
+            var addTypeMenu = addToolButton.ContextMenu
+                ?? throw new SmokeTestException("添加蓝图按钮缺少类型右键菜单。");
+            addTypeMenu.PlacementTarget = addToolButton;
+            try
+            {
+                addTypeMenu.IsOpen = true;
+                PumpDispatcher();
+                addTypeMenu.UpdateLayout();
+                Equal(shell.Blueprint.AddNodeTypes.Count, addTypeMenu.Items.Count,
+                    "添加蓝图右键菜单应呈现全部四种基础类型");
+                Equal(4, addTypeMenu.Items.Count,
+                    "添加蓝图右键菜单当前应固定包含四种基础类型");
+                for (var index = 0; index < shell.Blueprint.AddNodeTypes.Count; index++)
+                {
+                    var option = shell.Blueprint.AddNodeTypes[index];
+                    True(ReferenceEquals(option, addTypeMenu.Items[index]),
+                        $"添加蓝图菜单第 {index + 1} 项应绑定对应类型模型");
+                    var typeMenuItem = addTypeMenu.ItemContainerGenerator.ContainerFromIndex(index) as MenuItem
+                        ?? throw new SmokeTestException($"添加蓝图菜单第 {index + 1} 项未生成 MenuItem 容器。");
+                    typeMenuItem.GetBindingExpression(HeaderedItemsControl.HeaderProperty)?.UpdateTarget();
+                    Equal(option.Label, typeMenuItem.Header as string,
+                        $"添加蓝图菜单第 {index + 1} 项标题");
+                }
+            }
+            finally
+            {
+                addTypeMenu.IsOpen = false;
+                PumpDispatcher();
+            }
+
+            tools.IsSelected = true;
+            tools.IsActive = true;
+            manager.ActiveContent = tools.Content;
+            PumpDispatcher();
+            True(toolsHost.Content is BlueprintToolPaletteView,
+                "激活工具等辅助面板时应保留最近的蓝图工具上下文");
+            blueprint.Hide();
+            PumpDispatcher();
+            False(toolsHost.Content is BlueprintToolPaletteView,
+                "蓝图在非活动状态下隐藏时也必须立即恢复业务工具栏");
+            blueprint.Show();
+            blueprint.IsSelected = true;
+            blueprint.IsActive = true;
+            manager.ActiveContent = blueprint.Content;
+            PumpDispatcher();
+            True(toolsHost.Content is BlueprintToolPaletteView,
+                "重新显示并激活蓝图后应恢复蓝图工具栏");
+
+            var canvas = FindDockContent(manager, MainWindow.CanvasContentId) as LayoutDocument
+                ?? throw new SmokeTestException("蓝图动态工具测试缺少主视图文档。");
+            canvas.IsSelected = true;
+            canvas.IsActive = true;
+            manager.ActiveContent = canvas.Content;
+            PumpDispatcher();
+            False(toolsHost.Content is BlueprintToolPaletteView,
+                "离开蓝图主视图后工具栏应恢复当前业务工具内容");
         }
         finally
         {
@@ -1734,8 +1979,9 @@ internal static class Program
             Equal("MCP Agent 接入", agentPanel.Title, "MCP Agent 接入停靠面板标题");
             True(agentPanel.CanMove && agentPanel.CanFloat && agentPanel.CanHide,
                 "MCP Agent 接入面板应支持拖动、浮动与隐藏");
-            True(agentPanel.FloatingWidth >= 900d && agentPanel.FloatingHeight >= 700d,
-                "MCP Agent 接入面板应具有合理浮动尺寸");
+            True(agentPanel.FloatingWidth is >= 820d and <= 900d &&
+                 agentPanel.FloatingHeight is >= 520d and <= 600d,
+                "MCP Agent 接入面板默认浮动尺寸应适合低分辨率屏幕");
 
             var agentHost = agentPanel.Content as ContentControl
                 ?? throw new SmokeTestException("MCP Agent 接入停靠内容应使用稳定 ContentControl host。");
@@ -1743,8 +1989,8 @@ internal static class Program
                 ?? throw new SmokeTestException("MCP Agent 接入停靠面板未承载 AgentConnectionView。");
             True(ReferenceEquals(shell.AgentConnection, agentView.DataContext),
                 "AgentConnectionView 应复用 Shell 持有的连接 ViewModel");
-            True(agentView.MinWidth >= 600d && agentView.MinHeight >= 400d,
-                "AgentConnectionView 应限制最小可用尺寸");
+            True(agentView.MinWidth <= 320d && agentView.MinHeight <= 260d,
+                "AgentConnectionView 应允许低分辨率停靠区压缩并通过滚动访问内容");
 
             var mcpMenu = window.FindName("McpAccessMenu") as MenuItem
                 ?? throw new SmokeTestException("顶部菜单缺少 MCP 接入入口。");
@@ -1786,6 +2032,28 @@ internal static class Program
             True(manager.Layout.FloatingWindows.Any(floatingWindow =>
                     floatingWindow.Descendents().Any(element => ReferenceEquals(element, agentPanel))),
                 "AvalonDock 浮动窗口应包含 MCP Agent 接入面板");
+            var compactFloatingWindow = Application.Current.Windows
+                .OfType<LayoutAnchorableFloatingWindowControl>()
+                .SingleOrDefault(control =>
+                    control.Model is LayoutAnchorableFloatingWindow model &&
+                    model.Descendents().Any(element => ReferenceEquals(element, agentPanel)))
+                ?? throw new SmokeTestException("MCP Agent 接入面板浮动后缺少 AvalonDock 浮动宿主窗口。");
+            compactFloatingWindow.MinWidth = 0d;
+            compactFloatingWindow.MinHeight = 0d;
+            compactFloatingWindow.Width = 640d;
+            compactFloatingWindow.Height = 480d;
+            PumpDispatcher();
+            compactFloatingWindow.UpdateLayout();
+            agentView.UpdateLayout();
+            True(agentView.ActualWidth <= agentHost.ActualWidth + 0.1d &&
+                 agentView.ActualHeight <= agentHost.ActualHeight + 0.1d,
+                "MCP Agent 页面在 640×480 AvalonDock 浮窗中不得超出宿主并被裁切");
+            var dockedCompactSettingsScroller = agentView.FindName("AgentSettingsScrollViewer") as ScrollViewer
+                ?? throw new SmokeTestException("MCP Agent AvalonDock 紧凑回归缺少主滚动区。");
+            True(dockedCompactSettingsScroller.ViewportWidth > 0d &&
+                 dockedCompactSettingsScroller.ViewportHeight > 0d &&
+                 dockedCompactSettingsScroller.ScrollableHeight > 1d,
+                "MCP Agent 页面在 640×480 AvalonDock 浮窗中必须保留可用设置视口和纵向滚动范围");
             agentPanel.Hide();
             PumpDispatcher();
             True(agentPanel.IsHidden, "浮动的 MCP Agent 接入面板应可隐藏");
@@ -1800,6 +2068,91 @@ internal static class Program
                 "菜单恢复后 MCP Agent 接入面板应可见、选中并激活");
 
             var connection = shell.AgentConnection;
+            using (var compactAgentView = new AgentConnectionView(connection))
+            {
+                var compactHost = new Border
+                {
+                    Child = compactAgentView
+                };
+                var compactWindow = new Window
+                {
+                    Title = "MCP Agent 紧凑布局回归",
+                    Width = 600d,
+                    Height = 420d,
+                    MinWidth = 0d,
+                    MinHeight = 0d,
+                    ShowActivated = false,
+                    ShowInTaskbar = false,
+                    WindowStyle = WindowStyle.ToolWindow,
+                    Content = compactHost
+                };
+
+                try
+                {
+                    compactWindow.Show();
+                    PumpDispatcher();
+                    compactWindow.UpdateLayout();
+                    compactAgentView.UpdateLayout();
+
+                    True(compactAgentView.ActualWidth <= compactHost.ActualWidth + 0.1d,
+                        "MCP Agent 页面在低分辨率窄窗口中不得以最小宽度撑出并被宿主裁切");
+                    True(compactAgentView.ActualHeight <= compactHost.ActualHeight + 0.1d,
+                        "MCP Agent 页面在低分辨率矮窗口中不得以最小高度撑出并被宿主裁切");
+
+                    var compactSettingsScroller = compactAgentView.FindName("AgentSettingsScrollViewer") as ScrollViewer
+                        ?? throw new SmokeTestException("MCP Agent 页面缺少紧凑布局主滚动区。");
+                    True(compactSettingsScroller.ViewportWidth > 0d && compactSettingsScroller.ViewportHeight > 0d,
+                        "MCP Agent 主滚动区在紧凑窗口中必须获得真实可见视口");
+                    True(compactSettingsScroller.ScrollableHeight > 1d,
+                        "MCP Agent 主滚动区在低高度下必须开放纵向滚动以访问完整设置");
+                    True(compactSettingsScroller.ScrollableWidth > 1d,
+                        "MCP Agent 主滚动区在低宽度下必须开放横向滚动以访问完整设置");
+
+                    compactSettingsScroller.ScrollToTop();
+                    PumpDispatcher();
+                    var compactWheelTarget = compactAgentView.FindName("AgentSelectorComboBox") as ComboBox
+                        ?? throw new SmokeTestException("MCP Agent 紧凑滚轮测试缺少 Agent 选择框目标。");
+                    var agentBeforePageScroll = connection.SelectedAgent;
+                    compactWheelTarget.RaiseEvent(new MouseWheelEventArgs(
+                        Mouse.PrimaryDevice,
+                        Environment.TickCount,
+                        -120)
+                    {
+                        RoutedEvent = Mouse.MouseWheelEvent,
+                        Source = compactWheelTarget
+                    });
+                    PumpDispatcher();
+                    True(compactSettingsScroller.VerticalOffset > 0d,
+                        "MCP Agent 主设置区必须支持鼠标滚轮浏览");
+                    True(ReferenceEquals(agentBeforePageScroll, connection.SelectedAgent),
+                        "在 Agent 下拉框关闭时滚动页面不得误切换连接 Agent");
+
+                    var finalCompactExpander = compactAgentView.FindName("CodexManualConnectionExpander") as Expander
+                        ?? throw new SmokeTestException("MCP Agent 紧凑布局缺少 Codex 手工连接折叠区。");
+                    finalCompactExpander.IsExpanded = true;
+                    PumpDispatcher();
+                    compactAgentView.UpdateLayout();
+                    compactSettingsScroller.ScrollToEnd();
+                    PumpDispatcher();
+                    var finalCompactButton = compactAgentView.FindName("CopyCodexConnectionPromptButton") as Button
+                        ?? throw new SmokeTestException("MCP Agent 紧凑布局缺少复制 Codex 连接指令按钮。");
+                    var finalButtonBounds = finalCompactButton.TransformToAncestor(compactSettingsScroller)
+                        .TransformBounds(new Rect(
+                            0d,
+                            0d,
+                            finalCompactButton.ActualWidth,
+                            finalCompactButton.ActualHeight));
+                    True(finalCompactButton.IsVisible &&
+                         finalButtonBounds.Top >= -0.5d &&
+                         finalButtonBounds.Bottom <= compactSettingsScroller.ActualHeight + 0.5d,
+                        "MCP Agent 设置区滚动到底后必须能够完整访问复制连接指令按钮");
+                }
+                finally
+                {
+                    compactWindow.Close();
+                }
+            }
+
             SequenceEqual(new[] { "codex", "opencode" }, connection.Agents.Select(agent => agent.Key),
                 "支持的 Agent profile");
             SequenceEqual(new[] { "Codex", "OpenCode" }, connection.Agents.Select(agent => agent.DisplayName),

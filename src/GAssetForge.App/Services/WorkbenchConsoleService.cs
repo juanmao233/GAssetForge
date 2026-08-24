@@ -29,6 +29,9 @@ public sealed record WorkbenchLogContext
     public string? ExpectedPath { get; init; }
     public string? ObservedPath { get; init; }
     public string? ErrorCode { get; init; }
+    public string? BlueprintGraphId { get; init; }
+    public string? BlueprintNodeId { get; init; }
+    public string? BlueprintStepId { get; init; }
 
     public string Summary => string.Join(
         " · ",
@@ -41,6 +44,9 @@ public sealed record WorkbenchLogContext
             string.IsNullOrWhiteSpace(Status) ? null : $"status={Status}",
             ElapsedMilliseconds is null ? null : $"elapsed={ElapsedMilliseconds}ms",
             string.IsNullOrWhiteSpace(AgentTurnId) ? null : $"turn={AgentTurnId}",
+            string.IsNullOrWhiteSpace(BlueprintGraphId) ? null : $"graph={BlueprintGraphId}",
+            string.IsNullOrWhiteSpace(BlueprintNodeId) ? null : $"node={BlueprintNodeId}",
+            string.IsNullOrWhiteSpace(BlueprintStepId) ? null : $"step={BlueprintStepId}",
             string.IsNullOrWhiteSpace(ErrorCode) ? null : $"error={ErrorCode}"
         }.Where(value => value is not null));
 }
@@ -416,7 +422,10 @@ public sealed class WorkbenchConsoleService :
                 Status = RedactNullableLocked(context.Status),
                 ExpectedPath = RedactNullableLocked(context.ExpectedPath),
                 ObservedPath = RedactNullableLocked(context.ObservedPath),
-                ErrorCode = RedactNullableLocked(context.ErrorCode)
+                ErrorCode = RedactNullableLocked(context.ErrorCode),
+                BlueprintGraphId = RedactNullableLocked(context.BlueprintGraphId),
+                BlueprintNodeId = RedactNullableLocked(context.BlueprintNodeId),
+                BlueprintStepId = RedactNullableLocked(context.BlueprintStepId)
             };
 
     private string? RedactNullableLocked(string? value) =>

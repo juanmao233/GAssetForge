@@ -34,7 +34,13 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, FrameworkElement> _sharedPanelViews = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FrameworkElement> _uiPanelViews = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FrameworkElement> _tilemapPanelViews = new(StringComparer.Ordinal);
+    private BlueprintToolPaletteView _blueprintToolPaletteView = null!;
+    private FrameworkElement? _workflowToolPaletteView;
+    private string _activeToolContextContentId = CanvasContentId;
+    private LayoutAnchorable? _observedBlueprintAnchorable;
     private bool _isLoaded;
+    private bool _isShutdownInProgress;
+    private bool _isShutdownComplete;
 
     public MainWindow(ShellViewModel viewModel, AvalonDockLayoutService layoutService)
     {
@@ -57,6 +63,7 @@ public partial class MainWindow : Window
         _viewModel.AgentConnectionRequested += OnAgentConnectionRequested;
         _viewModel.PropertyChanged += OnShellPropertyChanged;
         DockManager.DocumentClosed += OnDocumentClosed;
+        DockManager.ActiveContentChanged += OnDockManagerActiveContentChanged;
     }
 
     private IReadOnlyDictionary<string, object> PanelContent =>
@@ -78,6 +85,7 @@ public partial class MainWindow : Window
         _panelHosts[CommandConsoleContentId] = CreateHost();
 
         _uiPanelViews[ToolsContentId] = new ToolPaletteView { DataContext = _viewModel.EditorWorkspace };
+        _blueprintToolPaletteView = new BlueprintToolPaletteView { DataContext = _viewModel.Blueprint };
         _uiPanelViews[CanvasContentId] = new CanvasDocumentView { DataContext = _viewModel.EditorWorkspace };
         _uiPanelViews[PropertiesContentId] = new PropertiesView { DataContext = _viewModel.EditorWorkspace };
         _uiPanelViews[LayersContentId] = new LayersView { DataContext = _viewModel.EditorWorkspace };
@@ -159,6 +167,8 @@ public partial class MainWindow : Window
             }
         }
 
+        _workflowToolPaletteView = _panelHosts[ToolsContentId].Content as FrameworkElement;
+        RefreshActiveToolPalette();
         UpdateLayoutTitles();
     }
 
@@ -194,6 +204,8 @@ public partial class MainWindow : Window
 
     private void BuildDefaultLayout()
     {
+        ObserveBlueprintVisibility(null);
+        _activeToolContextContentId = CanvasContentId;
         var tools = CreateAnchorable(ToolsContentId);
         var properties = CreateAnchorable(PropertiesContentId);
         var layers = CreateAnchorable(LayersContentId);
@@ -210,7 +222,7 @@ public partial class MainWindow : Window
 
         var toolsPane = new LayoutAnchorablePane(tools)
         {
-            DockWidth = new GridLength(78)
+            DockWidth = new GridLength(112)
         };
         var documentPane = new LayoutDocumentPane(canvas)
         {
@@ -265,6 +277,7 @@ public partial class MainWindow : Window
         rootPanel.Children.Add(right);
 
         DockManager.Layout = new LayoutRoot { RootPanel = rootPanel };
+        ObserveBlueprintVisibility(blueprint);
         agentConnection.Hide();
     }
 
@@ -293,7 +306,7 @@ public partial class MainWindow : Window
             BackgroundRemovalContentId => (1180d, 760d),
             PixelAlignmentContentId => (1180d, 760d),
             BlueprintContentId => (1180d, 760d),
-            AgentConnectionContentId => (940d, 740d),
+            AgentConnectionContentId => (860d, 560d),
             CommandConsoleContentId => (1080d, 620d),
             _ => (360d, 520d)
         };
@@ -322,6 +335,7 @@ public partial class MainWindow : Window
         }
 
         _isLoaded = true;
+        ObserveBlueprintVisibility(null);
         if (!_layoutService.TryRestore(DockManager, PanelContent))
         {
             BuildDefaultLayout();
@@ -333,6 +347,8 @@ public partial class MainWindow : Window
         }
 
         ApplyDockingCapabilities();
+        ObserveBlueprintVisibility(FindContent(BlueprintContentId) as LayoutAnchorable);
+        SyncActiveToolContextFromLayout();
         RefreshPanelContents();
         SyncToggleMenuStates();
         if (_viewModel.IsNewProjectDialogOpen)
@@ -341,33 +357,71 @@ public partial class MainWindow : Window
         }
     }
 
-    private void OnClosing(object? sender, CancelEventArgs e)
+    private async void OnClosing(object? sender, CancelEventArgs e)
     {
+        if (_isShutdownComplete)
+        {
+            return;
+        }
+
+        e.Cancel = true;
+        if (_isShutdownInProgress)
+        {
+            return;
+        }
+
+        _isShutdownInProgress = true;
         try
         {
-            _layoutService.Save(DockManager);
+            try
+            {
+                _layoutService.Save(DockManager);
+            }
+            catch (Exception exception)
+            {
+                Debug.WriteLine($"AvalonDock 布局保存失败：{exception}");
+                _viewModel.CommandConsole.WriteError(
+                    "Layout",
+                    $"AvalonDock 布局保存失败：{exception.Message}",
+                    exception);
+            }
+
+            ObserveBlueprintVisibility(null);
+            foreach (var disposableView in _sharedPanelViews.Values.OfType<IDisposable>())
+            {
+                try
+                {
+                    disposableView.Dispose();
+                }
+                catch (Exception exception)
+                {
+                    Debug.WriteLine($"停靠视图关闭失败：{exception}");
+                }
+            }
+
+            await _viewModel.ShutdownAsync().ConfigureAwait(true);
         }
         catch (Exception exception)
         {
-            Debug.WriteLine($"AvalonDock 布局保存失败：{exception}");
-            _viewModel.CommandConsole.WriteError("Layout", $"AvalonDock 布局保存失败：{exception.Message}", exception);
+            Debug.WriteLine($"GAssetForge 异步关闭失败：{exception}");
         }
         finally
         {
-            foreach (var disposableView in _sharedPanelViews.Values.OfType<IDisposable>())
-            {
-                disposableView.Dispose();
-            }
-
-            _viewModel.Shutdown();
             _viewModel.LayoutResetRequested -= OnLayoutResetRequested;
             _viewModel.PanelShowRequested -= OnPanelShowRequested;
             _viewModel.PanelToggleRequested -= OnPanelToggleRequested;
             _viewModel.AgentConnectionRequested -= OnAgentConnectionRequested;
             _viewModel.PropertyChanged -= OnShellPropertyChanged;
             DockManager.DocumentClosed -= OnDocumentClosed;
+            DockManager.ActiveContentChanged -= OnDockManagerActiveContentChanged;
             ContentRendered -= OnContentRendered;
             PreviewKeyDown -= OnPreviewKeyDown;
+            _isShutdownComplete = true;
+            _isShutdownInProgress = false;
+            if (!Dispatcher.HasShutdownStarted && !Dispatcher.HasShutdownFinished)
+            {
+                _ = Dispatcher.BeginInvoke(DispatcherPriority.Send, new Action(Close));
+            }
         }
     }
 
@@ -549,6 +603,11 @@ public partial class MainWindow : Window
                 CommandConsoleContentId => AnchorableShowStrategy.Bottom,
                 _ => AnchorableShowStrategy.Right
             });
+            if (string.Equals(contentId, BlueprintContentId, StringComparison.Ordinal))
+            {
+                ObserveBlueprintVisibility(restored);
+            }
+
             return restored;
         }
         catch (Exception exception)
@@ -688,6 +747,105 @@ public partial class MainWindow : Window
                 DockManager.Focus();
             }
         }
+    }
+
+    private void OnDockManagerActiveContentChanged(object? sender, EventArgs e)
+    {
+        var contentId = DockManager.Layout.ActiveContent?.ContentId;
+        if (contentId is BlueprintContentId or CanvasContentId)
+        {
+            _activeToolContextContentId = contentId;
+            RefreshActiveToolPalette();
+            return;
+        }
+
+        if (contentId is StyleLibraryContentId or AssetGenerationContentId or
+            BackgroundRemovalContentId or PixelAlignmentContentId or AgentConnectionContentId)
+        {
+            _activeToolContextContentId = CanvasContentId;
+            RefreshActiveToolPalette();
+            return;
+        }
+
+        if (string.Equals(_activeToolContextContentId, BlueprintContentId, StringComparison.Ordinal) &&
+            FindContent(BlueprintContentId) is LayoutAnchorable { IsHidden: true })
+        {
+            _activeToolContextContentId = CanvasContentId;
+            RefreshActiveToolPalette();
+        }
+    }
+
+    private void ObserveBlueprintVisibility(LayoutAnchorable? anchorable)
+    {
+        if (ReferenceEquals(_observedBlueprintAnchorable, anchorable))
+        {
+            return;
+        }
+
+        if (_observedBlueprintAnchorable is not null)
+        {
+            _observedBlueprintAnchorable.IsVisibleChanged -= OnBlueprintVisibilityChanged;
+        }
+
+        _observedBlueprintAnchorable = anchorable;
+        if (_observedBlueprintAnchorable is not null)
+        {
+            _observedBlueprintAnchorable.IsVisibleChanged += OnBlueprintVisibilityChanged;
+        }
+    }
+
+    private void OnBlueprintVisibilityChanged(object? sender, EventArgs e)
+    {
+        if (!ReferenceEquals(sender, _observedBlueprintAnchorable) ||
+            _observedBlueprintAnchorable is null)
+        {
+            return;
+        }
+
+        if (_observedBlueprintAnchorable.IsVisible)
+        {
+            if (string.Equals(
+                    DockManager.Layout.ActiveContent?.ContentId,
+                    BlueprintContentId,
+                    StringComparison.Ordinal))
+            {
+                _activeToolContextContentId = BlueprintContentId;
+                RefreshActiveToolPalette();
+            }
+
+            return;
+        }
+
+        if (string.Equals(_activeToolContextContentId, BlueprintContentId, StringComparison.Ordinal))
+        {
+            _activeToolContextContentId = CanvasContentId;
+            RefreshActiveToolPalette();
+        }
+    }
+
+    private void RefreshActiveToolPalette()
+    {
+        if (!_panelHosts.TryGetValue(ToolsContentId, out var host))
+        {
+            return;
+        }
+
+        host.Content = string.Equals(
+                _activeToolContextContentId,
+                BlueprintContentId,
+                StringComparison.Ordinal)
+            ? _blueprintToolPaletteView
+            : _workflowToolPaletteView;
+    }
+
+    private void SyncActiveToolContextFromLayout()
+    {
+        _activeToolContextContentId = string.Equals(
+            DockManager.Layout.ActiveContent?.ContentId,
+            BlueprintContentId,
+            StringComparison.Ordinal)
+            ? BlueprintContentId
+            : CanvasContentId;
     }
 
     private LayoutContent? FindContent(string contentId)

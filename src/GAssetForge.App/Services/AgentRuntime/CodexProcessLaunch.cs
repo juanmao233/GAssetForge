@@ -11,7 +11,8 @@ internal static class CodexProcessLaunch
     internal static ProcessStartInfo CreateBaseStartInfo(
         AgentSessionStartOptions options,
         string? applicationDirectory = null,
-        string? pathEnvironment = null)
+        string? pathEnvironment = null,
+        string? applicationDataDirectory = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentException.ThrowIfNullOrWhiteSpace(options.ExecutablePath);
@@ -28,7 +29,8 @@ internal static class CodexProcessLaunch
         var executableLaunch = CodexExecutableResolver.Resolve(
             options.ExecutablePath,
             applicationDirectory,
-            pathEnvironment);
+            pathEnvironment,
+            applicationDataDirectory: applicationDataDirectory);
         var startInfo = new ProcessStartInfo
         {
             FileName = executableLaunch.ProcessFileName,

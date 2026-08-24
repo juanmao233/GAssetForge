@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.Collections.ObjectModel;
 using System.Globalization;
 using System.IO;
+using System.Text;
 using System.Threading;
 using System.Windows.Input;
 using System.Windows.Threading;
@@ -24,15 +25,21 @@ public enum AgentConnectionStatus
 
 public sealed class AgentConnectionSettingsChangedEventArgs : EventArgs
 {
-    public AgentConnectionSettingsChangedEventArgs(string agentKey, int port)
+    public AgentConnectionSettingsChangedEventArgs(
+        string agentKey,
+        int port,
+        string? codexExecutablePath = null)
     {
         AgentKey = agentKey;
         Port = port;
+        CodexExecutablePath = codexExecutablePath;
     }
 
     public string AgentKey { get; }
 
     public int Port { get; }
+
+    public string? CodexExecutablePath { get; }
 }
 
 public sealed class AgentSessionChangedEventArgs : EventArgs
@@ -48,7 +55,7 @@ public sealed class AgentSessionChangedEventArgs : EventArgs
     public string WorkingDirectory { get; }
 }
 
-public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
+public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IAsyncDisposable
 {
     public const int DefaultPort = 43120;
     private const int MaximumLogEntries = 500;
@@ -57,18 +64,25 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
     // Kept for compatibility with the delivery smoke tests and the asset pipeline.
     private readonly McpServerProcessService _serverService;
     private readonly CodexAgentRuntimeService _runtimeService;
+    private readonly ICodexExecutablePicker _codexExecutablePicker;
     private readonly IWorkbenchLogSink? _workbenchLogSink;
     private readonly IWorkbenchLogRedactionRegistry? _workbenchRedactionRegistry;
     private readonly AgentActivityParser _activityParser = new();
     private readonly Dispatcher _dispatcher;
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     private readonly SemaphoreSlim _turnGate = new(1, 1);
+    private readonly object _disposeLock = new();
     private readonly AsyncRelayCommand _startCommand;
     private readonly AsyncRelayCommand _stopCommand;
+    private readonly AsyncRelayCommand _startMcpServerCommand;
+    private readonly AsyncRelayCommand _stopMcpServerCommand;
+    private readonly AsyncRelayCommand _refreshCodexRuntimeDiagnosticsCommand;
     private readonly AsyncRelayCommand _refreshAuthenticationCommand;
     private readonly AsyncRelayCommand _loginCommand;
     private readonly AsyncRelayCommand _interruptTurnCommand;
     private readonly RelayCommand _copyCodexConnectionPromptCommand;
+    private readonly RelayCommand _browseCodexExecutableCommand;
+    private readonly RelayCommand _useAutomaticCodexExecutableCommand;
     private AgentProfile _selectedAgent;
     private int _port;
     private AgentConnectionStatus _statusKind = AgentConnectionStatus.Stopped;
@@ -84,10 +98,17 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
     private string _lastTurnStatus = "尚未运行 Turn";
     private string _lastMcpToolStatus = "尚未初始化";
     private string _codexConnectionPromptStatusText = "可复制完整连接检查指令并粘贴到 Codex 聊天；提示只引用令牌环境变量名。";
+    private string? _codexExecutablePath;
+    private string _codexRuntimeDiagnosticsText = "尚未检测 Codex CLI。点击“重新检测”可查看全部候选路径与结果。";
+    private long _codexExecutableRevision;
     private CancellationTokenSource? _startCancellation;
     private bool _isStarting;
     private bool _isStopping;
+    private bool _isStartingMcpServer;
+    private bool _isStoppingMcpServer;
+    private bool _isRefreshingCodexRuntimeDiagnostics;
     private bool _disposed;
+    private Task? _disposeTask;
 
     public AgentConnectionViewModel(
         McpServerProcessService serverService,
@@ -110,10 +131,13 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
         int port = DefaultPort,
         string? workingDirectory = null,
         string? resumeThreadId = null,
-        IWorkbenchLogSink? workbenchLogSink = null)
+        IWorkbenchLogSink? workbenchLogSink = null,
+        string? codexExecutablePath = null,
+        ICodexExecutablePicker? codexExecutablePicker = null)
     {
         _serverService = serverService ?? throw new ArgumentNullException(nameof(serverService));
         _runtimeService = runtimeService ?? throw new ArgumentNullException(nameof(runtimeService));
+        _codexExecutablePicker = codexExecutablePicker ?? new DesktopCodexExecutablePicker();
         _workbenchLogSink = workbenchLogSink;
         _workbenchRedactionRegistry = workbenchLogSink as IWorkbenchLogRedactionRegistry;
         _workbenchRedactionRegistry?.RegisterSensitiveValue(
@@ -123,11 +147,18 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
         _port = IsValidPort(port) ? port : DefaultPort;
         _workingDirectory = NormalizeWorkingDirectory(workingDirectory ?? Environment.CurrentDirectory);
         _resumeThreadId = NormalizeThreadId(resumeThreadId);
+        _codexExecutablePath = NormalizeConfiguredExecutablePath(codexExecutablePath);
+        _runtimeService.ConfigureExecutablePath(EffectiveCodexExecutablePath);
         _lastPublishedThreadId = _resumeThreadId;
         _lastPublishedWorkingDirectory = _workingDirectory;
 
         _startCommand = new AsyncRelayCommand(StartSessionAsync, () => CanStart);
         _stopCommand = new AsyncRelayCommand(StopSessionAsync, () => CanStop);
+        _startMcpServerCommand = new AsyncRelayCommand(StartMcpServerAsync, () => CanStartMcpServer);
+        _stopMcpServerCommand = new AsyncRelayCommand(StopMcpServerAsync, () => CanStopMcpServer);
+        _refreshCodexRuntimeDiagnosticsCommand = new AsyncRelayCommand(
+            RefreshCodexRuntimeDiagnosticsAsync,
+            () => CanEditRuntimeSettings);
         _refreshAuthenticationCommand = new AsyncRelayCommand(
             RefreshAuthenticationAsync,
             () => CanRefreshAuthentication);
@@ -145,6 +176,17 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
             () => CopyCodexConnectionPromptRequested?.Invoke(this, CodexConnectionPrompt),
             () => CanCopyCodexConnectionPrompt);
         CopyCodexConnectionPromptCommand = _copyCodexConnectionPromptCommand;
+        _browseCodexExecutableCommand = new RelayCommand(
+            BrowseCodexExecutable,
+            () => CanEditRuntimeSettings);
+        _useAutomaticCodexExecutableCommand = new RelayCommand(
+            UseAutomaticCodexExecutable,
+            () => CanEditRuntimeSettings && !string.IsNullOrWhiteSpace(CodexExecutablePath));
+        StartMcpServerCommand = _startMcpServerCommand;
+        StopMcpServerCommand = _stopMcpServerCommand;
+        RefreshCodexRuntimeDiagnosticsCommand = _refreshCodexRuntimeDiagnosticsCommand;
+        BrowseCodexExecutableCommand = _browseCodexExecutableCommand;
+        UseAutomaticCodexExecutableCommand = _useAutomaticCodexExecutableCommand;
 
         _serverService.StateChanged += OnServerStateChanged;
         _serverService.LogReceived += OnServerLogReceived;
@@ -275,26 +317,76 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
     };
 
     public bool IsRunning =>
+        IsAgentSessionActive ||
+        IsMcpServerActive ||
+        _runtimeService.State == AgentSessionTransportState.Faulted;
+
+    public bool IsAgentSessionActive =>
         _isStarting ||
         _isStopping ||
-        _serverService.IsProcessRunning ||
-        _runtimeService.State is not AgentSessionTransportState.Stopped;
+        _runtimeService.State is
+            AgentSessionTransportState.Starting or
+            AgentSessionTransportState.Ready or
+            AgentSessionTransportState.RunningTurn or
+            AgentSessionTransportState.Stopping;
+
+    public bool IsMcpServerActive =>
+        _isStartingMcpServer ||
+        _isStoppingMcpServer ||
+        _serverService.IsProcessRunning;
+
+    public bool IsMcpServerStandalone => IsMcpServerActive && !IsAgentSessionActive;
 
     // Connected means a generation task can be executed, rather than merely that HTTP MCP shook hands.
     public bool IsConnected => IsSessionReady();
 
     public bool IsTurnRunning => _runtimeService.IsTurnRunning;
 
-    public bool CanEditSettings => !IsRunning;
+    public bool CanEditSettings =>
+        !_disposed &&
+        !IsAgentSessionActive &&
+        !IsMcpServerActive;
+
+    public bool CanEditRuntimeSettings =>
+        !_disposed &&
+        !_isStarting &&
+        !_isStopping &&
+        !_isRefreshingCodexRuntimeDiagnostics &&
+        _runtimeService.State is AgentSessionTransportState.Stopped or AgentSessionTransportState.Faulted;
 
     public bool CanStart =>
         !_disposed &&
-        CanEditSettings &&
+        !_isStarting &&
+        !_isStopping &&
+        !_isStartingMcpServer &&
+        !_isStoppingMcpServer &&
+        !_isRefreshingCodexRuntimeDiagnostics &&
+        !IsAgentSessionActive &&
         IsPortValid &&
         SelectedAgent.IsRuntimeAvailable &&
-        Directory.Exists(WorkingDirectory);
+        Directory.Exists(WorkingDirectory) &&
+        CanReuseCurrentMcpServer();
 
-    public bool CanStop => !_disposed && IsRunning;
+    public bool CanStop => !_disposed && IsAgentSessionActive;
+
+    public bool CanStartMcpServer =>
+        !_disposed &&
+        !_isStarting &&
+        !_isStopping &&
+        !_isStartingMcpServer &&
+        !_isStoppingMcpServer &&
+        !IsAgentSessionActive &&
+        !_serverService.IsProcessRunning &&
+        IsPortValid;
+
+    public bool CanStopMcpServer =>
+        !_disposed &&
+        !_isStarting &&
+        !_isStopping &&
+        !_isStartingMcpServer &&
+        !_isStoppingMcpServer &&
+        !IsAgentSessionActive &&
+        _serverService.IsProcessRunning;
 
     public bool CanLogin =>
         !_disposed &&
@@ -334,6 +426,22 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
             OnPropertyChanged(nameof(CanCopyCodexConnectionPrompt));
             _copyCodexConnectionPromptCommand?.RaiseCanExecuteChanged();
         }
+    }
+
+    public string? CodexExecutablePath
+    {
+        get => _codexExecutablePath;
+        set => ConfigureCodexExecutablePath(value);
+    }
+
+    public string CodexExecutablePathDisplayText => string.IsNullOrWhiteSpace(CodexExecutablePath)
+        ? "自动检测（%APPDATA%\\npm、PATH 与应用目录）"
+        : CodexExecutablePath;
+
+    public string CodexRuntimeDiagnosticsText
+    {
+        get => _codexRuntimeDiagnosticsText;
+        private set => SetProperty(ref _codexRuntimeDiagnosticsText, value);
     }
 
     public string CodexVersionText => string.IsNullOrWhiteSpace(_runtimeService.RuntimeVersion)
@@ -437,6 +545,16 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
 
     public ICommand StopCommand { get; }
 
+    public ICommand StartMcpServerCommand { get; }
+
+    public ICommand StopMcpServerCommand { get; }
+
+    public ICommand BrowseCodexExecutableCommand { get; }
+
+    public ICommand UseAutomaticCodexExecutableCommand { get; }
+
+    public ICommand RefreshCodexRuntimeDiagnosticsCommand { get; }
+
     public ICommand RefreshAuthenticationCommand { get; }
 
     public ICommand LoginCommand { get; }
@@ -454,6 +572,110 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
         CodexConnectionPromptStatusText = copied
             ? "已复制 Codex 连接指令，可直接粘贴到 Codex 聊天窗口。"
             : $"复制 Codex 连接指令失败：{(string.IsNullOrWhiteSpace(errorMessage) ? "剪贴板不可用" : errorMessage.Trim())}";
+    }
+
+    private string EffectiveCodexExecutablePath =>
+        string.IsNullOrWhiteSpace(CodexExecutablePath) ? "codex" : CodexExecutablePath;
+
+    private void BrowseCodexExecutable()
+    {
+        if (!CanEditRuntimeSettings)
+        {
+            return;
+        }
+
+        var selectedPath = _codexExecutablePicker.SelectExecutable(CodexExecutablePath);
+        if (!string.IsNullOrWhiteSpace(selectedPath))
+        {
+            ConfigureCodexExecutablePath(selectedPath);
+        }
+    }
+
+    private void UseAutomaticCodexExecutable()
+    {
+        if (CanEditRuntimeSettings)
+        {
+            ConfigureCodexExecutablePath(null);
+        }
+    }
+
+    private void ConfigureCodexExecutablePath(string? value)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (!CanEditRuntimeSettings)
+        {
+            throw new InvalidOperationException("Codex Runtime 运行期间不能修改 CLI 路径。请先停止 Agent 会话。");
+        }
+
+        var normalized = NormalizeConfiguredExecutablePath(value);
+        if (string.Equals(_codexExecutablePath, normalized, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+
+        _runtimeService.ConfigureExecutablePath(
+            string.IsNullOrWhiteSpace(normalized) ? "codex" : normalized);
+        _codexExecutablePath = normalized;
+        _codexExecutableRevision++;
+        _faultMessage = null;
+        CodexRuntimeDiagnosticsText = "CLI 路径已更新。点击“重新检测”验证候选是否可启动。";
+        OnPropertyChanged(nameof(CodexExecutablePath));
+        OnPropertyChanged(nameof(CodexExecutablePathDisplayText));
+        NotifySettingsChanged();
+        RefreshState();
+    }
+
+    private async Task RefreshCodexRuntimeDiagnosticsAsync()
+    {
+        if (!CanEditRuntimeSettings)
+        {
+            return;
+        }
+
+        var revision = _codexExecutableRevision;
+        _isRefreshingCodexRuntimeDiagnostics = true;
+        CodexRuntimeDiagnosticsText = "正在检测 Codex CLI 候选路径…";
+        RefreshState();
+        try
+        {
+            var requestedExecutable = EffectiveCodexExecutablePath;
+            var resolution = await Task.Run(() =>
+            {
+                CodexExecutableResolver.ClearLaunchProbeCache();
+                return CodexExecutableResolver.ResolveWithDiagnostics(requestedExecutable);
+            }).ConfigureAwait(true);
+            if (revision != _codexExecutableRevision)
+            {
+                return;
+            }
+
+            CodexRuntimeDiagnosticsText = FormatCodexRuntimeDiagnostics(resolution);
+            if (resolution.IsSuccess)
+            {
+                _faultMessage = null;
+                AddLog(
+                    DateTimeOffset.Now,
+                    $"Codex CLI 检测通过：{resolution.Launch!.CodexExecutablePath}",
+                    false);
+            }
+            else
+            {
+                AddLog(DateTimeOffset.Now, $"Codex CLI 检测失败：{resolution.Summary}", true);
+            }
+        }
+        catch (Exception exception)
+        {
+            if (revision == _codexExecutableRevision)
+            {
+                CodexRuntimeDiagnosticsText = $"Codex CLI 检测异常：{Sanitize(exception.Message)}";
+                AddLog(DateTimeOffset.Now, CodexRuntimeDiagnosticsText, true);
+            }
+        }
+        finally
+        {
+            _isRefreshingCodexRuntimeDiagnostics = false;
+            RefreshState();
+        }
     }
 
     public void ConfigureWorkingDirectory(string workingDirectory, string? resumeThreadId = null)
@@ -546,22 +768,63 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
 
     public void Dispose()
     {
+        var disposeTask = DisposeAsync().AsTask();
+        if (_dispatcher.CheckAccess() &&
+            !disposeTask.IsCompleted &&
+            !_dispatcher.HasShutdownStarted &&
+            !_dispatcher.HasShutdownFinished)
+        {
+            var frame = new DispatcherFrame();
+            _ = disposeTask.ContinueWith(
+                completedTask =>
+                {
+                    if (_dispatcher.HasShutdownStarted || _dispatcher.HasShutdownFinished)
+                    {
+                        frame.Continue = false;
+                        return;
+                    }
+
+                    _ = _dispatcher.BeginInvoke(
+                        DispatcherPriority.Send,
+                        new Action(() => frame.Continue = false));
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            Dispatcher.PushFrame(frame);
+        }
+
+        disposeTask.GetAwaiter().GetResult();
+        GC.SuppressFinalize(this);
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        lock (_disposeLock)
+        {
+            _disposeTask ??= DisposeCoreAsync();
+            return new ValueTask(_disposeTask);
+        }
+    }
+
+    private async Task DisposeCoreAsync()
+    {
         if (_disposed)
         {
             return;
         }
 
+        _disposed = true;
         _startCancellation?.Cancel();
         try
         {
-            StopSessionAsync(CancellationToken.None).GetAwaiter().GetResult();
+            await StopSessionAsync(CancellationToken.None).ConfigureAwait(false);
         }
         catch
         {
             // Shutdown continues so both child processes and handles are released.
         }
 
-        _disposed = true;
         _serverService.StateChanged -= OnServerStateChanged;
         _serverService.LogReceived -= OnServerLogReceived;
         _runtimeService.StateChanged -= OnRuntimeStateChanged;
@@ -569,7 +832,7 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
         _runtimeService.NotificationReceived -= OnRuntimeNotificationReceived;
         _runtimeService.TurnCompleted -= OnRuntimeTurnCompleted;
         _runtimeService.McpStatusChanged -= OnRuntimeMcpStatusChanged;
-        _runtimeService.DisposeAsync().GetAwaiter().GetResult();
+        await _runtimeService.DisposeAsync().ConfigureAwait(false);
         _serverService.Dispose();
         _startCancellation?.Dispose();
         _lifecycleGate.Dispose();
@@ -596,13 +859,11 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
             RefreshState();
             AddLog(DateTimeOffset.Now, $"正在启动 {SelectedAgent.DisplayName} Agent 会话。", false);
 
+            var mcpHealthy = false;
             try
             {
-                await _serverService.StartAsync(
-                    Port,
-                    SelectedAgent.Key,
-                    _startCancellation.Token).ConfigureAwait(true);
-                await WaitForMcpHealthReadyAsync(_startCancellation.Token).ConfigureAwait(true);
+                await EnsureMcpServerHealthyAsync(_startCancellation.Token).ConfigureAwait(true);
+                mcpHealthy = true;
                 await _runtimeService.EnsureSessionAsync(
                     WorkingDirectory,
                     _resumeThreadId,
@@ -633,12 +894,17 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
             catch (OperationCanceledException) when (_startCancellation.IsCancellationRequested)
             {
                 AddLog(DateTimeOffset.Now, "Agent 会话启动已取消。", false);
+                await CleanupAfterFailedRuntimeStartAsync(mcpHealthy).ConfigureAwait(true);
             }
             catch (Exception exception)
             {
-                _faultMessage = Sanitize(exception.Message);
+                var detail = Sanitize(exception.Message);
+                _faultMessage = mcpHealthy
+                    ? $"Codex Runtime 启动失败；MCP Server 已保持运行，可修正 CLI 路径后重试。{Environment.NewLine}{detail}"
+                    : detail;
+                CodexRuntimeDiagnosticsText = detail;
                 AddLog(DateTimeOffset.Now, $"Agent 会话启动失败：{_faultMessage}", true);
-                await StopServicesAfterFailedStartAsync().ConfigureAwait(true);
+                await CleanupAfterFailedRuntimeStartAsync(mcpHealthy).ConfigureAwait(true);
             }
         }
         finally
@@ -646,6 +912,88 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
             _isStarting = false;
             _startCancellation?.Dispose();
             _startCancellation = null;
+            RefreshState();
+            _lifecycleGate.Release();
+        }
+    }
+
+    private Task StartMcpServerAsync() => StartMcpServerAsync(CancellationToken.None);
+
+    private async Task StartMcpServerAsync(CancellationToken cancellationToken)
+    {
+        await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(true);
+        try
+        {
+            if (!CanStartMcpServer)
+            {
+                return;
+            }
+
+            _isStartingMcpServer = true;
+            _faultMessage = null;
+            RefreshState();
+            AddLog(DateTimeOffset.Now, "正在独立启动 MCP Server。", false);
+            try
+            {
+                await _serverService.StartAsync(Port, SelectedAgent.Key, cancellationToken).ConfigureAwait(true);
+                await WaitForMcpHealthReadyAsync(cancellationToken).ConfigureAwait(true);
+                AddLog(DateTimeOffset.Now, "MCP Server 已就绪，可继续启动 Agent Runtime 或独立诊断。", false);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                _faultMessage = Sanitize(exception.Message);
+                AddLog(DateTimeOffset.Now, $"MCP Server 启动失败：{_faultMessage}", true);
+                try
+                {
+                    await _serverService.StopAsync(CancellationToken.None).ConfigureAwait(true);
+                }
+                catch (Exception cleanupException)
+                {
+                    AddLog(
+                        DateTimeOffset.Now,
+                        $"清理 MCP Server 失败：{Sanitize(cleanupException.Message)}",
+                        true);
+                }
+            }
+        }
+        finally
+        {
+            _isStartingMcpServer = false;
+            RefreshState();
+            _lifecycleGate.Release();
+        }
+    }
+
+    private Task StopMcpServerAsync() => StopMcpServerAsync(CancellationToken.None);
+
+    private async Task StopMcpServerAsync(CancellationToken cancellationToken)
+    {
+        await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(true);
+        try
+        {
+            if (!CanStopMcpServer)
+            {
+                return;
+            }
+
+            _isStoppingMcpServer = true;
+            _faultMessage = null;
+            RefreshState();
+            try
+            {
+                await _serverService.StopAsync(cancellationToken).ConfigureAwait(true);
+                _lastMcpToolStatus = "尚未初始化";
+                AddLog(DateTimeOffset.Now, "MCP Server 已独立停止。", false);
+            }
+            catch (Exception exception) when (exception is not OperationCanceledException)
+            {
+                _faultMessage = Sanitize(exception.Message);
+                AddLog(DateTimeOffset.Now, $"停止 MCP Server 失败：{_faultMessage}", true);
+            }
+        }
+        finally
+        {
+            _isStoppingMcpServer = false;
             RefreshState();
             _lifecycleGate.Release();
         }
@@ -721,7 +1069,7 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
         }
     }
 
-    private async Task StopServicesAfterFailedStartAsync()
+    private async Task CleanupAfterFailedRuntimeStartAsync(bool keepHealthyMcpServer)
     {
         try
         {
@@ -732,13 +1080,16 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
             AddLog(DateTimeOffset.Now, $"清理 Agent Runtime 失败：{Sanitize(exception.Message)}", true);
         }
 
-        try
+        if (!keepHealthyMcpServer)
         {
-            await _serverService.StopAsync(CancellationToken.None).ConfigureAwait(true);
-        }
-        catch (Exception exception)
-        {
-            AddLog(DateTimeOffset.Now, $"清理 MCP Server 失败：{Sanitize(exception.Message)}", true);
+            try
+            {
+                await _serverService.StopAsync(CancellationToken.None).ConfigureAwait(true);
+            }
+            catch (Exception exception)
+            {
+                AddLog(DateTimeOffset.Now, $"清理 MCP Server 失败：{Sanitize(exception.Message)}", true);
+            }
         }
 
         _activeWorkingDirectory = null;
@@ -822,6 +1173,29 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
         {
             RefreshState();
         }
+    }
+
+    private async Task EnsureMcpServerHealthyAsync(CancellationToken cancellationToken)
+    {
+        if (_serverService.IsProcessRunning)
+        {
+            if (_serverService.Endpoint?.Port != Port)
+            {
+                throw new InvalidOperationException(
+                    $"MCP Server 当前运行在端口 {_serverService.Endpoint?.Port}，与设置端口 {Port} 不一致。" +
+                    "请先停止 MCP Server 后再修改端口。");
+            }
+
+            await WaitForMcpHealthReadyAsync(cancellationToken).ConfigureAwait(true);
+            AddLog(DateTimeOffset.Now, "复用已就绪的 MCP Server，继续启动 Codex Runtime。", false);
+            return;
+        }
+
+        await _serverService.StartAsync(
+            Port,
+            SelectedAgent.Key,
+            cancellationToken).ConfigureAwait(true);
+        await WaitForMcpHealthReadyAsync(cancellationToken).ConfigureAwait(true);
     }
 
     private async Task WaitForMcpHealthReadyAsync(CancellationToken cancellationToken)
@@ -1035,11 +1409,17 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
         StatusText = text;
 
         OnPropertyChanged(nameof(IsRunning));
+        OnPropertyChanged(nameof(IsAgentSessionActive));
+        OnPropertyChanged(nameof(IsMcpServerActive));
+        OnPropertyChanged(nameof(IsMcpServerStandalone));
         OnPropertyChanged(nameof(IsConnected));
         OnPropertyChanged(nameof(IsTurnRunning));
         OnPropertyChanged(nameof(CanEditSettings));
+        OnPropertyChanged(nameof(CanEditRuntimeSettings));
         OnPropertyChanged(nameof(CanStart));
         OnPropertyChanged(nameof(CanStop));
+        OnPropertyChanged(nameof(CanStartMcpServer));
+        OnPropertyChanged(nameof(CanStopMcpServer));
         OnPropertyChanged(nameof(CanLogin));
         OnPropertyChanged(nameof(CanRefreshAuthentication));
         OnPropertyChanged(nameof(CanInterruptTurn));
@@ -1063,6 +1443,11 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
             return (AgentConnectionStatus.Stopping, "正在停止 Agent Runtime 与 MCP Server");
         }
 
+        if (_isStoppingMcpServer)
+        {
+            return (AgentConnectionStatus.Stopping, "正在停止 MCP Server");
+        }
+
         if (_isStarting)
         {
             return IsMcpHealthReady(_serverService.State)
@@ -1070,9 +1455,23 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
                 : (AgentConnectionStatus.Starting, "正在启动 MCP Server 并执行健康检查");
         }
 
+        if (_isStartingMcpServer)
+        {
+            return (AgentConnectionStatus.Starting, "正在独立启动 MCP Server 并执行健康检查");
+        }
+
         if (!string.IsNullOrWhiteSpace(_faultMessage))
         {
             return (AgentConnectionStatus.Faulted, _faultMessage);
+        }
+
+        if (IsMcpServerStandalone && IsMcpHealthReady(_serverService.State))
+        {
+            return (
+                AgentConnectionStatus.WaitingForAgent,
+                SelectedAgent.IsRuntimeAvailable
+                    ? "MCP Server 已就绪；Codex Runtime 尚未启动"
+                    : "MCP Server 已就绪；所选 Agent Runtime 尚未适配，可用于独立诊断");
         }
 
         if (!SelectedAgent.IsRuntimeAvailable && !IsRunning)
@@ -1080,7 +1479,7 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
             return (AgentConnectionStatus.Stopped, "OpenCode Adapter 待接入，当前不可启动");
         }
 
-        if (IsRunning && !IsActiveWorkingDirectoryCurrent() &&
+        if (IsAgentSessionActive && !IsActiveWorkingDirectoryCurrent() &&
             !string.IsNullOrWhiteSpace(_activeWorkingDirectory))
         {
             return (AgentConnectionStatus.WaitingForAgent, "项目工作目录已改变，请停止旧会话后重新启动");
@@ -1164,6 +1563,30 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
             : message.Replace(token, "[REDACTED]", StringComparison.Ordinal);
     }
 
+    private static string FormatCodexRuntimeDiagnostics(CodexExecutableResolution resolution)
+    {
+        var builder = new StringBuilder();
+        builder.AppendLine(resolution.Summary);
+        foreach (var candidate in resolution.Candidates)
+        {
+            var status = candidate.Status switch
+            {
+                CodexExecutableCandidateStatus.Accepted => "可用",
+                CodexExecutableCandidateStatus.Skipped => "已跳过",
+                _ => "失败"
+            };
+            builder.Append('[')
+                .Append(status)
+                .Append("] [")
+                .Append(candidate.Source)
+                .Append("] ")
+                .AppendLine(candidate.CandidatePath);
+            builder.Append("  ").AppendLine(candidate.Reason);
+        }
+
+        return builder.ToString().TrimEnd();
+    }
+
     private static string BuildAuthenticatedAccountText(AgentAccountState? account)
     {
         if (account is null)
@@ -1210,12 +1633,20 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
     private void NotifySettingsChanged() =>
         SettingsChanged?.Invoke(
             this,
-            new AgentConnectionSettingsChangedEventArgs(SelectedAgent.Key, Port));
+            new AgentConnectionSettingsChangedEventArgs(
+                SelectedAgent.Key,
+                Port,
+                CodexExecutablePath));
 
     private void RaiseCommandStates()
     {
         _startCommand.RaiseCanExecuteChanged();
         _stopCommand.RaiseCanExecuteChanged();
+        _startMcpServerCommand.RaiseCanExecuteChanged();
+        _stopMcpServerCommand.RaiseCanExecuteChanged();
+        _refreshCodexRuntimeDiagnosticsCommand.RaiseCanExecuteChanged();
+        _browseCodexExecutableCommand.RaiseCanExecuteChanged();
+        _useAutomaticCodexExecutableCommand.RaiseCanExecuteChanged();
         _refreshAuthenticationCommand.RaiseCanExecuteChanged();
         _loginCommand.RaiseCanExecuteChanged();
         _interruptTurnCommand.RaiseCanExecuteChanged();
@@ -1241,6 +1672,32 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable
 
     private static bool IsMcpHealthReady(McpServerProcessState state) =>
         state is McpServerProcessState.WaitingForAgent or McpServerProcessState.Connected;
+
+    private bool CanReuseCurrentMcpServer() =>
+        !_serverService.IsProcessRunning ||
+        (_serverService.Endpoint?.Port == Port && IsMcpHealthReady(_serverService.State));
+
+    private static string? NormalizeConfiguredExecutablePath(string? executablePath)
+    {
+        if (string.IsNullOrWhiteSpace(executablePath) ||
+            string.Equals(executablePath.Trim(), "codex", StringComparison.OrdinalIgnoreCase))
+        {
+            return null;
+        }
+
+        var trimmed = executablePath.Trim().Trim('"');
+        try
+        {
+            return Path.GetFullPath(trimmed);
+        }
+        catch (Exception exception) when (exception is
+            ArgumentException or
+            NotSupportedException or
+            PathTooLongException)
+        {
+            return trimmed;
+        }
+    }
 
     private static string NormalizeWorkingDirectory(string workingDirectory)
     {

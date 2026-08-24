@@ -36,6 +36,7 @@ public sealed class UserSettingsModel
     public double TilemapRotationAngle { get; set; }
     public string McpAgentKey { get; set; } = "codex";
     public int McpPort { get; set; } = 43120;
+    public string? CodexExecutablePath { get; set; }
     public string? CodexThreadId { get; set; }
     public string? CodexThreadWorkingDirectory { get; set; }
     public string AssetGenerationStepKey { get; set; } = "tilemap";

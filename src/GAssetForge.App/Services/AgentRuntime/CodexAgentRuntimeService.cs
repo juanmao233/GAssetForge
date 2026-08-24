@@ -23,9 +23,10 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
 {
     private static readonly TimeSpan McpReadyTimeout = TimeSpan.FromSeconds(20);
     private readonly SemaphoreSlim _sessionGate = new(1, 1);
+    private readonly object _configurationLock = new();
     private readonly Func<IAgentSessionTransport> _appServerFactory;
     private readonly Func<IAgentSessionTransport> _execFactory;
-    private readonly string _codexExecutablePath;
+    private string _codexExecutablePath;
     private IAgentSessionTransport? _transport;
     private string? _sessionWorkingDirectory;
     private Uri? _sessionMcpEndpoint;
@@ -77,6 +78,17 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
 
     public string? LastError { get; private set; }
 
+    public string CodexExecutablePath
+    {
+        get
+        {
+            lock (_configurationLock)
+            {
+                return _codexExecutablePath;
+            }
+        }
+    }
+
     public event EventHandler<AgentTransportStateChangedEventArgs>? StateChanged;
 
     public event EventHandler<AgentTransportLogEventArgs>? LogReceived;
@@ -86,6 +98,35 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
     public event EventHandler<AgentTurnCompletedEventArgs>? TurnCompleted;
 
     public event EventHandler<AgentMcpStatusChangedEventArgs>? McpStatusChanged;
+
+    public void ConfigureExecutablePath(string codexExecutablePath)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentException.ThrowIfNullOrWhiteSpace(codexExecutablePath);
+        if (!_sessionGate.Wait(0))
+        {
+            throw new InvalidOperationException("Codex Runtime 正在启动、停止或执行配置，暂时不能修改 CLI 路径。");
+        }
+
+        try
+        {
+            if (State is not AgentSessionTransportState.Stopped and not AgentSessionTransportState.Faulted)
+            {
+                throw new InvalidOperationException("Codex Runtime 运行期间不能修改 CLI 路径。请先停止 Agent 会话。");
+            }
+
+            lock (_configurationLock)
+            {
+                _codexExecutablePath = codexExecutablePath.Trim();
+            }
+
+            LastError = null;
+        }
+        finally
+        {
+            _sessionGate.Release();
+        }
+    }
 
     public async Task EnsureSessionAsync(
         string workingDirectory,
@@ -136,7 +177,7 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
             await StopTransportAsync(CancellationToken.None).ConfigureAwait(false);
             var options = new AgentSessionStartOptions
             {
-                ExecutablePath = _codexExecutablePath,
+                ExecutablePath = CodexExecutablePath,
                 WorkingDirectory = normalizedWorkingDirectory,
                 McpEndpoint = mcpServer.Endpoint,
                 McpBearerTokenEnvironmentVariableName = mcpServer.TokenEnvironmentVariableName,

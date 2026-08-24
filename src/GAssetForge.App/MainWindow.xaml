@@ -10,6 +10,7 @@
         Height="920"
         MinWidth="1120"
         MinHeight="700"
+        Icon="/GAssetForge;component/Assets/Branding/GAssetForge.ico"
         WindowStartupLocation="CenterScreen"
         Style="{StaticResource App.WindowStyle}"
         Background="{DynamicResource WindowBackgroundBrush}"

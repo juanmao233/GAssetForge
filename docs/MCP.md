@@ -46,15 +46,17 @@ MCP 只承担工具边界，不承担持久 Agent 会话、Turn 调度或进程�
 1. 启动 `GAssetForge.exe` 并创建或恢复项目。
 2. 选择 `MCP 接入 → 打开 Agent 连接面板`。
 3. 选择 Codex，确认工作目录、MCP 端口和账号状态。
-4. 点击“启动 Agent 会话”。桌面端先启动 MCP Server 并等待 `/health` ready，再启动 Codex Runtime。
+4. 点击“启动 Agent 会话”。桌面端先确保 MCP Server 的 `/health` ready，再启动 Codex Runtime；若 MCP
+   已通过“仅启动 MCP”独立运行，则直接复用该服务。
 5. 如果账号需要登录，在同一停靠面板发起 ChatGPT device-code 登录，并在登录后刷新认证状态。
 6. 确认 Runtime、MCP Server、MCP tool 和 thread 状态均可执行，再从“素材生成”页发布批次。
 7. 若自动 Turn 无法认领任务，先在 Agent 面板复制连接检查指令；素材生成页还可复制当前 `Pending` 批次
    指令，或为已经 `Failed` 的批次创建新的手动重试批次后再复制。
 
 Agent 连接面板的 ContentId 为 `mcp-agent-connection`。它是单实例 AvalonDock 面板，可停靠、浮动、隐藏并
-随布局恢复；隐藏面板不会结束会话。应用退出时按 Agent Runtime → MCP Server 的顺序回收桌面端启动的
-子进程。
+随布局恢复；隐藏面板不会结束会话。MCP Server 可与 Codex Runtime 分离启停，便于在 CLI 不可用时单独
+检查端口、健康状态和外部握手。Runtime 启动失败不会再回滚已经健康的 MCP Server。应用退出时仍按
+Agent Runtime → MCP Server 的顺序回收桌面端启动的子进程。
 
 OpenCode 仍显示为后续适配入口，但当前明确标记为 Adapter 待接入，不能启动持久会话或接收自动任务。
 静态 MCP 配置样例不等于 OpenCode Agent Runtime 已实现。
@@ -66,14 +68,21 @@ OpenCode 仍显示为后续适配入口，但当前明确标记为 Adapter 待�
 当配置的可执行文件为 `codex` 时，桌面端会枚举候选并用 `codex --version` 做真实启动探测，而不是仅检查
 文件是否存在。选择顺序为：
 
-1. PATH 中可启动的 `codex.cmd` / `codex.bat` shim；通过 `cmd.exe` 启动，由 shim 自行解析其原生 Runtime。
-2. PATH 中包含 `codex-code-mode-host.exe` 配套组件、且可启动的完整 `codex.exe` Runtime。
-3. 应用目录中的完整 Runtime。
-4. PATH 中仍可启动的兼容旧版独立 `codex.exe`。
+1. 用户在 Agent 面板中明确指定的 `.cmd`、`.bat` 或 `.exe`；脚本通过 `cmd.exe /d /s /c` 启动。
+2. `%APPDATA%\npm\codex.cmd` / `codex.bat`，即 npm 全局安装的标准 shim，即使桌面进程继承的 PATH
+   不含 npm 目录也会主动检查。
+3. PATH 中可启动的 `codex.cmd` / `codex.bat` shim；由 shim 自行解析其原生 Runtime。
+4. PATH 中包含 `codex-code-mode-host.exe` 配套组件、且可启动的完整 `codex.exe` Runtime。
+5. 应用目录中的完整 Runtime。
+6. PATH 中仍可启动的兼容旧版独立 `codex.exe`。
 
-PATH shim 被优先选择，是因为官方 npm launcher 能解析自己的原生资源，而 WindowsApps 下看似存在的
-`codex.exe` 或发行目录中的残缺副本可能无法由普通 WPF 进程直接启动。探测失败的候选会被跳过；若没有
-任何可启动候选，面板会报告被拒绝路径、缺失配套组件或 PATH 安装问题，不会进入伪连接状态。
+自动模式优先选择 npm shim，是因为官方 launcher 能解析自己的原生资源，而 WindowsApps 下看似存在的
+`codex.exe` 可能因应用包执行权限被普通 WPF 进程拒绝。WindowsApps 原始 EXE 会作为明确的跳过项保留在
+诊断中，不会遮蔽可用 shim。探测面板逐项显示来源、完整路径、接受/拒绝/跳过状态及失败原因（例如拒绝
+访问、超时、非零退出码或 stderr）；失败结果不会永久缓存，可在安装或修复 CLI 后点击“重新检测”。
+
+手动路径会保存在用户设置中，空值表示恢复自动检测。显式路径无效时不会静默改用其他 PATH 候选，避免
+软件实际运行的 CLI 与用户选择不一致。
 
 ### 首选：Codex App Server
 

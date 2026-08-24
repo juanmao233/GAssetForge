@@ -22,6 +22,7 @@ public sealed class ShellViewModel : ObservableObject
     private readonly IGenerationTaskStore _generationTaskStore;
     private readonly GenerationBatchTurnReconciler _generationBatchTurnReconciler;
     private readonly Dispatcher _dispatcher;
+    private readonly object _shutdownLock = new();
     private readonly AsyncRelayCommand _createNewProjectCommand;
     private readonly RelayCommand _closeNewProjectCommand;
     private GenerationBatchDispatchCoordinator _agentDispatchCoordinator = null!;
@@ -37,6 +38,7 @@ public sealed class ShellViewModel : ObservableObject
     private bool _isCreatingNewProject;
     private bool _isApplyingProjectSettings;
     private bool _isShutDown;
+    private Task? _shutdownTask;
     private readonly List<GatedCommand> _uiCommands = [];
     private readonly Dictionary<string, DateTimeOffset> _agentActivityStarts = new(StringComparer.Ordinal);
 
@@ -55,7 +57,12 @@ public sealed class ShellViewModel : ObservableObject
         _settings = settingsService.Load();
         _workbenchConsoleService = new WorkbenchConsoleService(settingsService.Paths);
         CommandConsole = new CommandConsoleViewModel(_workbenchConsoleService);
-        Blueprint = new BlueprintViewModel();
+        Blueprint = new BlueprintViewModel(
+            new JsonBlueprintRepository(settingsService.Paths),
+            new BlueprintRunWorkspaceService(settingsService.Paths),
+            _workbenchConsoleService);
+        var startupSettingsChanged = false;
+        ProjectWorkspace? initialProject = null;
         if (!string.IsNullOrWhiteSpace(_settings.LastProjectPath) &&
             _projectWorkspaceService.TryLoad(
                 _settings.LastProjectPath,
@@ -63,16 +70,55 @@ public sealed class ShellViewModel : ObservableObject
                 out var projectPaths,
                 out _))
         {
-            _currentProject = new ProjectWorkspace(projectManifest, projectPaths);
-            if (!AssetRootService.PathEquals(EditorWorkspace.ProjectRoot, projectPaths.RootDirectory))
-            {
-                EditorWorkspace.SwitchProject(projectPaths.RootDirectory);
-            }
+            initialProject = new ProjectWorkspace(projectManifest, projectPaths);
         }
         else
         {
+            startupSettingsChanged = !string.IsNullOrWhiteSpace(_settings.LastProjectPath);
             _settings.LastProjectPath = null;
         }
+
+        var initialWorkflow = WorkflowCatalog.Find(
+            initialProject?.Manifest.WorkflowKey ?? _settings.ActiveWorkflowKey);
+        if (initialProject is not null)
+        {
+            if (!Blueprint.Activate(initialProject.Paths.RootDirectory, initialWorkflow.Key))
+            {
+                startupSettingsChanged |= ClearRejectedProjectAssetPaths(initialProject);
+                initialProject = null;
+                _settings.LastProjectPath = null;
+                startupSettingsChanged = true;
+                initialWorkflow = WorkflowCatalog.Find(_settings.ActiveWorkflowKey);
+            }
+            else if (!AssetRootService.PathEquals(
+                         EditorWorkspace.ProjectRoot,
+                         initialProject.Paths.RootDirectory))
+            {
+                try
+                {
+                    EditorWorkspace.SwitchProject(initialProject.Paths.RootDirectory);
+                }
+                catch (Exception exception)
+                {
+                    _workbenchConsoleService.WriteError(
+                        "Project",
+                        $"启动项目未能完整激活，已回退到本地工作区：{exception.Message}",
+                        exception);
+                    startupSettingsChanged |= ClearRejectedProjectAssetPaths(initialProject);
+                    initialProject = null;
+                    _settings.LastProjectPath = null;
+                    startupSettingsChanged = true;
+                    initialWorkflow = WorkflowCatalog.Find(_settings.ActiveWorkflowKey);
+                }
+            }
+        }
+
+        if (initialProject is null && !Blueprint.Activate(null, initialWorkflow.Key))
+        {
+            throw new InvalidOperationException("无法激活启动项目或本地蓝图工作区。");
+        }
+
+        _currentProject = initialProject;
 
         var projectTilemap = _currentProject?.Manifest.Tilemap;
         TilemapWorkspace = new TilemapWorkspaceViewModel
@@ -146,12 +192,17 @@ public sealed class ShellViewModel : ObservableObject
             agentWorkingDirectory);
         AgentConnection = new AgentConnectionViewModel(
             new McpServerProcessService(settingsService.Paths),
-            new CodexAgentRuntimeService(),
+            new CodexAgentRuntimeService(
+                string.IsNullOrWhiteSpace(_settings.CodexExecutablePath)
+                    ? "codex"
+                    : _settings.CodexExecutablePath),
             _settings.McpAgentKey,
             _settings.McpPort,
             agentWorkingDirectory,
             resumeThreadId,
-            _workbenchConsoleService);
+            _workbenchConsoleService,
+            _settings.CodexExecutablePath,
+            new DesktopCodexExecutablePicker());
         AgentConnection.SettingsChanged += OnAgentConnectionSettingsChanged;
         AgentConnection.SessionChanged += OnAgentSessionChanged;
         AgentConnection.AgentActivityReceived += OnAgentActivityForStructuredLog;
@@ -178,7 +229,7 @@ public sealed class ShellViewModel : ObservableObject
         AssetGeneration.BackgroundRemovalRequested += OnAssetGenerationBackgroundRemovalRequested;
         AssetGeneration.BatchPublished += OnGenerationBatchPublished;
         _agentDispatchCoordinator = CreateAgentDispatchCoordinator();
-        _currentWorkflow = WorkflowCatalog.Find(_currentProject?.Manifest.WorkflowKey ?? _settings.ActiveWorkflowKey);
+        _currentWorkflow = initialWorkflow;
         ProjectBrowser.SetPrefabLibraryAvailability(_currentWorkflow.Kind == WorkflowKind.UiDesign);
         (_currentWorkspace, _placeholderWorkspace) = CreateWorkspaceState(_currentWorkflow);
         _selectedNewProjectWorkflow = _currentWorkflow;
@@ -238,7 +289,7 @@ public sealed class ShellViewModel : ObservableObject
 
         _themeService.Apply(_settings.Theme);
         RefreshNewProjectValidation();
-        if (clearedStaleThread)
+        if (clearedStaleThread || startupSettingsChanged)
         {
             SaveSettings();
         }
@@ -421,11 +472,13 @@ public sealed class ShellViewModel : ObservableObject
     {
         ArgumentNullException.ThrowIfNull(workflow);
 
-        SetWorkspaceState(workflow);
-        ProjectBrowser.SetPrefabLibraryAvailability(workflow.Kind == WorkflowKind.UiDesign);
-        _settings.ActiveWorkflowKey = workflow.Key;
-        _settings.HasCompletedWorkflowSelection = true;
-        IsNewProjectDialogOpen = false;
+        var previousWorkflow = _currentWorkflow;
+        var projectRoot = _currentProject?.Paths.RootDirectory;
+        if (!Blueprint.Activate(projectRoot, workflow.Key))
+        {
+            return;
+        }
+
         if (_currentProject is not null)
         {
             try
@@ -435,12 +488,27 @@ public sealed class ShellViewModel : ObservableObject
                     workflow.Key,
                     BuildProjectTilemapSettings());
             }
-            catch
+            catch (Exception exception)
             {
-                // The current view can still switch even if a later manifest write must retry.
+                var rollbackSucceeded = Blueprint.Activate(projectRoot, previousWorkflow.Key);
+                var message = rollbackSucceeded
+                    ? $"工作流“{workflow.Label}”未能写入项目清单，切换已取消并恢复到“{previousWorkflow.Label}”：{exception.Message}"
+                    : $"工作流“{workflow.Label}”的项目清单写入失败，且旧蓝图上下文回滚失败。请立即停止编辑并重启 GAssetForge，避免继续写入错误项目。";
+                _workbenchConsoleService.WriteError("Project", message, exception);
+                return;
             }
         }
 
+        CommitWorkflowSelection(workflow);
+    }
+
+    private void CommitWorkflowSelection(WorkflowDefinition workflow)
+    {
+        SetWorkspaceState(workflow);
+        ProjectBrowser.SetPrefabLibraryAvailability(workflow.Kind == WorkflowKind.UiDesign);
+        _settings.ActiveWorkflowKey = workflow.Key;
+        _settings.HasCompletedWorkflowSelection = true;
+        IsNewProjectDialogOpen = false;
         OnPropertyChanged(nameof(IsUiWorkspace));
         OnPropertyChanged(nameof(IsTilemapWorkspace));
         OnPropertyChanged(nameof(IsPlaceholderWorkspace));
@@ -481,8 +549,22 @@ public sealed class ShellViewModel : ObservableObject
         }
 
         IsCreatingNewProject = true;
+        var previousProject = _currentProject;
+        var previousWorkflow = _currentWorkflow;
+        var previousBrowserRoot = ProjectBrowser.ConfiguredRootPath;
+        var previousBrowserPath = ProjectBrowser.CurrentPath;
+        var previousBrowserLock = ProjectBrowser.IsRootSelectionLocked;
+        var blueprintSwitched = false;
+        var projectCommitted = false;
+        var rollbackIncomplete = false;
         try
         {
+            NewProjectValidationMessage = "正在验证并保存当前蓝图…";
+            if (!Blueprint.SaveNow())
+            {
+                throw new InvalidOperationException("当前蓝图未能安全保存，尚未创建候选项目目录。 ");
+            }
+
             NewProjectValidationMessage = "正在创建项目目录与初始数据…";
             EditorWorkspace.PrepareForProjectSwitch();
             var workspace = _projectWorkspaceService.Create(
@@ -490,11 +572,12 @@ public sealed class ShellViewModel : ObservableObject
                 NewProjectName,
                 SelectedNewProjectWorkflow.Key);
 
-            EditorWorkspace.SwitchToPreparedProject(workspace.Paths.RootDirectory);
-            _currentProject = workspace;
-            _settings.LastProjectPath = workspace.Paths.RootDirectory;
-            _settings.AssetRootPath = workspace.Paths.AssetDirectory;
-            _settings.AssetCurrentPath = workspace.Paths.GeneratedAssetDirectory;
+            if (!Blueprint.Activate(workspace.Paths.RootDirectory, SelectedNewProjectWorkflow.Key))
+            {
+                throw new InvalidOperationException("新项目蓝图未能安全激活，项目切换已取消。");
+            }
+
+            blueprintSwitched = true;
 
             ProjectBrowser.SetRootSelectionLock(false);
             if (!ProjectBrowser.TrySetRootPath(workspace.Paths.AssetDirectory) ||
@@ -503,9 +586,16 @@ public sealed class ShellViewModel : ObservableObject
                 throw new InvalidOperationException("项目已创建，但 Project 面板无法切换到项目 Assets。 ");
             }
 
+            EditorWorkspace.SwitchToPreparedProject(workspace.Paths.RootDirectory);
+            _currentProject = workspace;
+            projectCommitted = true;
+            _settings.LastProjectPath = workspace.Paths.RootDirectory;
+            _settings.AssetRootPath = workspace.Paths.AssetDirectory;
+            _settings.AssetCurrentPath = workspace.Paths.GeneratedAssetDirectory;
+
             ProjectBrowser.SetRootSelectionLock(true);
             ApplyProjectTilemapSettings(workspace.Manifest.Tilemap);
-            SelectWorkflow(SelectedNewProjectWorkflow);
+            CommitWorkflowSelection(SelectedNewProjectWorkflow);
             OnPropertyChanged(nameof(CurrentProjectPath));
             OnPropertyChanged(nameof(CurrentProjectDisplayName));
             OnPropertyChanged(nameof(WorkspaceStatusText));
@@ -519,8 +609,32 @@ public sealed class ShellViewModel : ObservableObject
         {
             await InvokeOnDispatcherAsync(() =>
             {
+                if (!projectCommitted)
+                {
+                    ProjectBrowser.SetRootSelectionLock(false);
+                    if (ProjectBrowser.TrySetRootPath(previousBrowserRoot) &&
+                        !string.IsNullOrWhiteSpace(previousBrowserPath))
+                    {
+                        _ = ProjectBrowser.SelectDirectory(previousBrowserPath);
+                    }
+
+                    ProjectBrowser.SetRootSelectionLock(previousBrowserLock);
+                    if (blueprintSwitched &&
+                        !Blueprint.Activate(previousProject?.Paths.RootDirectory, previousWorkflow.Key))
+                    {
+                        rollbackIncomplete = true;
+                        _workbenchConsoleService.WriteError(
+                            "Blueprint",
+                            "新项目激活失败后，旧蓝图上下文也未能重新激活。请立即停止编辑并重启 GAssetForge。 ");
+                    }
+                }
+
                 ProjectBrowser.SetRootSelectionLock(_currentProject is not null);
-                NewProjectValidationMessage = $"创建项目失败：{exception.Message}";
+                NewProjectValidationMessage = projectCommitted
+                    ? $"项目已创建，但后续初始化失败：{exception.Message}"
+                    : rollbackIncomplete
+                        ? $"创建项目失败，且旧蓝图上下文回滚不完整：{exception.Message}。请立即停止编辑并重启 GAssetForge。"
+                    : $"创建项目失败：已保留原项目；{exception.Message}";
             }).ConfigureAwait(false);
         }
         finally
@@ -594,8 +708,10 @@ public sealed class ShellViewModel : ObservableObject
     private void RefreshNewProjectValidation(bool keepFailureMessage = false)
     {
         OnPropertyChanged(nameof(NewProjectTargetPath));
-        if (!keepFailureMessage ||
-            !NewProjectValidationMessage.StartsWith("创建项目失败：", StringComparison.Ordinal))
+        var isFailureMessage =
+            NewProjectValidationMessage.StartsWith("创建项目失败", StringComparison.Ordinal) ||
+            NewProjectValidationMessage.StartsWith("项目已创建，但后续初始化失败", StringComparison.Ordinal);
+        if (!keepFailureMessage || !isFailureMessage)
         {
             NewProjectValidationMessage = TryValidateNewProjectInput(out _, out var reason)
                 ? $"将以“{SelectedNewProjectWorkflow.Label}”创建独立项目目录。"
@@ -616,6 +732,28 @@ public sealed class ShellViewModel : ObservableObject
 
         var documents = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
         return Directory.Exists(documents) ? documents : _settingsService.Paths.ProjectDirectory;
+    }
+
+    private bool ClearRejectedProjectAssetPaths(ProjectWorkspace rejectedProject)
+    {
+        var changed = false;
+        if (AssetRootService.IsWithinRoot(
+                rejectedProject.Paths.AssetDirectory,
+                _settings.AssetRootPath ?? string.Empty))
+        {
+            _settings.AssetRootPath = null;
+            changed = true;
+        }
+
+        if (AssetRootService.IsWithinRoot(
+                rejectedProject.Paths.AssetDirectory,
+                _settings.AssetCurrentPath ?? string.Empty))
+        {
+            _settings.AssetCurrentPath = null;
+            changed = true;
+        }
+
+        return changed;
     }
 
     private string ResolveAgentWorkingDirectory() =>
@@ -747,76 +885,139 @@ public sealed class ShellViewModel : ObservableObject
 
     public void Shutdown()
     {
-        if (_isShutDown)
+        var shutdownTask = ShutdownAsync();
+        if (_dispatcher.CheckAccess() &&
+            !shutdownTask.IsCompleted &&
+            !_dispatcher.HasShutdownStarted &&
+            !_dispatcher.HasShutdownFinished)
         {
-            return;
+            var frame = new DispatcherFrame();
+            _ = shutdownTask.ContinueWith(
+                completedTask =>
+                {
+                    if (_dispatcher.HasShutdownStarted || _dispatcher.HasShutdownFinished)
+                    {
+                        frame.Continue = false;
+                        return;
+                    }
+
+                    _ = _dispatcher.BeginInvoke(
+                        DispatcherPriority.Send,
+                        new Action(() => frame.Continue = false));
+                },
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
+            Dispatcher.PushFrame(frame);
         }
 
-        _isShutDown = true;
-        AssetGeneration.BatchPublished -= OnGenerationBatchPublished;
-        _agentDispatchCoordinator.DispatchProgressChanged -= OnAgentDispatchProgressChanged;
-        _agentDispatchCoordinator.DispatchCompleted -= OnAgentDispatchCompleted;
+        shutdownTask.GetAwaiter().GetResult();
+    }
+
+    public Task ShutdownAsync()
+    {
+        lock (_shutdownLock)
+        {
+            _shutdownTask ??= ShutdownCoreAsync();
+            return _shutdownTask;
+        }
+    }
+
+    private async Task ShutdownCoreAsync()
+    {
+        await RunOnDispatcherAsync(() =>
+        {
+            _isShutDown = true;
+            AssetGeneration.BatchPublished -= OnGenerationBatchPublished;
+            _agentDispatchCoordinator.DispatchProgressChanged -= OnAgentDispatchProgressChanged;
+            _agentDispatchCoordinator.DispatchCompleted -= OnAgentDispatchCompleted;
+        }).ConfigureAwait(false);
         try
         {
-            _agentDispatchCoordinator.DisposeAsync().AsTask().GetAwaiter().GetResult();
+            await _agentDispatchCoordinator.DisposeAsync().ConfigureAwait(false);
         }
         catch
         {
             // Persisted queue tasks remain available even if an active Turn resists cancellation.
         }
 
-        EditorWorkspace.PropertyChanged -= OnEditorWorkspacePropertyChanged;
-        TilemapWorkspace.PropertyChanged -= OnTilemapWorkspacePropertyChanged;
-        ProjectBrowser.ConfiguredRootPathChanged -= OnConfiguredAssetRootPathChanged;
-        ProjectBrowser.CurrentPathChanged -= OnAssetCurrentPathChanged;
-        AgentConnection.SettingsChanged -= OnAgentConnectionSettingsChanged;
-        AgentConnection.SessionChanged -= OnAgentSessionChanged;
-        AgentConnection.AgentActivityReceived -= OnAgentActivityForStructuredLog;
-        AssetGeneration.SettingsChanged -= OnAssetGenerationSettingsChanged;
-        BackgroundRemoval.SettingsChanged -= OnBackgroundRemovalSettingsChanged;
-        PixelAlignment.SettingsChanged -= OnPixelAlignmentSettingsChanged;
-        AssetGeneration.StyleLibraryRequested -= OnAssetGenerationStyleLibraryRequested;
-        AssetGeneration.AgentConnectionRequested -= OnAssetGenerationAgentConnectionRequested;
-        AssetGeneration.BackgroundRemovalRequested -= OnAssetGenerationBackgroundRemovalRequested;
-        foreach (var command in _uiCommands)
+        await RunOnDispatcherAsync(() =>
         {
-            command.Dispose();
+            EditorWorkspace.PropertyChanged -= OnEditorWorkspacePropertyChanged;
+            TilemapWorkspace.PropertyChanged -= OnTilemapWorkspacePropertyChanged;
+            ProjectBrowser.ConfiguredRootPathChanged -= OnConfiguredAssetRootPathChanged;
+            ProjectBrowser.CurrentPathChanged -= OnAssetCurrentPathChanged;
+            AgentConnection.SettingsChanged -= OnAgentConnectionSettingsChanged;
+            AgentConnection.SessionChanged -= OnAgentSessionChanged;
+            AgentConnection.AgentActivityReceived -= OnAgentActivityForStructuredLog;
+            AssetGeneration.SettingsChanged -= OnAssetGenerationSettingsChanged;
+            BackgroundRemoval.SettingsChanged -= OnBackgroundRemovalSettingsChanged;
+            PixelAlignment.SettingsChanged -= OnPixelAlignmentSettingsChanged;
+            AssetGeneration.StyleLibraryRequested -= OnAssetGenerationStyleLibraryRequested;
+            AssetGeneration.AgentConnectionRequested -= OnAssetGenerationAgentConnectionRequested;
+            AssetGeneration.BackgroundRemovalRequested -= OnAssetGenerationBackgroundRemovalRequested;
+            foreach (var command in _uiCommands)
+            {
+                command.Dispose();
+            }
+
+            _settings.Theme = CurrentTheme;
+            _settings.ActiveWorkflowKey = CurrentWorkflow.Key;
+            _settings.LastProjectPath = CurrentProjectPath;
+            _settings.AssetRootPath = ProjectBrowser.ConfiguredRootPath;
+            _settings.AssetCurrentPath = ProjectBrowser.CurrentPath;
+            _settings.McpAgentKey = AgentConnection.SelectedAgent.Key;
+            _settings.McpPort = AgentConnection.Port;
+            _settings.CodexExecutablePath = AgentConnection.CodexExecutablePath;
+            CaptureAssetGenerationSettings();
+            ApplyBackgroundRemovalSettings(BackgroundRemoval.CaptureSettings());
+            ApplyPixelAlignmentSettings(PixelAlignment.CaptureSettings());
+            CaptureTilemapSettings();
+            if (_currentProject is not null)
+            {
+                try
+                {
+                    _currentProject = _projectWorkspaceService.UpdateWorkflowAndTilemap(
+                        _currentProject.Paths.RootDirectory,
+                        CurrentWorkflow.Key,
+                        BuildProjectTilemapSettings());
+                }
+                catch
+                {
+                    // Keep shutdown best-effort; atomic project files remain unchanged on failure.
+                }
+            }
+
+            AssetGeneration.Dispose();
+        }).ConfigureAwait(false);
+
+        await AgentConnection.DisposeAsync().ConfigureAwait(false);
+        await RunOnDispatcherAsync(() =>
+        {
+            EditorWorkspace.Shutdown();
+            ProjectBrowser.Shutdown();
+            ArtStyleLibrary.Shutdown();
+            Blueprint.Dispose();
+            SaveSettings();
+            CommandConsole.Dispose();
+            _workbenchConsoleService.Dispose();
+        }).ConfigureAwait(false);
+    }
+
+    private Task RunOnDispatcherAsync(Action action)
+    {
+        if (_dispatcher.CheckAccess())
+        {
+            action();
+            return Task.CompletedTask;
         }
 
-        _settings.Theme = CurrentTheme;
-        _settings.ActiveWorkflowKey = CurrentWorkflow.Key;
-        _settings.LastProjectPath = CurrentProjectPath;
-        _settings.AssetRootPath = ProjectBrowser.ConfiguredRootPath;
-        _settings.AssetCurrentPath = ProjectBrowser.CurrentPath;
-        _settings.McpAgentKey = AgentConnection.SelectedAgent.Key;
-        _settings.McpPort = AgentConnection.Port;
-        CaptureAssetGenerationSettings();
-        ApplyBackgroundRemovalSettings(BackgroundRemoval.CaptureSettings());
-        ApplyPixelAlignmentSettings(PixelAlignment.CaptureSettings());
-        CaptureTilemapSettings();
-        if (_currentProject is not null)
+        if (_dispatcher.HasShutdownStarted || _dispatcher.HasShutdownFinished)
         {
-            try
-            {
-                _currentProject = _projectWorkspaceService.UpdateWorkflowAndTilemap(
-                    _currentProject.Paths.RootDirectory,
-                    CurrentWorkflow.Key,
-                    BuildProjectTilemapSettings());
-            }
-            catch
-            {
-                // Keep shutdown best-effort; atomic project files remain unchanged on failure.
-            }
+            return Task.CompletedTask;
         }
 
-        AssetGeneration.Dispose();
-        AgentConnection.Dispose();
-        EditorWorkspace.Shutdown();
-        ProjectBrowser.Shutdown();
-        ArtStyleLibrary.Shutdown();
-        SaveSettings();
-        CommandConsole.Dispose();
-        _workbenchConsoleService.Dispose();
+        return _dispatcher.InvokeAsync(action, DispatcherPriority.Send).Task;
     }
 
     private void SetWorkspaceState(WorkflowDefinition workflow)
@@ -939,6 +1140,7 @@ public sealed class ShellViewModel : ObservableObject
     {
         _settings.McpAgentKey = e.AgentKey;
         _settings.McpPort = e.Port;
+        _settings.CodexExecutablePath = e.CodexExecutablePath;
         SaveSettings();
     }
 

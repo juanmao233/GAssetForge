@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Text;
 
 namespace GAssetForge.App.Services.AgentRuntime;
 
@@ -11,110 +12,363 @@ internal sealed record CodexExecutableLaunch(
     string CodexExecutablePath,
     bool HasCodeModeCompanion);
 
+internal enum CodexExecutableCandidateStatus
+{
+    Accepted,
+    Rejected,
+    Skipped
+}
+
+internal sealed record CodexExecutableCandidateDiagnostic(
+    string Source,
+    string CandidatePath,
+    CodexExecutableCandidateStatus Status,
+    string Reason);
+
+internal readonly record struct CodexExecutableProbeResult(bool IsSuccess, string Reason)
+{
+    internal static CodexExecutableProbeResult Successful(string reason) =>
+        new(true, NormalizeReason(reason, "--version 探测成功。"));
+
+    internal static CodexExecutableProbeResult Failed(string reason) =>
+        new(false, NormalizeReason(reason, "--version 探测失败。"));
+
+    private static string NormalizeReason(string reason, string fallback) =>
+        string.IsNullOrWhiteSpace(reason) ? fallback : reason.Trim();
+}
+
+internal sealed record CodexExecutableResolution(
+    CodexExecutableLaunch? Launch,
+    IReadOnlyList<CodexExecutableCandidateDiagnostic> Candidates,
+    string Summary)
+{
+    internal bool IsSuccess => Launch is not null;
+}
+
+internal sealed class CodexExecutableResolutionException : InvalidOperationException
+{
+    internal CodexExecutableResolutionException(
+        string message,
+        IReadOnlyList<CodexExecutableCandidateDiagnostic> candidates)
+        : base(message)
+    {
+        Candidates = candidates.ToArray();
+    }
+
+    internal IReadOnlyList<CodexExecutableCandidateDiagnostic> Candidates { get; }
+}
+
 internal static class CodexExecutableResolver
 {
     internal const string CodeModeHostFileName = "codex-code-mode-host.exe";
+    private const string AutomaticExecutableName = "codex";
+    private const string AppDataNpmSource = "APPDATA npm shim";
+    private const string PathShimSource = "PATH shim";
     private static readonly TimeSpan LaunchProbeTimeout = TimeSpan.FromSeconds(5);
-    private static readonly ConcurrentDictionary<string, bool> LaunchProbeCache =
-        new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, CodexExecutableProbeResult>
+        SuccessfulLaunchProbeCache = new(StringComparer.OrdinalIgnoreCase);
 
     internal static CodexExecutableLaunch Resolve(
         string requestedExecutable,
         string? applicationDirectory = null,
         string? pathEnvironment = null,
-        Func<CodexExecutableLaunch, bool>? launchProbe = null)
+        Func<CodexExecutableLaunch, bool>? launchProbe = null,
+        string? applicationDataDirectory = null)
+    {
+        Func<CodexExecutableLaunch, CodexExecutableProbeResult>? detailedProbe = launchProbe is null
+            ? null
+            : candidate => launchProbe(candidate)
+                ? CodexExecutableProbeResult.Successful("启动探测成功。")
+                : CodexExecutableProbeResult.Failed("启动探测失败；测试探针未提供详细原因。");
+        var resolution = ResolveWithDiagnostics(
+            requestedExecutable,
+            applicationDirectory,
+            pathEnvironment,
+            detailedProbe,
+            applicationDataDirectory);
+        return resolution.Launch ?? throw new CodexExecutableResolutionException(
+            resolution.Summary,
+            resolution.Candidates);
+    }
+
+    internal static CodexExecutableResolution ResolveWithDiagnostics(
+        string requestedExecutable,
+        string? applicationDirectory = null,
+        string? pathEnvironment = null,
+        Func<CodexExecutableLaunch, CodexExecutableProbeResult>? launchProbe = null,
+        string? applicationDataDirectory = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(requestedExecutable);
-        if (!string.Equals(requestedExecutable.Trim(), "codex", StringComparison.OrdinalIgnoreCase))
+        var requested = requestedExecutable.Trim().Trim('"');
+        var canLaunch = launchProbe ?? ProbeCandidateWithSuccessfulCache;
+        if (!string.Equals(requested, AutomaticExecutableName, StringComparison.OrdinalIgnoreCase))
         {
-            return new CodexExecutableLaunch(
-                requestedExecutable.Trim(),
-                [],
-                requestedExecutable.Trim(),
-                HasCodeModeCompanion: false);
+            return ResolveExplicitExecutable(requested, canLaunch);
         }
 
         var applicationPath = NormalizeDirectory(applicationDirectory ?? AppContext.BaseDirectory);
+        var appDataPath = ResolveApplicationDataDirectory(applicationDataDirectory);
         var pathDirectories = EnumeratePathDirectories(
                 pathEnvironment ?? Environment.GetEnvironmentVariable("PATH"))
             .Where(path => !PathEquals(path, applicationPath))
             .ToArray();
-        var rejectedCandidates = new List<string>();
-        var canLaunch = launchProbe ?? CanLaunchCandidate;
+        var diagnostics = new List<CodexExecutableCandidateDiagnostic>();
+        var seenCandidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // Prefer PATH launchers before raw packaged executables. The official npm shim resolves
-        // its own native runtime and remains executable from ordinary desktop processes, while a
-        // codex.exe discovered under WindowsApps can exist and still reject direct Process.Start.
+        if (!string.IsNullOrWhiteSpace(appDataPath))
+        {
+            var npmDirectory = Path.Combine(appDataPath, "npm");
+            foreach (var npmShim in EnumeratePathShims(npmDirectory))
+            {
+                var accepted = EvaluateCandidate(
+                    npmShim,
+                    AppDataNpmSource,
+                    canLaunch,
+                    diagnostics,
+                    seenCandidates);
+                if (accepted is not null)
+                {
+                    return CreateSuccessfulResolution(accepted, diagnostics);
+                }
+            }
+        }
+
         foreach (var directory in pathDirectories)
         {
-            var pathShim = TryCreatePathShim(directory);
-            if (pathShim is not null && TryAcceptCandidate(pathShim, canLaunch, rejectedCandidates))
+            foreach (var pathShim in EnumeratePathShims(directory))
             {
-                return pathShim;
+                var accepted = EvaluateCandidate(
+                    pathShim,
+                    PathShimSource,
+                    canLaunch,
+                    diagnostics,
+                    seenCandidates);
+                if (accepted is not null)
+                {
+                    return CreateSuccessfulResolution(accepted, diagnostics);
+                }
             }
         }
 
         foreach (var directory in pathDirectories)
         {
             var completeRuntime = TryCreateCompleteRuntime(directory);
-            if (completeRuntime is not null && TryAcceptCandidate(completeRuntime, canLaunch, rejectedCandidates))
+            if (completeRuntime is null)
             {
-                return completeRuntime;
+                continue;
+            }
+
+            var accepted = EvaluateCandidate(
+                completeRuntime,
+                "PATH 完整 Runtime",
+                canLaunch,
+                diagnostics,
+                seenCandidates);
+            if (accepted is not null)
+            {
+                return CreateSuccessfulResolution(accepted, diagnostics);
             }
         }
 
         var completeApplicationRuntime = TryCreateCompleteRuntime(applicationPath);
-        if (completeApplicationRuntime is not null &&
-            TryAcceptCandidate(completeApplicationRuntime, canLaunch, rejectedCandidates))
+        if (completeApplicationRuntime is not null)
         {
-            return completeApplicationRuntime;
+            var accepted = EvaluateCandidate(
+                completeApplicationRuntime,
+                "应用目录完整 Runtime",
+                canLaunch,
+                diagnostics,
+                seenCandidates);
+            if (accepted is not null)
+            {
+                return CreateSuccessfulResolution(accepted, diagnostics);
+            }
         }
 
         foreach (var directory in pathDirectories)
         {
             var legacyExecutable = TryCreateLegacyExecutable(directory);
-            if (legacyExecutable is not null &&
-                TryAcceptCandidate(legacyExecutable, canLaunch, rejectedCandidates))
+            if (legacyExecutable is null)
             {
-                return legacyExecutable;
+                continue;
+            }
+
+            var accepted = EvaluateCandidate(
+                legacyExecutable,
+                "PATH codex.exe",
+                canLaunch,
+                diagnostics,
+                seenCandidates);
+            if (accepted is not null)
+            {
+                return CreateSuccessfulResolution(accepted, diagnostics);
             }
         }
 
-        var incompleteApplicationExecutable = Path.Combine(applicationPath, "codex.exe");
-        if (File.Exists(incompleteApplicationExecutable))
-        {
-            var missingCompanionPath = Path.Combine(applicationPath, CodeModeHostFileName);
-            throw new InvalidOperationException(
-                $"检测到不完整的 Codex Runtime：{incompleteApplicationExecutable}。" +
-                $"缺少同目录组件：{missingCompanionPath}；该本地副本会遮蔽完整安装。" +
-                "请安装完整 Codex Desktop Runtime，或从发行目录移除不完整的 codex.exe 后重试。");
-        }
-
-        if (rejectedCandidates.Count > 0)
-        {
-            throw new InvalidOperationException(
-                "检测到 Codex Runtime，但候选程序无法从当前桌面进程启动。" +
-                $"已拒绝：{string.Join("；", rejectedCandidates)}。" +
-                "请确保 PATH 中存在可执行的 codex.cmd，或重新安装 Codex CLI。");
-        }
-
-        throw new FileNotFoundException(
-            "未找到可用的 Codex Runtime。请安装 Codex Desktop 或 Codex CLI，并确保其目录已加入 PATH。",
-            "codex");
+        AddIncompleteApplicationRuntimeDiagnostic(
+            applicationPath,
+            diagnostics,
+            seenCandidates);
+        return CreateFailedResolution(diagnostics);
     }
 
-    private static bool TryAcceptCandidate(
-        CodexExecutableLaunch candidate,
-        Func<CodexExecutableLaunch, bool> launchProbe,
-        ICollection<string> rejectedCandidates)
+    internal static void ClearLaunchProbeCache() => SuccessfulLaunchProbeCache.Clear();
+
+    private static CodexExecutableResolution ResolveExplicitExecutable(
+        string requestedExecutable,
+        Func<CodexExecutableLaunch, CodexExecutableProbeResult> launchProbe)
     {
-        if (launchProbe(candidate))
+        var diagnostics = new List<CodexExecutableCandidateDiagnostic>();
+        var extension = Path.GetExtension(requestedExecutable);
+        if (!IsProbeableExplicitExtension(extension))
         {
-            return true;
+            var unprobedLaunch = new CodexExecutableLaunch(
+                requestedExecutable,
+                [],
+                requestedExecutable,
+                HasCodeModeCompanion: false);
+            diagnostics.Add(new CodexExecutableCandidateDiagnostic(
+                "用户配置命令",
+                requestedExecutable,
+                CodexExecutableCandidateStatus.Accepted,
+                "非 .cmd、.bat 或 .exe 自定义命令，保留兼容模式并在正式启动时解析。"));
+            return CreateSuccessfulResolution(unprobedLaunch, diagnostics);
         }
 
-        rejectedCandidates.Add(candidate.CodexExecutablePath);
-        return false;
+        string executablePath;
+        try
+        {
+            executablePath = Path.GetFullPath(requestedExecutable);
+        }
+        catch (Exception exception) when (exception is
+            ArgumentException or
+            NotSupportedException or
+            PathTooLongException)
+        {
+            diagnostics.Add(new CodexExecutableCandidateDiagnostic(
+                "用户配置路径",
+                requestedExecutable,
+                CodexExecutableCandidateStatus.Rejected,
+                $"路径无效：{exception.Message}"));
+            return CreateFailedResolution(diagnostics);
+        }
+
+        if (!File.Exists(executablePath))
+        {
+            diagnostics.Add(new CodexExecutableCandidateDiagnostic(
+                "用户配置路径",
+                executablePath,
+                CodexExecutableCandidateStatus.Rejected,
+                "文件不存在。"));
+            return CreateFailedResolution(diagnostics);
+        }
+
+        var candidate = IsCommandScriptExtension(extension)
+            ? CreateScriptLaunch(executablePath)
+            : new CodexExecutableLaunch(
+                executablePath,
+                [],
+                executablePath,
+                HasCodeModeCompanion: File.Exists(
+                    Path.Combine(
+                        Path.GetDirectoryName(executablePath) ?? string.Empty,
+                        CodeModeHostFileName)));
+        var accepted = EvaluateCandidate(
+            candidate,
+            "用户配置路径",
+            launchProbe,
+            diagnostics,
+            new HashSet<string>(StringComparer.OrdinalIgnoreCase));
+        return accepted is null
+            ? CreateFailedResolution(diagnostics)
+            : CreateSuccessfulResolution(accepted, diagnostics);
+    }
+
+    private static CodexExecutableLaunch? EvaluateCandidate(
+        CodexExecutableLaunch candidate,
+        string source,
+        Func<CodexExecutableLaunch, CodexExecutableProbeResult> launchProbe,
+        ICollection<CodexExecutableCandidateDiagnostic> diagnostics,
+        ISet<string> seenCandidates)
+    {
+        if (!seenCandidates.Add(candidate.CodexExecutablePath))
+        {
+            return null;
+        }
+
+        if (IsWindowsAppsExecutable(candidate.CodexExecutablePath))
+        {
+            diagnostics.Add(new CodexExecutableCandidateDiagnostic(
+                source,
+                candidate.CodexExecutablePath,
+                CodexExecutableCandidateStatus.Skipped,
+                "已跳过 WindowsApps 包内 codex.exe：该文件可被发现，但普通桌面进程直接启动通常会返回“拒绝访问”；请使用 APPDATA npm shim 或手动指定可执行的 Codex CLI。"));
+            return null;
+        }
+
+        CodexExecutableProbeResult probeResult;
+        try
+        {
+            probeResult = launchProbe(candidate);
+        }
+        catch (Exception exception)
+        {
+            probeResult = CodexExecutableProbeResult.Failed(
+                $"启动探针抛出 {exception.GetType().Name}：{exception.Message}");
+        }
+
+        diagnostics.Add(new CodexExecutableCandidateDiagnostic(
+            source,
+            candidate.CodexExecutablePath,
+            probeResult.IsSuccess
+                ? CodexExecutableCandidateStatus.Accepted
+                : CodexExecutableCandidateStatus.Rejected,
+            probeResult.Reason));
+        return probeResult.IsSuccess ? candidate : null;
+    }
+
+    private static IEnumerable<CodexExecutableLaunch> EnumeratePathShims(string directory)
+    {
+        foreach (var scriptName in new[] { "codex.cmd", "codex.bat" })
+        {
+            string scriptPath;
+            try
+            {
+                scriptPath = Path.Combine(directory, scriptName);
+            }
+            catch (Exception exception) when (exception is
+                ArgumentException or
+                NotSupportedException or
+                PathTooLongException)
+            {
+                yield break;
+            }
+
+            if (File.Exists(scriptPath))
+            {
+                yield return CreateScriptLaunch(Path.GetFullPath(scriptPath));
+            }
+        }
+    }
+
+    private static CodexExecutableLaunch CreateScriptLaunch(string scriptPath) =>
+        new(
+            GetCommandProcessorPath(),
+            ["/d", "/s", "/c", "call", Path.GetFullPath(scriptPath)],
+            Path.GetFullPath(scriptPath),
+            HasCodeModeCompanion: false);
+
+    private static string GetCommandProcessorPath()
+    {
+        var commandProcessor = Environment.GetEnvironmentVariable("ComSpec");
+        if (!string.IsNullOrWhiteSpace(commandProcessor))
+        {
+            return commandProcessor;
+        }
+
+        return Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
+            "cmd.exe");
     }
 
     private static CodexExecutableLaunch? TryCreateCompleteRuntime(string directory)
@@ -130,34 +384,6 @@ internal static class CodexExecutableResolver
             : null;
     }
 
-    private static CodexExecutableLaunch? TryCreatePathShim(string directory)
-    {
-        foreach (var scriptName in new[] { "codex.cmd", "codex.bat" })
-        {
-            var scriptPath = Path.Combine(directory, scriptName);
-            if (!File.Exists(scriptPath))
-            {
-                continue;
-            }
-
-            var commandProcessor = Environment.GetEnvironmentVariable("ComSpec");
-            if (string.IsNullOrWhiteSpace(commandProcessor))
-            {
-                commandProcessor = Path.Combine(
-                    Environment.GetFolderPath(Environment.SpecialFolder.System),
-                    "cmd.exe");
-            }
-
-            return new CodexExecutableLaunch(
-                commandProcessor,
-                ["/d", "/s", "/c", Path.GetFullPath(scriptPath)],
-                Path.GetFullPath(scriptPath),
-                HasCodeModeCompanion: false);
-        }
-
-        return null;
-    }
-
     private static CodexExecutableLaunch? TryCreateLegacyExecutable(string directory)
     {
         var executablePath = Path.Combine(directory, "codex.exe");
@@ -170,16 +396,35 @@ internal static class CodexExecutableResolver
             : null;
     }
 
-    private static bool CanLaunchCandidate(CodexExecutableLaunch candidate)
+    private static CodexExecutableProbeResult ProbeCandidateWithSuccessfulCache(
+        CodexExecutableLaunch candidate)
     {
-        var cacheKey = string.Join('\0',
+        var cacheKey = CreateProbeCacheKey(candidate);
+        if (SuccessfulLaunchProbeCache.TryGetValue(cacheKey, out var cachedResult))
+        {
+            return cachedResult with
+            {
+                Reason = $"{cachedResult.Reason.TrimEnd()}（成功结果缓存）"
+            };
+        }
+
+        var probeResult = ProbeCandidate(candidate);
+        if (probeResult.IsSuccess)
+        {
+            SuccessfulLaunchProbeCache.TryAdd(cacheKey, probeResult);
+        }
+
+        return probeResult;
+    }
+
+    private static string CreateProbeCacheKey(CodexExecutableLaunch candidate) =>
+        string.Join(
+            '\0',
             candidate.ProcessFileName,
             candidate.CodexExecutablePath,
             string.Join('\0', candidate.PrefixArguments));
-        return LaunchProbeCache.GetOrAdd(cacheKey, _ => ProbeCandidate(candidate));
-    }
 
-    private static bool ProbeCandidate(CodexExecutableLaunch candidate)
+    private static CodexExecutableProbeResult ProbeCandidate(CodexExecutableLaunch candidate)
     {
         try
         {
@@ -203,16 +448,34 @@ internal static class CodexExecutableResolver
             using var process = Process.Start(startInfo);
             if (process is null)
             {
-                return false;
+                return CodexExecutableProbeResult.Failed(
+                    "Process.Start 未返回进程实例。");
             }
 
+            var standardOutput = process.StandardOutput.ReadToEndAsync();
+            var standardError = process.StandardError.ReadToEndAsync();
             if (!process.WaitForExit((int)LaunchProbeTimeout.TotalMilliseconds))
             {
                 TryKill(process);
-                return false;
+                return CodexExecutableProbeResult.Failed(
+                    $"执行 --version 超过 {LaunchProbeTimeout.TotalSeconds:0} 秒，已终止探测进程。");
             }
 
-            return process.ExitCode == 0;
+            var output = standardOutput.GetAwaiter().GetResult();
+            var error = standardError.GetAwaiter().GetResult();
+            var detail = FormatProbeOutput(output, error);
+            if (process.ExitCode != 0)
+            {
+                return CodexExecutableProbeResult.Failed(
+                    string.IsNullOrWhiteSpace(detail)
+                        ? $"--version 退出码 {process.ExitCode}。"
+                        : $"--version 退出码 {process.ExitCode}：{detail}");
+            }
+
+            return CodexExecutableProbeResult.Successful(
+                string.IsNullOrWhiteSpace(detail)
+                    ? "--version 探测成功。"
+                    : $"--version 探测成功：{detail}");
         }
         catch (Exception exception) when (exception is
             Win32Exception or
@@ -221,8 +484,25 @@ internal static class CodexExecutableResolver
             UnauthorizedAccessException or
             NotSupportedException)
         {
-            return false;
+            return CodexExecutableProbeResult.Failed(
+                $"{exception.GetType().Name}：{exception.Message}");
         }
+    }
+
+    private static string FormatProbeOutput(string standardOutput, string standardError)
+    {
+        var combined = string.Join(
+            " | ",
+            new[] { standardOutput, standardError }
+                .SelectMany(value => value.Split(
+                    new[] { '\r', '\n' },
+                    StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Take(3));
+        const int maximumLength = 500;
+        return combined.Length <= maximumLength
+            ? combined
+            : string.Concat(combined.AsSpan(0, maximumLength), "…");
     }
 
     private static void TryKill(Process process)
@@ -237,6 +517,122 @@ internal static class CodexExecutableResolver
         catch
         {
         }
+    }
+
+    private static void AddIncompleteApplicationRuntimeDiagnostic(
+        string applicationDirectory,
+        ICollection<CodexExecutableCandidateDiagnostic> diagnostics,
+        ISet<string> seenCandidates)
+    {
+        var executablePath = Path.Combine(applicationDirectory, "codex.exe");
+        var companionPath = Path.Combine(applicationDirectory, CodeModeHostFileName);
+        if (!File.Exists(executablePath) || File.Exists(companionPath))
+        {
+            return;
+        }
+
+        executablePath = Path.GetFullPath(executablePath);
+        if (!seenCandidates.Add(executablePath))
+        {
+            return;
+        }
+
+        diagnostics.Add(new CodexExecutableCandidateDiagnostic(
+            "应用目录本地副本",
+            executablePath,
+            CodexExecutableCandidateStatus.Rejected,
+            $"检测到不完整的 Codex Runtime；缺少同目录组件：{Path.GetFullPath(companionPath)}。该本地副本会遮蔽完整安装，请移除它或发布完整 Runtime。"));
+    }
+
+    private static CodexExecutableResolution CreateSuccessfulResolution(
+        CodexExecutableLaunch launch,
+        IEnumerable<CodexExecutableCandidateDiagnostic> diagnostics)
+    {
+        var candidateArray = diagnostics.ToArray();
+        return new CodexExecutableResolution(
+            launch,
+            candidateArray,
+            $"已找到可用的 Codex Runtime：{launch.CodexExecutablePath}");
+    }
+
+    private static CodexExecutableResolution CreateFailedResolution(
+        IEnumerable<CodexExecutableCandidateDiagnostic> diagnostics)
+    {
+        var candidateArray = diagnostics.ToArray();
+        var message = new StringBuilder(
+            "未找到可用的 Codex Runtime。请安装 Codex CLI、确认 %APPDATA%\\npm\\codex.cmd 可执行，或手动指定 Codex CLI 路径。");
+        if (candidateArray.Length == 0)
+        {
+            message.AppendLine()
+                .Append("没有发现现存候选文件；已检查 APPDATA npm、PATH 和应用目录。");
+        }
+        else
+        {
+            message.AppendLine().Append("候选诊断：");
+            foreach (var candidate in candidateArray)
+            {
+                message.AppendLine()
+                    .Append("- [")
+                    .Append(candidate.Source)
+                    .Append("] ")
+                    .Append(candidate.CandidatePath)
+                    .Append(" — ")
+                    .Append(candidate.Status)
+                    .Append("：")
+                    .Append(candidate.Reason);
+            }
+        }
+
+        return new CodexExecutableResolution(null, candidateArray, message.ToString());
+    }
+
+    private static string? ResolveApplicationDataDirectory(string? applicationDataDirectory)
+    {
+        var configuredPath = applicationDataDirectory ??
+                             Environment.GetEnvironmentVariable("APPDATA") ??
+                             Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        if (string.IsNullOrWhiteSpace(configuredPath))
+        {
+            return null;
+        }
+
+        try
+        {
+            return NormalizeDirectory(configuredPath);
+        }
+        catch (Exception exception) when (exception is
+            ArgumentException or
+            NotSupportedException or
+            PathTooLongException)
+        {
+            return null;
+        }
+    }
+
+    private static bool IsProbeableExplicitExtension(string extension) =>
+        IsCommandScriptExtension(extension) ||
+        string.Equals(extension, ".exe", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsCommandScriptExtension(string extension) =>
+        string.Equals(extension, ".cmd", StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(extension, ".bat", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsWindowsAppsExecutable(string executablePath)
+    {
+        if (!string.Equals(
+                Path.GetFileName(executablePath),
+                "codex.exe",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        var segments = Path.GetFullPath(executablePath)
+            .Split(
+                new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+                StringSplitOptions.RemoveEmptyEntries);
+        return segments.Any(segment =>
+            string.Equals(segment, "WindowsApps", StringComparison.OrdinalIgnoreCase));
     }
 
     private static IEnumerable<string> EnumeratePathDirectories(string? pathEnvironment)
@@ -260,8 +656,10 @@ internal static class CodexExecutableResolver
             {
                 normalized = NormalizeDirectory(Environment.ExpandEnvironmentVariables(trimmed));
             }
-            catch (Exception exception) when (
-                exception is ArgumentException or NotSupportedException or PathTooLongException)
+            catch (Exception exception) when (exception is
+                ArgumentException or
+                NotSupportedException or
+                PathTooLongException)
             {
                 continue;
             }

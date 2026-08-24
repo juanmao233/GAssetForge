@@ -243,9 +243,14 @@ loopback 且不返回认证信息。该端口仍不得经代理或端口转发�
 `WorkflowCatalog` 是模板注册模块。五类工作流在新建项目页中选择；创建前不改变当前工作区，创建成功后把
 模板 key 写入项目 manifest，并由 `ShellViewModel` 将中央文档切换为 `EditorWorkspaceViewModel`、
 `TilemapWorkspaceViewModel` 或 `WorkflowPlaceholderViewModel`。未实现的业务仍使用相同基础业务面板位置；
-美术风格素材库、蓝图窗口和 MCP 连接面板作为跨工作流共享模块独立复用。蓝图窗口当前只提供稳定停靠画布，
-尚未定义可执行节点、连接语义或项目级序列化格式。目前尚无手动“打开已有项目”入口，已有
-项目只通过 `lastProjectPath` 在重启时自动恢复。
+美术风格素材库、蓝图窗口和 MCP 连接面板作为跨工作流共享模块独立复用。蓝图窗口提供系统起始、说明、
+Harness 工具、功能集合与 If 逻辑节点，支持端点和有向无环连线、画布平移缩放、节点整理及项目级 JSON
+持久化。图文件显式版本化、限制为 8 MiB，并拒绝越界路径与重解析点。开始执行时先冻结带类型化路由的版本化计划并独立复验，
+再把计划和审计时间线落入项目 `Assets/Generated/GAssetForge/BlueprintRuns`；`run-state.v1.json` 最后写入并作为 planned 提交标记，
+在真实 Adapter 接入前不会误触发 Agent 或图片处理。详细合同见 [蓝图 Harness 协议](blueprint-harness-protocol.md)。
+
+蓝图编辑器把持久图与交互瞬态分离：节点放置虚影和端口牵引线不会写入 Graph，第二次左键确认后才创建节点；输入、输出端点均可作为牵线起点，最终统一规范为 Output → Input。默认鼠标只负责选择、滚轮缩放及右/中键平移，右键双击恢复 `(0,0,1)` 视口；对象移动工具会拦截节点整卡输入并拖动对象。添加按钮与画布空白区共享四类型右键工具组，常驻工具栏不再占用独立类型下拉框。
+目前尚无手动“打开已有项目”入口，已有项目只通过 `lastProjectPath` 在重启时自动恢复。
 
 Tilemap 第一阶段由 `TilemapWorkspaceView` 和 `TilemapGridSurface` 组成。网格使用单个 WPF `FrameworkElement.OnRender` 绘制可见范围内的主/次网格、XY 轴与悬停格，不创建海量 `Line` 控件；当前提供中键平移、光标锚点缩放、格坐标换算以及暗亮主题资源。瓦片数据、笔刷和图层模型将在此渲染 seam 上继续扩展。
 

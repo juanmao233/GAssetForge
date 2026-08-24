@@ -21,6 +21,8 @@ public sealed class ProjectPaths
         GeneratedAssetDirectory = Path.Combine(AssetDirectory, "Generated");
         PackagesDirectory = Path.Combine(RootDirectory, "Packages");
         ProjectSettingsDirectory = Path.Combine(RootDirectory, "ProjectSettings");
+        BlueprintDirectory = Path.Combine(ProjectSettingsDirectory, "Blueprints");
+        BlueprintRunDirectory = Path.Combine(GeneratedAssetDirectory, "GAssetForge", "BlueprintRuns");
         var canonicalManifestPath = Path.Combine(ProjectSettingsDirectory, ManifestFileName);
         var legacyManifestPath = Path.Combine(ProjectSettingsDirectory, LegacyManifestFileName);
         var useLegacyManifest =
@@ -42,6 +44,10 @@ public sealed class ProjectPaths
     public string PackagesDirectory { get; }
 
     public string ProjectSettingsDirectory { get; }
+
+    public string BlueprintDirectory { get; }
+
+    public string BlueprintRunDirectory { get; }
 
     public string ManifestPath { get; }
 

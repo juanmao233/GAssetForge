@@ -16,11 +16,17 @@
     <AssemblyVersion>1.0.0.0</AssemblyVersion>
     <FileVersion>1.0.0.0</FileVersion>
     <InformationalVersion>1.0.0</InformationalVersion>
+    <ApplicationIcon>Assets\Branding\GAssetForge.ico</ApplicationIcon>
   </PropertyGroup>
 
   <ItemGroup>
     <ProjectReference Include="..\GAssetForge.Core\GAssetForge.Core.csproj" />
     <PackageReference Include="Dirkster.AvalonDock" Version="4.74.1" />
     <PackageReference Include="Dirkster.AvalonDock.Themes.VS2013" Version="4.74.1" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Resource Include="Assets\Branding\GAssetForge.ico" />
+    <Resource Include="Assets\Branding\GAssetForge.png" />
   </ItemGroup>
 </Project>

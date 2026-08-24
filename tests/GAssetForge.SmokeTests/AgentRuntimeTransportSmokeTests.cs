@@ -22,6 +22,11 @@ internal static class AgentRuntimeTransportSmokeTests
         await CodexAppServerFailsActiveTurnWhenProtocolStreamEndsAsync();
         await CodexAppServerScopesGAssetForgeMcpApprovalsToTheActiveBatchAsync();
         await CodexAppServerRejectsPreBaselineVersionAsync();
+        CodexExecutableResolverPrefersAppDataNpmShimBeforeWindowsApps();
+        CodexExecutableResolverSkipsWindowsAppsExecutableWithDiagnostic();
+        CodexExecutableResolverProbesExplicitScriptAndExecutable();
+        CodexExecutableResolverReportsEveryRejectedCandidate();
+        CodexExecutableResolverDoesNotCacheFailuresAndCanRefreshSuccesses();
         CodexExecutableResolverPrefersLaunchablePathShimOverPackagedRuntime();
         CodexExecutableResolverSkipsUnlaunchableCompleteRuntime();
         CodexProcessLaunchFallsBackToLegacyPathScript();
@@ -580,6 +585,296 @@ internal static class AgentRuntimeTransportSmokeTests
             "拒绝旧版 app-server 时必须清理进程树");
     }
 
+    private static void CodexExecutableResolverPrefersAppDataNpmShimBeforeWindowsApps()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "GAssetForge.SmokeTests",
+            "codex-runtime-appdata-priority",
+            Guid.NewGuid().ToString("N"));
+        var applicationDirectory = Path.Combine(root, "distribution");
+        var applicationDataDirectory = Path.Combine(root, "AppData", "Roaming");
+        var npmDirectory = Path.Combine(applicationDataDirectory, "npm");
+        var windowsAppsDirectory = Path.Combine(
+            root,
+            "Program Files",
+            "WindowsApps",
+            "OpenAI.Codex_fixture",
+            "app",
+            "resources");
+        try
+        {
+            Directory.CreateDirectory(applicationDirectory);
+            Directory.CreateDirectory(npmDirectory);
+            Directory.CreateDirectory(windowsAppsDirectory);
+            var expectedShimPath = Path.Combine(npmDirectory, "codex.cmd");
+            File.WriteAllText(expectedShimPath, "@echo off\r\nexit /b 0\r\n");
+            var windowsAppsExecutable = Path.Combine(windowsAppsDirectory, "codex.exe");
+            File.WriteAllBytes(windowsAppsExecutable, [0x01]);
+            File.WriteAllBytes(
+                Path.Combine(windowsAppsDirectory, CodexExecutableResolver.CodeModeHostFileName),
+                [0x02]);
+            var probedCandidates = new List<string>();
+
+            var resolution = CodexExecutableResolver.Resolve(
+                "codex",
+                applicationDirectory,
+                windowsAppsDirectory,
+                candidate =>
+                {
+                    probedCandidates.Add(candidate.CodexExecutablePath);
+                    return string.Equals(
+                        candidate.CodexExecutablePath,
+                        expectedShimPath,
+                        StringComparison.OrdinalIgnoreCase);
+                },
+                applicationDataDirectory);
+
+            Equal(Path.GetFullPath(expectedShimPath), resolution.CodexExecutablePath,
+                "%APPDATA%\\npm 中的 codex.cmd 必须先于仅在 PATH 中出现的 WindowsApps exe");
+            SequenceEqual(
+                new[] { Path.GetFullPath(expectedShimPath) },
+                probedCandidates,
+                "命中 AppData npm shim 后不应再探测 WindowsApps 候选");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    private static void CodexExecutableResolverSkipsWindowsAppsExecutableWithDiagnostic()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "GAssetForge.SmokeTests",
+            "codex-runtime-windowsapps-skip",
+            Guid.NewGuid().ToString("N"));
+        var applicationDirectory = Path.Combine(root, "distribution");
+        var applicationDataDirectory = Path.Combine(root, "empty-appdata");
+        var windowsAppsDirectory = Path.Combine(
+            root,
+            "Program Files",
+            "WindowsApps",
+            "OpenAI.Codex_fixture",
+            "app",
+            "resources");
+        try
+        {
+            Directory.CreateDirectory(applicationDirectory);
+            Directory.CreateDirectory(applicationDataDirectory);
+            Directory.CreateDirectory(windowsAppsDirectory);
+            var windowsAppsExecutable = Path.Combine(windowsAppsDirectory, "codex.exe");
+            File.WriteAllBytes(windowsAppsExecutable, [0x01]);
+            File.WriteAllBytes(
+                Path.Combine(windowsAppsDirectory, CodexExecutableResolver.CodeModeHostFileName),
+                [0x02]);
+            var probeCount = 0;
+
+            var resolution = CodexExecutableResolver.ResolveWithDiagnostics(
+                "codex",
+                applicationDirectory,
+                windowsAppsDirectory,
+                candidate =>
+                {
+                    probeCount++;
+                    return CodexExecutableProbeResult.Successful("fixture 可启动");
+                },
+                applicationDataDirectory);
+
+            False(resolution.IsSuccess,
+                "WindowsApps 包内 codex.exe 不得被当作可用 Runtime");
+            Equal(0, probeCount,
+                "WindowsApps 包内 codex.exe 应在 Process.Start 之前被明确跳过");
+            var diagnostic = resolution.Candidates.Single(candidate =>
+                string.Equals(
+                    candidate.CandidatePath,
+                    windowsAppsExecutable,
+                    StringComparison.OrdinalIgnoreCase));
+            Equal(CodexExecutableCandidateStatus.Skipped, diagnostic.Status,
+                "WindowsApps 候选状态应为 Skipped");
+            True(diagnostic.Source.Contains("PATH", StringComparison.OrdinalIgnoreCase),
+                "WindowsApps 候选诊断应说明来源");
+            True(diagnostic.Reason.Contains("WindowsApps", StringComparison.OrdinalIgnoreCase) &&
+                 diagnostic.Reason.Contains("拒绝访问", StringComparison.Ordinal),
+                "WindowsApps 候选诊断应解释桌面进程直接启动会拒绝访问");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    private static void CodexExecutableResolverProbesExplicitScriptAndExecutable()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "GAssetForge.SmokeTests",
+            "codex-runtime-explicit-probe",
+            Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(root);
+            var argumentsPath = Path.Combine(root, "probe-arguments.txt");
+            var scriptPath = Path.Combine(root, "configured codex.cmd");
+            File.WriteAllText(
+                scriptPath,
+                $"@echo off\r\n>\"{argumentsPath}\" echo %*\r\nexit /b 0\r\n");
+
+            var scriptResolution = CodexExecutableResolver.Resolve(scriptPath);
+
+            Equal(
+                Environment.GetEnvironmentVariable("ComSpec") ??
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"),
+                scriptResolution.ProcessFileName,
+                "显式配置的 .cmd 必须通过 ComSpec 启动");
+            SequenceEqual(
+                new[] { "/d", "/s", "/c", "call", Path.GetFullPath(scriptPath) },
+                scriptResolution.PrefixArguments,
+                "显式配置的 .cmd 应保留脚本启动前缀");
+            True(File.Exists(argumentsPath),
+                "显式配置的 .cmd 必须先执行启动探测");
+            True(File.ReadAllText(argumentsPath).Contains("--version", StringComparison.Ordinal),
+                "显式配置的 .cmd 启动探测必须传入 --version");
+
+            var executablePath = Path.Combine(root, "configured-codex.exe");
+            File.WriteAllBytes(executablePath, [0x01]);
+            var executableProbeCount = 0;
+            var executableResolution = CodexExecutableResolver.Resolve(
+                executablePath,
+                launchProbe: candidate =>
+                {
+                    executableProbeCount++;
+                    return string.Equals(
+                        candidate.ProcessFileName,
+                        Path.GetFullPath(executablePath),
+                        StringComparison.OrdinalIgnoreCase);
+                });
+
+            Equal(1, executableProbeCount,
+                "显式配置的 .exe 必须执行启动探测");
+            Equal(Path.GetFullPath(executablePath), executableResolution.ProcessFileName,
+                "显式配置的 .exe 应直接作为进程文件");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    private static void CodexExecutableResolverReportsEveryRejectedCandidate()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "GAssetForge.SmokeTests",
+            "codex-runtime-diagnostics",
+            Guid.NewGuid().ToString("N"));
+        var applicationDirectory = Path.Combine(root, "distribution");
+        var applicationDataDirectory = Path.Combine(root, "AppData", "Roaming");
+        var npmDirectory = Path.Combine(applicationDataDirectory, "npm");
+        var pathDirectory = Path.Combine(root, "path-cli");
+        try
+        {
+            Directory.CreateDirectory(applicationDirectory);
+            Directory.CreateDirectory(npmDirectory);
+            Directory.CreateDirectory(pathDirectory);
+            var appDataShimPath = Path.Combine(npmDirectory, "codex.cmd");
+            var pathShimPath = Path.Combine(pathDirectory, "codex.bat");
+            File.WriteAllText(appDataShimPath, "@echo off\r\nexit /b 7\r\n");
+            File.WriteAllText(pathShimPath, "@echo off\r\nexit /b 9\r\n");
+
+            CodexExecutableResolutionException? failure = null;
+            try
+            {
+                _ = CodexExecutableResolver.Resolve(
+                    "codex",
+                    applicationDirectory,
+                    pathDirectory,
+                    applicationDataDirectory: applicationDataDirectory);
+            }
+            catch (CodexExecutableResolutionException exception)
+            {
+                failure = exception;
+            }
+
+            True(failure is not null,
+                "所有 Codex 候选探测失败时必须抛出结构化解析异常");
+            Equal(2, failure!.Candidates.Count,
+                "解析异常必须保留每个已发现候选的诊断");
+            True(failure.Message.Contains(appDataShimPath, StringComparison.OrdinalIgnoreCase) &&
+                 failure.Message.Contains("APPDATA npm", StringComparison.OrdinalIgnoreCase) &&
+                 failure.Message.Contains("退出码 7", StringComparison.Ordinal),
+                "异常必须包含 AppData npm 候选的路径、来源和失败原因");
+            True(failure.Message.Contains(pathShimPath, StringComparison.OrdinalIgnoreCase) &&
+                 failure.Message.Contains("PATH shim", StringComparison.OrdinalIgnoreCase) &&
+                 failure.Message.Contains("退出码 9", StringComparison.Ordinal),
+                "异常必须包含 PATH 候选的路径、来源和失败原因");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    private static void CodexExecutableResolverDoesNotCacheFailuresAndCanRefreshSuccesses()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "GAssetForge.SmokeTests",
+            "codex-runtime-probe-cache",
+            Guid.NewGuid().ToString("N"));
+        var scriptPath = Path.Combine(root, "codex.cmd");
+        try
+        {
+            Directory.CreateDirectory(root);
+            CodexExecutableResolver.ClearLaunchProbeCache();
+            File.WriteAllText(scriptPath, "@echo off\r\nexit /b 17\r\n");
+
+            var initialFailure = CodexExecutableResolver.ResolveWithDiagnostics(scriptPath);
+            False(initialFailure.IsSuccess,
+                "首次失败的显式 shim 不得解析成功");
+            True(initialFailure.Candidates.Single().Reason.Contains("退出码 17", StringComparison.Ordinal),
+                "首次失败应保留真实退出码");
+
+            File.WriteAllText(scriptPath, "@echo off\r\nexit /b 0\r\n");
+            var recoveredResolution = CodexExecutableResolver.Resolve(scriptPath);
+            Equal(Path.GetFullPath(scriptPath), recoveredResolution.CodexExecutablePath,
+                "失败探测不得永久缓存，修复 shim 后本进程应立即恢复");
+
+            File.WriteAllText(scriptPath, "@echo off\r\nexit /b 19\r\n");
+            var cachedSuccess = CodexExecutableResolver.ResolveWithDiagnostics(scriptPath);
+            True(cachedSuccess.IsSuccess,
+                "成功探测可以缓存以避免每次启动重复执行 --version");
+
+            CodexExecutableResolver.ClearLaunchProbeCache();
+            var refreshedFailure = CodexExecutableResolver.ResolveWithDiagnostics(scriptPath);
+            False(refreshedFailure.IsSuccess,
+                "手动刷新必须清除成功探测缓存并重新验证 Runtime");
+            True(refreshedFailure.Candidates.Single().Reason.Contains("退出码 19", StringComparison.Ordinal),
+                "刷新后的诊断应显示最新失败原因");
+        }
+        finally
+        {
+            CodexExecutableResolver.ClearLaunchProbeCache();
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
     private static void CodexExecutableResolverPrefersLaunchablePathShimOverPackagedRuntime()
     {
         var root = Path.Combine(
@@ -611,7 +906,8 @@ internal static class AgentRuntimeTransportSmokeTests
                 candidate => string.Equals(
                     candidate.CodexExecutablePath,
                     expectedShimPath,
-                    StringComparison.OrdinalIgnoreCase));
+                    StringComparison.OrdinalIgnoreCase),
+                Path.Combine(root, "empty-appdata"));
 
             Equal(Path.GetFullPath(expectedShimPath), resolution.CodexExecutablePath,
                 "PATH 中可启动的 codex.cmd 应覆盖不可直接启动的打包 Runtime");
@@ -621,7 +917,7 @@ internal static class AgentRuntimeTransportSmokeTests
                 resolution.ProcessFileName,
                 "PATH shim 应通过命令处理器启动");
             SequenceEqual(
-                new[] { "/d", "/s", "/c", Path.GetFullPath(expectedShimPath) },
+                new[] { "/d", "/s", "/c", "call", Path.GetFullPath(expectedShimPath) },
                 resolution.PrefixArguments,
                 "PATH shim 启动前缀");
             False(resolution.HasCodeModeCompanion,
@@ -674,7 +970,8 @@ internal static class AgentRuntimeTransportSmokeTests
                         candidate.CodexExecutablePath,
                         usableExecutable,
                         StringComparison.OrdinalIgnoreCase);
-                });
+                },
+                Path.Combine(root, "empty-appdata"));
 
             Equal(Path.GetFullPath(usableExecutable), resolution.CodexExecutablePath,
                 "启动探测失败的完整 Runtime 必须被跳过");
@@ -716,7 +1013,8 @@ internal static class AgentRuntimeTransportSmokeTests
                     WorkingDirectory = Environment.CurrentDirectory
                 },
                 applicationDirectory,
-                legacyDirectory);
+                legacyDirectory,
+                Path.Combine(root, "empty-appdata"));
 
             Equal(
                 Environment.GetEnvironmentVariable("ComSpec") ??
@@ -724,7 +1022,7 @@ internal static class AgentRuntimeTransportSmokeTests
                 startInfo.FileName,
                 "旧版 PATH 脚本应通过命令处理器启动");
             SequenceEqual(
-                new[] { "/d", "/s", "/c", Path.GetFullPath(legacyScriptPath) },
+                new[] { "/d", "/s", "/c", "call", Path.GetFullPath(legacyScriptPath) },
                 startInfo.ArgumentList,
                 "旧版 Codex CLI 脚本启动前缀");
         }
@@ -764,7 +1062,8 @@ internal static class AgentRuntimeTransportSmokeTests
                         WorkingDirectory = Environment.CurrentDirectory
                     },
                     applicationDirectory,
-                    pathEnvironment: string.Empty);
+                    pathEnvironment: string.Empty,
+                    applicationDataDirectory: Path.Combine(root, "empty-appdata"));
             }
             catch (InvalidOperationException exception)
             {

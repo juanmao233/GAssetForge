@@ -2,9 +2,14 @@
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:automation="clr-namespace:System.Windows.Automation;assembly=PresentationCore"
+             xmlns:conv="clr-namespace:GAssetForge.App.Converters"
+             xmlns:viewModels="clr-namespace:GAssetForge.App.ViewModels"
              MinWidth="620"
              MinHeight="360">
     <UserControl.Resources>
+        <conv:StringToBrushConverter x:Key="StringToBrushConverter" />
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
+
         <DrawingBrush x:Key="BlueprintGridBrush"
                       TileMode="Tile"
                       Viewport="0,0,24,24"
@@ -14,7 +19,7 @@
             <DrawingBrush.Drawing>
                 <GeometryDrawing Brush="Transparent">
                     <GeometryDrawing.Pen>
-                        <Pen Brush="{DynamicResource App.BorderBrush}" Thickness="0.5" />
+                        <Pen Brush="{DynamicResource App.BorderBrush}" Thickness="0.55" />
                     </GeometryDrawing.Pen>
                     <GeometryDrawing.Geometry>
                         <RectangleGeometry Rect="0,0,24,24" />
@@ -23,21 +28,147 @@
             </DrawingBrush.Drawing>
         </DrawingBrush>
 
-        <Style x:Key="BlueprintScopeChipStyle" TargetType="{x:Type Border}">
-            <Setter Property="Margin" Value="0,0,8,8" />
-            <Setter Property="Padding" Value="10,5" />
-            <Setter Property="Background" Value="{DynamicResource App.InputBackgroundBrush}" />
-            <Setter Property="BorderBrush" Value="{DynamicResource App.BorderBrush}" />
+        <Style x:Key="BlueprintNodeBorderStyle" TargetType="{x:Type Border}">
+            <Setter Property="Background" Value="{DynamicResource App.SurfaceRaisedBrush}" />
+            <Setter Property="BorderBrush" Value="{Binding AccentHex, Converter={StaticResource StringToBrushConverter}}" />
             <Setter Property="BorderThickness" Value="1" />
-            <Setter Property="CornerRadius" Value="4" />
+            <Setter Property="CornerRadius" Value="6" />
+            <Setter Property="SnapsToDevicePixels" Value="True" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                    <Setter Property="BorderThickness" Value="2" />
+                    <Setter Property="Background" Value="{DynamicResource App.SurfaceHoverBrush}" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="BlueprintConditionalPanelStyle" TargetType="{x:Type StackPanel}">
+            <Setter Property="Visibility" Value="Collapsed" />
+        </Style>
+
+        <Style x:Key="BlueprintStartPanelStyle"
+               TargetType="{x:Type StackPanel}"
+               BasedOn="{StaticResource BlueprintConditionalPanelStyle}">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsStart}" Value="True">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="BlueprintDescriptionPanelStyle"
+               TargetType="{x:Type StackPanel}"
+               BasedOn="{StaticResource BlueprintConditionalPanelStyle}">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsDescription}" Value="True">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="BlueprintToolPanelStyle"
+               TargetType="{x:Type StackPanel}"
+               BasedOn="{StaticResource BlueprintConditionalPanelStyle}">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsTool}" Value="True">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="BlueprintFunctionPanelStyle"
+               TargetType="{x:Type StackPanel}"
+               BasedOn="{StaticResource BlueprintConditionalPanelStyle}">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsFunctionCollection}" Value="True">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="BlueprintLogicPanelStyle"
+               TargetType="{x:Type StackPanel}"
+               BasedOn="{StaticResource BlueprintConditionalPanelStyle}">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsLogic}" Value="True">
+                    <Setter Property="Visibility" Value="Visible" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="BlueprintDeleteButtonStyle"
+               TargetType="{x:Type Button}"
+               BasedOn="{StaticResource App.IconButtonStyle}">
+            <Setter Property="Width" Value="24" />
+            <Setter Property="Height" Value="24" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Content" Value="×" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsStart}" Value="True">
+                    <Setter Property="Visibility" Value="Collapsed" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="BlueprintAddInputButtonStyle"
+               TargetType="{x:Type Button}"
+               BasedOn="{StaticResource App.ButtonStyle}">
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsStart}" Value="True">
+                    <Setter Property="Visibility" Value="Collapsed" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="BlueprintPortButtonStyle" TargetType="{x:Type Button}">
+            <Setter Property="Width" Value="14" />
+            <Setter Property="Height" Value="14" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Background" Value="{DynamicResource App.SurfaceBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource App.AccentBrush}" />
+            <Setter Property="BorderThickness" Value="2" />
+            <Setter Property="Cursor" Value="Cross" />
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="{x:Type Button}">
+                        <Ellipse Fill="{TemplateBinding Background}"
+                                 Stroke="{TemplateBinding BorderBrush}"
+                                 StrokeThickness="{TemplateBinding BorderThickness}" />
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter Property="Background" Value="{DynamicResource App.AccentHoverBrush}" />
+                            </Trigger>
+                            <DataTrigger Binding="{Binding IsPendingConnection}" Value="True">
+                                <Setter Property="Background" Value="{DynamicResource App.WarningBrush}" />
+                                <Setter Property="BorderBrush" Value="{DynamicResource App.WarningBrush}" />
+                            </DataTrigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <Style x:Key="BlueprintPortRemoveButtonStyle"
+               TargetType="{x:Type Button}"
+               BasedOn="{StaticResource App.IconButtonStyle}">
+            <Setter Property="Width" Value="18" />
+            <Setter Property="Height" Value="18" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Content" Value="×" />
+            <Setter Property="FontSize" Value="9" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding CanRemove}" Value="False">
+                    <Setter Property="Visibility" Value="Collapsed" />
+                </DataTrigger>
+            </Style.Triggers>
         </Style>
     </UserControl.Resources>
 
     <Grid Background="{DynamicResource App.BackgroundBrush}">
         <Grid.RowDefinitions>
-            <RowDefinition Height="44" />
+            <RowDefinition Height="48" />
             <RowDefinition Height="*" />
-            <RowDefinition Height="26" />
+            <RowDefinition Height="28" />
         </Grid.RowDefinitions>
 
         <Border Grid.Row="0"
@@ -46,28 +177,40 @@
                 BorderBrush="{DynamicResource App.BorderBrush}"
                 BorderThickness="0,0,0,1">
             <DockPanel LastChildFill="True">
-                <Border DockPanel.Dock="Right"
-                        Padding="9,4"
-                        VerticalAlignment="Center"
-                        Background="{DynamicResource App.InputBackgroundBrush}"
-                        BorderBrush="{DynamicResource App.BorderBrush}"
-                        BorderThickness="1"
-                        CornerRadius="4">
-                    <TextBlock Foreground="{DynamicResource App.TextMutedBrush}"
-                               FontSize="11"
-                               Text="等待节点规则" />
-                </Border>
+                <StackPanel DockPanel.Dock="Right"
+                            Orientation="Horizontal"
+                            VerticalAlignment="Center">
+                    <Border Padding="9,4"
+                            Background="{DynamicResource App.InputBackgroundBrush}"
+                            BorderBrush="{DynamicResource App.BorderBrush}"
+                            BorderThickness="1"
+                            CornerRadius="4">
+                        <TextBlock Foreground="{DynamicResource App.TextMutedBrush}"
+                                   FontSize="10"
+                                   Text="协议预演 · Graph v1 / Plan v1" />
+                    </Border>
+                    <Button Margin="8,0,0,0"
+                            Padding="10,5"
+                            Click="FocusAllNodes_OnClick"
+                            Content="聚焦全部"
+                            Style="{DynamicResource App.ButtonStyle}" />
+                    <Button Margin="8,0,0,0"
+                            Padding="10,5"
+                            Command="{Binding SaveCommand}"
+                            Content="保存蓝图"
+                            Style="{DynamicResource App.ButtonStyle}" />
+                </StackPanel>
 
                 <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-                    <Border Width="25"
-                            Height="25"
+                    <Border Width="27"
+                            Height="27"
                             Margin="0,0,9,0"
                             Background="{DynamicResource App.AccentBrush}"
                             CornerRadius="4">
                         <TextBlock HorizontalAlignment="Center"
                                    VerticalAlignment="Center"
                                    Foreground="White"
-                                   FontSize="15"
+                                   FontSize="16"
                                    Text="◇" />
                     </Border>
                     <StackPanel VerticalAlignment="Center">
@@ -77,7 +220,7 @@
                                    Text="{Binding Header}" />
                         <TextBlock Foreground="{DynamicResource App.TextMutedBrush}"
                                    FontSize="10"
-                                   Text="Agent 驱动轨迹与工具工作流" />
+                                   Text="节点、工具合同、条件分支与 Agent 驱动轨迹" />
                     </StackPanel>
                 </StackPanel>
             </DockPanel>
@@ -87,72 +230,403 @@
               Grid.Row="1"
               automation:AutomationProperties.Name="蓝图工作流画布"
               Background="{DynamicResource App.CanvasBackgroundBrush}"
-              ClipToBounds="True">
-            <Rectangle Fill="{StaticResource BlueprintGridBrush}"
-                       IsHitTestVisible="False"
-                       Opacity="0.55" />
+              ClipToBounds="True"
+              Focusable="True"
+              PreviewMouseDown="BlueprintCanvas_OnPreviewMouseDown"
+              PreviewMouseMove="BlueprintCanvas_OnPreviewMouseMove"
+              PreviewMouseUp="BlueprintCanvas_OnPreviewMouseUp"
+              PreviewMouseWheel="BlueprintCanvas_OnPreviewMouseWheel"
+              PreviewKeyDown="BlueprintCanvas_OnPreviewKeyDown"
+              LostMouseCapture="BlueprintCanvas_OnLostMouseCapture"
+              Unloaded="BlueprintCanvas_OnUnloaded">
+            <Canvas x:Name="BlueprintWorldCanvas"
+                    Width="6000"
+                    Height="4000"
+                    HorizontalAlignment="Left"
+                    VerticalAlignment="Top">
+                <Canvas.RenderTransform>
+                    <TransformGroup>
+                        <ScaleTransform ScaleX="{Binding Zoom}" ScaleY="{Binding Zoom}" />
+                        <TranslateTransform X="{Binding PanX}" Y="{Binding PanY}" />
+                    </TransformGroup>
+                </Canvas.RenderTransform>
 
-            <Border x:Name="BlueprintEmptyState"
-                    Width="560"
-                    MaxWidth="560"
-                    Padding="30"
-                    HorizontalAlignment="Center"
-                    VerticalAlignment="Center"
+                <Rectangle Width="6000"
+                           Height="4000"
+                           Fill="{StaticResource BlueprintGridBrush}"
+                           IsHitTestVisible="False"
+                           Opacity="0.62" />
+
+                <ItemsControl Width="6000"
+                              Height="4000"
+                              ItemsSource="{Binding Connections}"
+                              IsHitTestVisible="True">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <Canvas />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Grid>
+                                <Path Data="{Binding Geometry}"
+                                      Stroke="Transparent"
+                                      StrokeThickness="14"
+                                      ToolTip="右键删除连线"
+                                      MouseRightButtonUp="Connection_OnMouseRightButtonUp" />
+                                <Path Data="{Binding Geometry}"
+                                      IsHitTestVisible="False"
+                                      Stroke="{DynamicResource App.AccentBrush}"
+                                      StrokeThickness="2.2" />
+                            </Grid>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+
+                <Path x:Name="BlueprintConnectionPreviewPath"
+                      Data="{Binding ConnectionPreview.Geometry}"
+                      IsHitTestVisible="False"
+                      Panel.ZIndex="24"
+                      Stroke="{DynamicResource App.WarningBrush}"
+                      StrokeDashArray="5,3"
+                      StrokeThickness="2.2" />
+
+                <Grid x:Name="BlueprintPlacementGhost"
+                      Width="{Binding PlacementPreview.Width}"
+                      Height="{Binding PlacementPreview.Height}"
+                      Canvas.Left="{Binding PlacementPreview.X}"
+                      Canvas.Top="{Binding PlacementPreview.Y}"
+                      IsHitTestVisible="False"
+                      Opacity="0.68"
+                      Panel.ZIndex="30"
+                      Visibility="{Binding HasPlacementPreview, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <Rectangle Fill="{DynamicResource App.SurfaceRaisedBrush}"
+                               Stroke="{DynamicResource App.WarningBrush}"
+                               StrokeDashArray="6,3"
+                               StrokeThickness="2"
+                               RadiusX="7"
+                               RadiusY="7" />
+                    <StackPanel Margin="13"
+                                HorizontalAlignment="Stretch"
+                                VerticalAlignment="Center">
+                        <TextBlock HorizontalAlignment="Center"
+                                   Foreground="{DynamicResource App.WarningBrush}"
+                                   FontSize="13"
+                                   FontWeight="SemiBold"
+                                   Text="{Binding PlacementPreview.NodeType.Label}" />
+                        <TextBlock Margin="0,7,0,0"
+                                   HorizontalAlignment="Center"
+                                   Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                   FontSize="10"
+                                   Text="再次单击左键确认创建" />
+                        <TextBlock Margin="0,4,0,0"
+                                   HorizontalAlignment="Center"
+                                   Foreground="{DynamicResource App.TextMutedBrush}"
+                                   FontSize="9"
+                                   Text="右键可切换类型 · Esc 取消" />
+                    </StackPanel>
+                </Grid>
+
+                <ItemsControl x:Name="BlueprintNodesItemsControl"
+                              Width="6000"
+                              Height="4000"
+                              ItemsSource="{Binding Nodes}">
+                    <ItemsControl.ItemsPanel>
+                        <ItemsPanelTemplate>
+                            <Canvas />
+                        </ItemsPanelTemplate>
+                    </ItemsControl.ItemsPanel>
+                    <ItemsControl.ItemContainerStyle>
+                        <Style TargetType="{x:Type ContentPresenter}">
+                            <Setter Property="Canvas.Left" Value="{Binding X}" />
+                            <Setter Property="Canvas.Top" Value="{Binding Y}" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                    <Setter Property="Panel.ZIndex" Value="20" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </ItemsControl.ItemContainerStyle>
+                    <ItemsControl.ItemTemplate>
+                        <DataTemplate>
+                            <Border x:Name="BlueprintNodeCard"
+                                    Width="{Binding Width}"
+                                    Margin="0"
+                                    Style="{StaticResource BlueprintNodeBorderStyle}"
+                                    PreviewMouseLeftButtonDown="NodeCard_OnPreviewMouseLeftButtonDown">
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="{x:Static viewModels:BlueprintNodeLayoutMetrics.HeaderGridLength}" />
+                                        <RowDefinition Height="{x:Static viewModels:BlueprintNodeLayoutMetrics.TagsRowGridLength}" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="34" />
+                                    </Grid.RowDefinitions>
+
+                                    <Border x:Name="NodeDragHandle"
+                                            Grid.Row="0"
+                                            Padding="9,4"
+                                            Background="{Binding AccentHex, Converter={StaticResource StringToBrushConverter}}"
+                                            CornerRadius="5,5,0,0">
+                                        <Grid>
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel x:Name="NodeHeaderTextStack"
+                                                        VerticalAlignment="Center">
+                                                <TextBox x:Name="NodeHeaderTitleEditor"
+                                                         MinHeight="0"
+                                                         Padding="0"
+                                                         Background="Transparent"
+                                                         BorderThickness="0"
+                                                         Foreground="White"
+                                                         FontWeight="SemiBold"
+                                                         Text="{Binding Title, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                                <TextBlock x:Name="NodeHeaderTypeLabel"
+                                                           Foreground="#E8FFFFFF"
+                                                           FontSize="9"
+                                                           Text="{Binding TypeLabel}" />
+                                            </StackPanel>
+                                            <Button Grid.Column="1"
+                                                    Command="{Binding RemoveCommand}"
+                                                    Foreground="White"
+                                                    Style="{StaticResource BlueprintDeleteButtonStyle}"
+                                                    ToolTip="删除节点及其连线" />
+                                        </Grid>
+                                    </Border>
+
+                                    <Grid Grid.Row="1" Margin="8,5">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBlock VerticalAlignment="Center"
+                                                   Foreground="{DynamicResource App.TextMutedBrush}"
+                                                   FontSize="9"
+                                                   Text="标签" />
+                                        <TextBox Grid.Column="1"
+                                                 Margin="6,0,0,0"
+                                                 Padding="5,2"
+                                                 FontSize="10"
+                                                 Text="{Binding TagsText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                 ToolTip="多个标签使用逗号分隔"
+                                                 Style="{DynamicResource App.TextBoxStyle}" />
+                                    </Grid>
+
+                                    <Grid Grid.Row="2" MinHeight="30">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <ItemsControl ItemsSource="{Binding InputPorts}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <DockPanel Height="{x:Static viewModels:BlueprintNodeLayoutMetrics.PortRowHeight}"
+                                                               LastChildFill="True">
+                                                        <Button Margin="-7,0,5,0"
+                                                                VerticalAlignment="Center"
+                                                        Command="{Binding ClickCommand}"
+                                                                Style="{StaticResource BlueprintPortButtonStyle}"
+                                                                ToolTip="{Binding ToolTipText}" />
+                                                        <Button DockPanel.Dock="Right"
+                                                                Margin="3,0,2,0"
+                                                                Command="{Binding RemoveCommand}"
+                                                                Style="{StaticResource BlueprintPortRemoveButtonStyle}"
+                                                                ToolTip="删除端点及其连线" />
+                                                        <TextBlock VerticalAlignment="Center"
+                                                                   Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                                                   FontSize="9"
+                                                                   Text="{Binding Name}" />
+                                                    </DockPanel>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+
+                                        <ItemsControl Grid.Column="1" ItemsSource="{Binding OutputPorts}">
+                                            <ItemsControl.ItemTemplate>
+                                                <DataTemplate>
+                                                    <DockPanel Height="{x:Static viewModels:BlueprintNodeLayoutMetrics.PortRowHeight}"
+                                                               LastChildFill="True">
+                                                        <Button DockPanel.Dock="Right"
+                                                                Margin="5,0,-7,0"
+                                                                VerticalAlignment="Center"
+                                                                Command="{Binding ClickCommand}"
+                                                                Style="{StaticResource BlueprintPortButtonStyle}"
+                                                                ToolTip="{Binding ToolTipText}" />
+                                                        <Button DockPanel.Dock="Left"
+                                                                Margin="2,0,3,0"
+                                                                Command="{Binding RemoveCommand}"
+                                                                Style="{StaticResource BlueprintPortRemoveButtonStyle}"
+                                                                ToolTip="删除端点及其连线" />
+                                                        <TextBlock HorizontalAlignment="Right"
+                                                                   VerticalAlignment="Center"
+                                                                   Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                                                   FontSize="9"
+                                                                   Text="{Binding Name}" />
+                                                    </DockPanel>
+                                                </DataTemplate>
+                                            </ItemsControl.ItemTemplate>
+                                        </ItemsControl>
+                                    </Grid>
+
+                                    <Border Grid.Row="3"
+                                            Margin="8,6"
+                                            Padding="8"
+                                            Background="{DynamicResource App.InputBackgroundBrush}"
+                                            BorderBrush="{DynamicResource App.BorderBrush}"
+                                            BorderThickness="1"
+                                            CornerRadius="4">
+                                        <Grid>
+                                            <StackPanel Style="{StaticResource BlueprintStartPanelStyle}">
+                                                <TextBlock Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                                           FontSize="10"
+                                                           Text="点击后按连线顺序编译可达节点。" TextWrapping="Wrap" />
+                                                <Button x:Name="BlueprintStartExecutionButton"
+                                                        Margin="0,8,0,0"
+                                                        Padding="9,6"
+                                                        Command="{Binding ExecuteCommand}"
+                                                        Content="开始执行"
+                                                        Style="{DynamicResource App.ButtonStyle}" />
+                                            </StackPanel>
+
+                                            <StackPanel Style="{StaticResource BlueprintDescriptionPanelStyle}">
+                                                <TextBlock Foreground="{DynamicResource App.TextMutedBrush}"
+                                                           FontSize="9"
+                                                           Text="说明 / Agent 指令" />
+                                                <TextBox MinHeight="72"
+                                                         Margin="0,5,0,0"
+                                                         AcceptsReturn="True"
+                                                         Text="{Binding Description, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                         TextWrapping="Wrap"
+                                                         VerticalScrollBarVisibility="Auto"
+                                                         Style="{DynamicResource App.TextBoxStyle}" />
+                                            </StackPanel>
+
+                                            <StackPanel Style="{StaticResource BlueprintToolPanelStyle}">
+                                                <TextBlock Foreground="{DynamicResource App.TextMutedBrush}"
+                                                           FontSize="9"
+                                                           Text="Harness 工具合同" />
+                                                <ComboBox Margin="0,5,0,0"
+                                                          ItemsSource="{Binding DataContext.ToolDefinitions, RelativeSource={RelativeSource AncestorType={x:Type UserControl}}}"
+                                                          DisplayMemberPath="DisplayName"
+                                                          SelectedValuePath="ContractId"
+                                                          SelectedValue="{Binding ToolContractId, Mode=TwoWay}"
+                                                          Style="{DynamicResource App.ComboBoxStyle}" />
+                                                <ItemsControl Margin="0,6,0,0" ItemsSource="{Binding Variables}">
+                                                    <ItemsControl.ItemTemplate>
+                                                        <DataTemplate>
+                                                            <Grid Margin="0,0,0,4">
+                                                                <Grid.ColumnDefinitions>
+                                                                    <ColumnDefinition Width="0.43*" />
+                                                                    <ColumnDefinition Width="0.57*" />
+                                                                    <ColumnDefinition Width="22" />
+                                                                </Grid.ColumnDefinitions>
+                                                                <TextBox Padding="4,2"
+                                                                         FontSize="9"
+                                                                         Text="{Binding Name, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                                         Style="{DynamicResource App.TextBoxStyle}" />
+                                                                <TextBox Grid.Column="1"
+                                                                         Margin="4,0,0,0"
+                                                                         Padding="4,2"
+                                                                         FontSize="9"
+                                                                         Text="{Binding Value, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                                         Style="{DynamicResource App.TextBoxStyle}" />
+                                                                <Button Grid.Column="2"
+                                                                        Margin="3,0,0,0"
+                                                                        Padding="0"
+                                                                        Command="{Binding RemoveCommand}"
+                                                                        Content="×"
+                                                                        Style="{DynamicResource App.IconButtonStyle}" />
+                                                            </Grid>
+                                                        </DataTemplate>
+                                                    </ItemsControl.ItemTemplate>
+                                                </ItemsControl>
+                                                <Button HorizontalAlignment="Left"
+                                                        Padding="7,3"
+                                                        Command="{Binding AddVariableCommand}"
+                                                        Content="+ 变量"
+                                                        Style="{DynamicResource App.ButtonStyle}" />
+                                            </StackPanel>
+
+                                            <StackPanel Style="{StaticResource BlueprintFunctionPanelStyle}">
+                                                <TextBlock Foreground="{DynamicResource App.TextMutedBrush}"
+                                                           FontSize="9"
+                                                           Text="功能集合键" />
+                                                <TextBox Margin="0,5,0,0"
+                                                         Text="{Binding FunctionKey, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                         Style="{DynamicResource App.TextBoxStyle}" />
+                                                <TextBlock Margin="0,6,0,0"
+                                                           Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                                           FontSize="9"
+                                                           Text="{Binding FunctionMembersText}"
+                                                           TextWrapping="Wrap" />
+                                                <Button Margin="0,7,0,0"
+                                                        Padding="7,4"
+                                                        Command="{Binding CaptureFunctionMembersCommand}"
+                                                        Content="收集 Ctrl 多选节点并保存"
+                                                        Style="{DynamicResource App.ButtonStyle}" />
+                                            </StackPanel>
+
+                                            <StackPanel Style="{StaticResource BlueprintLogicPanelStyle}">
+                                                <TextBlock Foreground="{DynamicResource App.TextMutedBrush}"
+                                                           FontSize="9"
+                                                           Text="If 自然语言判断条件" />
+                                                <TextBox MinHeight="66"
+                                                         Margin="0,5,0,0"
+                                                         AcceptsReturn="True"
+                                                         Text="{Binding ConditionText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                                         TextWrapping="Wrap"
+                                                         Style="{DynamicResource App.TextBoxStyle}" />
+                                                <TextBlock Margin="0,5,0,0"
+                                                           Foreground="{DynamicResource App.WarningBrush}"
+                                                           FontSize="9"
+                                                           Text="由 Agent 回传 decision / reason 后选择 True 或 False 分支"
+                                                           TextWrapping="Wrap" />
+                                            </StackPanel>
+                                        </Grid>
+                                    </Border>
+
+                                    <Grid Grid.Row="4" Margin="8,3,8,6">
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="*" />
+                                        </Grid.ColumnDefinitions>
+                                        <Button Padding="5,3"
+                                                Command="{Binding AddInputPortCommand}"
+                                                Content="+ 输入端点"
+                                                FontSize="9"
+                                                Style="{StaticResource BlueprintAddInputButtonStyle}" />
+                                        <Button Grid.Column="1"
+                                                Margin="5,0,0,0"
+                                                Padding="5,3"
+                                                Command="{Binding AddOutputPortCommand}"
+                                                Content="+ 输出端点"
+                                                FontSize="9"
+                                                Style="{DynamicResource App.ButtonStyle}" />
+                                    </Grid>
+                                </Grid>
+                            </Border>
+                        </DataTemplate>
+                    </ItemsControl.ItemTemplate>
+                </ItemsControl>
+            </Canvas>
+
+            <Border Margin="12"
+                    Padding="9,6"
+                    MaxWidth="760"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Bottom"
                     Background="{DynamicResource App.SurfaceRaisedBrush}"
                     BorderBrush="{DynamicResource App.BorderBrush}"
                     BorderThickness="1"
-                    CornerRadius="8">
-                <StackPanel>
-                    <Border Width="52"
-                            Height="52"
-                            HorizontalAlignment="Left"
-                            Background="{DynamicResource App.InputBackgroundBrush}"
-                            BorderBrush="{DynamicResource App.AccentBrush}"
-                            BorderThickness="1"
-                            CornerRadius="7">
-                        <TextBlock HorizontalAlignment="Center"
-                                   VerticalAlignment="Center"
-                                   Foreground="{DynamicResource App.AccentBrush}"
-                                   FontSize="27"
-                                   Text="◇" />
-                    </Border>
-
-                    <TextBlock x:Name="BlueprintEmptyStateTitle"
-                               Margin="0,18,0,0"
-                               Foreground="{DynamicResource App.TextPrimaryBrush}"
-                               FontSize="22"
-                               FontWeight="SemiBold"
-                               Text="{Binding EmptyStateTitle}" />
-                    <TextBlock Margin="0,10,0,0"
-                               Foreground="{DynamicResource App.TextSecondaryBrush}"
-                               FontSize="13"
-                               LineHeight="21"
-                               Text="{Binding EmptyStateDescription}"
-                               TextWrapping="Wrap" />
-
-                    <ItemsControl Margin="0,20,0,0" ItemsSource="{Binding PlannedNodeKinds}">
-                        <ItemsControl.ItemsPanel>
-                            <ItemsPanelTemplate>
-                                <WrapPanel />
-                            </ItemsPanelTemplate>
-                        </ItemsControl.ItemsPanel>
-                        <ItemsControl.ItemTemplate>
-                            <DataTemplate>
-                                <Border Style="{StaticResource BlueprintScopeChipStyle}">
-                                    <TextBlock Foreground="{DynamicResource App.TextSecondaryBrush}"
-                                               FontSize="11"
-                                               Text="{Binding}" />
-                                </Border>
-                            </DataTemplate>
-                        </ItemsControl.ItemTemplate>
-                    </ItemsControl>
-
-                    <TextBlock Margin="0,8,0,0"
-                               Foreground="{DynamicResource App.TextMutedBrush}"
-                               FontSize="11"
-                               Text="{Binding Description}"
-                               TextWrapping="Wrap" />
-                </StackPanel>
+                    CornerRadius="4"
+                    IsHitTestVisible="False"
+                    Opacity="0.9">
+                <TextBlock Foreground="{DynamicResource App.TextMutedBrush}"
+                           FontSize="9"
+                           Text="默认鼠标：左键选择，右键/中键拖动画布，双击右键归零 · 对象移动：左拖节点 · 连线：任一端口起线，右键取消"
+                           TextWrapping="Wrap" />
             </Border>
         </Grid>
 
@@ -163,15 +637,18 @@
                 BorderThickness="0,1,0,0">
             <DockPanel LastChildFill="True">
                 <TextBlock DockPanel.Dock="Right"
+                           MaxWidth="560"
                            VerticalAlignment="Center"
                            Foreground="{DynamicResource App.TextMutedBrush}"
-                           FontSize="10"
-                           Text="{Binding PersistenceText}" />
+                           FontSize="9"
+                           Text="{Binding PersistenceText}"
+                           TextTrimming="CharacterEllipsis" />
                 <TextBlock x:Name="BlueprintStatusText"
                            VerticalAlignment="Center"
                            Foreground="{DynamicResource App.TextSecondaryBrush}"
-                           FontSize="10"
-                           Text="{Binding StatusText}" />
+                           FontSize="9"
+                           Text="{Binding StatusText}"
+                           TextTrimming="CharacterEllipsis" />
             </DockPanel>
         </Border>
     </Grid>
