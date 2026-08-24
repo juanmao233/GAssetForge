@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.IO;
+using System.Text;
 using System.Text.Json;
 using GAssetForge.App.Services;
 using GAssetForge.Core;
@@ -8,11 +9,14 @@ namespace GAssetForge.App.Services.AgentRuntime;
 
 internal static class CodexProcessLaunch
 {
+    private static readonly Encoding Utf8NoBom = new UTF8Encoding(encoderShouldEmitUTF8Identifier: false);
+
     internal static ProcessStartInfo CreateBaseStartInfo(
         AgentSessionStartOptions options,
         string? applicationDirectory = null,
         string? pathEnvironment = null,
-        string? applicationDataDirectory = null)
+        string? applicationDataDirectory = null,
+        string? localApplicationDataDirectory = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentException.ThrowIfNullOrWhiteSpace(options.ExecutablePath);
@@ -26,11 +30,19 @@ internal static class CodexProcessLaunch
         }
 
         ValidateMcpOptions(options);
+        var resolverPathEnvironment = pathEnvironment;
+        if (resolverPathEnvironment is null &&
+            TryGetEnvironmentVariable(options.EnvironmentVariables, "PATH", out var configuredPath))
+        {
+            resolverPathEnvironment = configuredPath ?? string.Empty;
+        }
+
         var executableLaunch = CodexExecutableResolver.Resolve(
             options.ExecutablePath,
             applicationDirectory,
-            pathEnvironment,
-            applicationDataDirectory: applicationDataDirectory);
+            resolverPathEnvironment,
+            applicationDataDirectory: applicationDataDirectory,
+            localApplicationDataDirectory: localApplicationDataDirectory);
         var startInfo = new ProcessStartInfo
         {
             FileName = executableLaunch.ProcessFileName,
@@ -42,6 +54,7 @@ internal static class CodexProcessLaunch
             RedirectStandardOutput = true,
             RedirectStandardError = true
         };
+        ConfigureUtf8Redirection(startInfo);
 
         foreach (var prefixArgument in executableLaunch.PrefixArguments)
         {
@@ -60,6 +73,25 @@ internal static class CodexProcessLaunch
         }
 
         return startInfo;
+    }
+
+    internal static void ConfigureUtf8Redirection(ProcessStartInfo startInfo)
+    {
+        ArgumentNullException.ThrowIfNull(startInfo);
+        if (startInfo.RedirectStandardInput)
+        {
+            startInfo.StandardInputEncoding = Utf8NoBom;
+        }
+
+        if (startInfo.RedirectStandardOutput)
+        {
+            startInfo.StandardOutputEncoding = Utf8NoBom;
+        }
+
+        if (startInfo.RedirectStandardError)
+        {
+            startInfo.StandardErrorEncoding = Utf8NoBom;
+        }
     }
 
     internal static void AddMcpConfiguration(
@@ -87,6 +119,26 @@ internal static class CodexProcessLaunch
         AddConfig(
             startInfo,
             $"{serverPrefix}.default_tools_approval_mode={TomlString(GenerationMcpToolPolicy.DefaultToolsApprovalMode)}");
+    }
+
+    internal static void AddSandboxConfiguration(
+        ProcessStartInfo startInfo,
+        AgentSessionStartOptions options)
+    {
+        ArgumentNullException.ThrowIfNull(startInfo);
+        ArgumentNullException.ThrowIfNull(options);
+        if (!options.AllowSandboxNetworkAccess)
+        {
+            return;
+        }
+
+        if (!string.Equals(options.SandboxMode, "workspace-write", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "GAssetForge 只允许在 workspace-write sandbox 内为受管 Image API CLI 开启出站网络。");
+        }
+
+        AddConfig(startInfo, "sandbox_workspace_write.network_access=true");
     }
 
     internal static void AddConfig(ProcessStartInfo startInfo, string value)
@@ -137,5 +189,24 @@ internal static class CodexProcessLaunch
         {
             throw new ArgumentException("环境变量名无效。", nameof(name));
         }
+    }
+
+    private static bool TryGetEnvironmentVariable(
+        IReadOnlyDictionary<string, string?> environmentVariables,
+        string name,
+        out string? value)
+    {
+        var found = false;
+        value = null;
+        foreach (var environmentVariable in environmentVariables)
+        {
+            if (string.Equals(environmentVariable.Key, name, StringComparison.OrdinalIgnoreCase))
+            {
+                value = environmentVariable.Value;
+                found = true;
+            }
+        }
+
+        return found;
     }
 }

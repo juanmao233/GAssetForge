@@ -435,7 +435,7 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
     }
 
     public string CodexExecutablePathDisplayText => string.IsNullOrWhiteSpace(CodexExecutablePath)
-        ? "自动检测（%APPDATA%\\npm、PATH 与应用目录）"
+        ? "自动检测（%APPDATA%\\npm、%LOCALAPPDATA% 官方安装、PATH 与应用目录）"
         : CodexExecutablePath;
 
     public string CodexRuntimeDiagnosticsText
@@ -642,7 +642,9 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
             var resolution = await Task.Run(() =>
             {
                 CodexExecutableResolver.ClearLaunchProbeCache();
-                return CodexExecutableResolver.ResolveWithDiagnostics(requestedExecutable);
+                return CodexExecutableResolver.ResolveWithDiagnostics(
+                    requestedExecutable,
+                    pathEnvironment: ProcessEnvironmentSnapshot.BuildFreshPathEnvironment());
             }).ConfigureAwait(true);
             if (revision != _codexExecutableRevision)
             {

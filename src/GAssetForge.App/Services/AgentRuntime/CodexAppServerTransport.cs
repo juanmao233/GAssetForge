@@ -160,6 +160,7 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
             var startInfo = CodexProcessLaunch.CreateBaseStartInfo(options);
             startInfo.ArgumentList.Add("app-server");
             startInfo.ArgumentList.Add("--stdio");
+            CodexProcessLaunch.AddSandboxConfiguration(startInfo, options);
             CodexProcessLaunch.AddMcpConfiguration(startInfo, options);
 
             IAgentChildProcess? process = null;
@@ -398,6 +399,7 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
         string prompt,
         CancellationToken cancellationToken)
     {
+        var options = RequireOptions();
         var threadId = CurrentThreadId;
         if (string.IsNullOrWhiteSpace(threadId))
         {
@@ -425,7 +427,8 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
                         input = new[]
                         {
                             new { type = "text", text = prompt }
-                        }
+                        },
+                        sandboxPolicy = CreateTurnSandboxPolicy(options)
                     },
                     cancellationToken)
                 .ConfigureAwait(false);
@@ -887,9 +890,7 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
     {
         var parameters = new Dictionary<string, object?>
         {
-            ["cwd"] = string.IsNullOrWhiteSpace(options.WorkingDirectory)
-                ? Environment.CurrentDirectory
-                : Path.GetFullPath(options.WorkingDirectory),
+            ["cwd"] = ResolveWorkingDirectory(options),
             ["sandbox"] = options.SandboxMode,
             ["approvalPolicy"] = options.ApprovalPolicy
         };
@@ -910,6 +911,28 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
 
         return parameters;
     }
+
+    private static object CreateTurnSandboxPolicy(AgentSessionStartOptions options)
+    {
+        if (!string.Equals(options.SandboxMode, "workspace-write", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidOperationException(
+                "GAssetForge Codex App Server Turn 只支持显式 workspace-write sandboxPolicy。");
+        }
+
+        return new
+        {
+            type = "workspaceWrite",
+            writableRoots = new[] { ResolveWorkingDirectory(options) },
+            networkAccess = options.AllowSandboxNetworkAccess
+        };
+    }
+
+    private static string ResolveWorkingDirectory(AgentSessionStartOptions options) =>
+        Path.GetFullPath(
+            string.IsNullOrWhiteSpace(options.WorkingDirectory)
+                ? Environment.CurrentDirectory
+                : options.WorkingDirectory);
 
     private static string ExtractThreadId(JsonElement result)
     {

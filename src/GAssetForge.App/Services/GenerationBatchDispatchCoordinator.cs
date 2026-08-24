@@ -1,5 +1,6 @@
 using GAssetForge.App.Services.AgentRuntime;
 using GAssetForge.Core.Generation;
+using System.IO;
 using System.Threading.Channels;
 
 namespace GAssetForge.App.Services;
@@ -82,6 +83,7 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
         });
     private readonly Func<string, CancellationToken, Task<AgentTurnResult>> _runTurn;
     private readonly IGenerationTaskStore? _taskStore;
+    private readonly IImageDeliveryPreflight? _imageDeliveryPreflight;
     private readonly TimeSpan _claimHeartbeatInterval;
     private readonly Func<TimeSpan, CancellationToken, Task> _heartbeatDelay;
     private readonly CancellationTokenSource _shutdown = new();
@@ -91,11 +93,13 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
     public GenerationBatchDispatchCoordinator(
         Func<string, CancellationToken, Task<AgentTurnResult>> runTurn,
         IGenerationTaskStore? taskStore = null,
+        IImageDeliveryPreflight? imageDeliveryPreflight = null,
         TimeSpan? claimHeartbeatInterval = null,
         Func<TimeSpan, CancellationToken, Task>? heartbeatDelay = null)
     {
         _runTurn = runTurn ?? throw new ArgumentNullException(nameof(runTurn));
         _taskStore = taskStore;
+        _imageDeliveryPreflight = imageDeliveryPreflight;
         _claimHeartbeatInterval = claimHeartbeatInterval ?? DefaultClaimHeartbeatInterval;
         if (_claimHeartbeatInterval <= TimeSpan.Zero || _claimHeartbeatInterval > TimeSpan.FromDays(1))
         {
@@ -157,13 +161,45 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
         GenerationBatchDispatchProgressSnapshot? lastProgress = null;
         try
         {
+            var preflight = ImageDeliveryPreflightResult.NotChecked;
+            var preflightPerformed = false;
+            if (_imageDeliveryPreflight is not null)
+            {
+                lastProgress = ReportProgress(
+                    request,
+                    GenerationBatchDispatchStage.BuildingAgentInstruction,
+                    40d,
+                    "ImageDeliveryPreflight.CheckAsync(recommendedSourcePaths)",
+                    "正在检查项目内模型原图目录、Python/py、官方 image_gen.py 与 API fallback 环境。");
+                var recommendedSourcePaths = await ResolveRecommendedSourcePathsAsync(
+                        request,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (recommendedSourcePaths.Count > 0)
+                {
+                    preflight = await _imageDeliveryPreflight.CheckAsync(
+                            recommendedSourcePaths,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    preflightPerformed = true;
+                    if (!preflight.CanDispatch)
+                    {
+                        throw new InvalidOperationException(preflight.StatusText);
+                    }
+                }
+            }
+
             lastProgress = ReportProgress(
                 request,
                 GenerationBatchDispatchStage.BuildingAgentInstruction,
                 BuildingInstructionProgress,
                 "GenerationAgentPromptBuilder.Build(taskIds)",
-                $"正在为 {request.TaskIds.Count} 个任务构建 Agent 批次指令。");
-            var prompt = GenerationAgentPromptBuilder.Build(request.TaskIds);
+                !preflightPerformed
+                    ? $"正在为 {request.TaskIds.Count} 个任务构建 Agent 批次指令。"
+                    : $"{preflight.StatusText} 正在为 {request.TaskIds.Count} 个任务构建 Agent 批次指令。");
+            var prompt = preflightPerformed
+                ? GenerationAgentPromptBuilder.Build(request.TaskIds, preflight)
+                : GenerationAgentPromptBuilder.Build(request.TaskIds);
             lastProgress = ReportProgress(
                 request,
                 GenerationBatchDispatchStage.StartingAgentTurn,
@@ -218,6 +254,141 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
         DispatchCompleted?.Invoke(
             this,
             new GenerationBatchDispatchCompletedEventArgs(request, result, failureMessage));
+    }
+
+    private async Task<IReadOnlyList<string>> ResolveRecommendedSourcePathsAsync(
+        GenerationBatchDispatchRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (_taskStore is null)
+        {
+            throw new InvalidOperationException("图片本地交付预检要求可读取持久化 GenerationTaskStore。");
+        }
+
+        var result = new List<string>(request.TaskIds.Count);
+        foreach (var taskId in request.TaskIds)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var task = await _taskStore.GetAsync(taskId, cancellationToken).ConfigureAwait(false)
+                ?? throw new InvalidDataException($"图片本地交付预检找不到任务：{taskId}");
+            if (!MaterialGenerationConstraintComposer.TryReadDelivery(task.Constraints, out var delivery))
+            {
+                if (task.Constraints.Parameters.ContainsKey("delivery"))
+                {
+                    throw new InvalidDataException(
+                        $"任务 {taskId} 包含损坏或不受支持的 parameters.delivery。");
+                }
+
+                continue;
+            }
+
+            if (delivery?.Workspace is null)
+            {
+                continue;
+            }
+
+            if (delivery.Workspace.ModelOutputPaths is not { Length: 1 } modelOutputPaths)
+            {
+                throw new InvalidDataException(
+                    $"任务 {taskId} 没有唯一 generation workspace modelOutputPaths[0]。");
+            }
+
+            var sourcePath = ResolveRecommendedSourcePath(taskId, delivery, modelOutputPaths[0]);
+            result.Add(sourcePath);
+        }
+
+        return result;
+    }
+
+    internal static string ResolveRecommendedSourcePath(
+        string taskId,
+        GenerationDeliveryPlan delivery,
+        string modelOutputPath)
+    {
+        ArgumentNullException.ThrowIfNull(delivery);
+        if (string.IsNullOrWhiteSpace(delivery.AssetRoot) ||
+            !Path.IsPathFullyQualified(delivery.AssetRoot))
+        {
+            throw new InvalidDataException($"任务 {taskId} 的 generation workspace AssetRoot 不是绝对路径。");
+        }
+
+        string assetRoot;
+        string normalizedRelativePath;
+        string sourcePath;
+        try
+        {
+            assetRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(delivery.AssetRoot));
+            normalizedRelativePath = GenerationInputValidator.NormalizeRelativeAssetPath(modelOutputPath);
+            sourcePath = Path.GetFullPath(Path.Combine(
+                assetRoot,
+                normalizedRelativePath.Replace('/', Path.DirectorySeparatorChar)));
+            EnsureNoReparsePointsAllowingMissing(assetRoot, sourcePath, "推荐模型源文件");
+        }
+        catch (Exception exception) when (exception is
+                   ArgumentException or
+                   InvalidDataException or
+                   IOException or
+                   UnauthorizedAccessException or
+                   NotSupportedException or
+                   PathTooLongException or
+                   System.Security.SecurityException)
+        {
+            throw new InvalidDataException(
+                $"任务 {taskId} 的 recommendedSourcePath 合同无效：{exception.Message}",
+                exception);
+        }
+
+        if (!AssetRootService.IsWithinRoot(assetRoot, sourcePath) ||
+            AssetRootService.PathEquals(assetRoot, sourcePath))
+        {
+            throw new InvalidDataException(
+                $"任务 {taskId} 的 recommendedSourcePath 越出了冻结的 Assets 根目录。");
+        }
+
+        return sourcePath;
+    }
+
+    private static void EnsureNoReparsePointsAllowingMissing(
+        string rootPath,
+        string candidatePath,
+        string pathRole)
+    {
+        if (!Directory.Exists(rootPath))
+        {
+            throw new DirectoryNotFoundException($"冻结的 Assets 根目录不存在：{rootPath}");
+        }
+
+        if ((File.GetAttributes(rootPath) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidDataException("冻结的 Assets 根目录不能是符号链接或目录联接。");
+        }
+
+        var relative = Path.GetRelativePath(rootPath, candidatePath);
+        var segments = relative.Split(
+            new char[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+            StringSplitOptions.RemoveEmptyEntries);
+        var current = rootPath;
+        for (var index = 0; index < segments.Length; index++)
+        {
+            current = Path.Combine(current, segments[index]);
+            var isFile = File.Exists(current);
+            var isDirectory = Directory.Exists(current);
+            if (!isFile && !isDirectory)
+            {
+                return;
+            }
+
+            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidDataException(
+                    $"{pathRole}路径不能经过符号链接或目录联接：{candidatePath}");
+            }
+
+            if (isFile && index < segments.Length - 1)
+            {
+                throw new InvalidDataException($"{pathRole}路径的父级不能是文件：{candidatePath}");
+            }
+        }
     }
 
     private async Task<AgentTurnResult> AwaitTurnWithClaimHeartbeatAsync(

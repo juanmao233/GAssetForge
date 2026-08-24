@@ -94,6 +94,11 @@ internal static class Program
             Console.WriteLine("PASS  素材生成停靠页、顶部入口、视图开关与生成工作流绑定可用");
             BatchGenerationCoreSmokeTests.RunAllAsync().GetAwaiter().GetResult();
             Console.WriteLine("PASS  批次任务原子创建、数量边界、稳定顺序与旧任务兼容");
+            GenerationClaimSafetySmokeTests.RunAllAsync(_temporaryRoot)
+                .GetAwaiter().GetResult();
+            Console.WriteLine("PASS  MCP claim 在新旧合同和风格引用路径上保持认领前安全校验");
+            ImageDeliveryPreflightSmokeTests.RunAllAsync().GetAwaiter().GetResult();
+            Console.WriteLine("PASS  图片本地交付预检区分内置可用、CLI 兜底降级与输出目录阻断");
             BackgroundRemovalSmokeTests.Run();
             Console.WriteLine("PASS  背景剔除六种底色、连通/全局模式、原有 Alpha 与原子 PNG 输出可用");
             PixelAlignmentSmokeTests.Run();
@@ -3835,6 +3840,34 @@ internal static class Program
                     deliveryPlan.AssetRoot,
                     claimedPrimary.GetProperty("assetRoot").GetString()!),
                 "MCP claim 应返回任务快照的 AssetRoot");
+            var expectedRecommendedSourcePath = Path.GetFullPath(Path.Combine(
+                deliveryPlan.AssetRoot,
+                deliveryPlan.Workspace!.ModelOutputPaths.Single()
+                    .Replace('/', Path.DirectorySeparatorChar)));
+            Equal(
+                expectedRecommendedSourcePath,
+                claimedPrimary.GetProperty("recommendedSourcePath").GetString(),
+                "MCP claim 应返回唯一项目内模型原图绝对推荐路径");
+            var imageGeneration = claimedPrimary.GetProperty("imageGeneration");
+            var imageGenerationOutput = imageGeneration.GetProperty("output");
+            Equal(512, imageGenerationOutput.GetProperty("targetWidth").GetInt32(),
+                "MCP claim CLI 合同必须传递冻结目标宽度");
+            Equal(256, imageGenerationOutput.GetProperty("targetHeight").GetInt32(),
+                "MCP claim CLI 合同必须传递冻结目标高度");
+            Equal("2:1", imageGenerationOutput.GetProperty("targetAspectRatio").GetString(),
+                "MCP claim CLI 合同必须传递约分后画幅");
+            Equal("1152x576", imageGenerationOutput.GetProperty("cliSize").GetString(),
+                "MCP claim 应生成符合 GPT Image 约束且保持 2:1 的非方形 CLI 尺寸");
+            True(imageGenerationOutput.GetProperty("preservesExactAspectRatio").GetBoolean(),
+                "2:1 画幅应能在 CLI 尺寸中精确保留");
+            var imageGenerationStyle = imageGeneration.GetProperty("style");
+            Equal(styleGroup.StylePrompt, imageGenerationStyle.GetProperty("prompt").GetString(),
+                "MCP claim CLI 合同必须传递冻结风格提示词");
+            var referenceSourcePaths = imageGenerationStyle.GetProperty("referenceSourcePaths");
+            Equal(1, referenceSourcePaths.GetArrayLength(),
+                "MCP claim CLI 合同必须传递全部冻结风格参考图");
+            Equal(snapshotFullPath, referenceSourcePaths[0].GetString(),
+                "MCP claim 应把风格快照解析为可直接传给 --image 的绝对路径");
 
             var invalidTaskIds = new Dictionary<string, string>(StringComparer.Ordinal);
             foreach (var caseName in new[]

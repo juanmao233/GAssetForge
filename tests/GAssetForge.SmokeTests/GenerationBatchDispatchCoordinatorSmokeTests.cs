@@ -1,5 +1,7 @@
 using GAssetForge.App.Services;
 using GAssetForge.App.Services.AgentRuntime;
+using GAssetForge.Core.Generation;
+using System.IO;
 
 namespace GAssetForge.SmokeTests;
 
@@ -8,10 +10,155 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
     public static async Task RunAllAsync()
     {
         AgentPromptDelegatesOnlyImageGenerationAndSingleOutputSubmission();
+        RecommendedSourcePathCannotEscapeFrozenAssetRoot();
+        RecommendedSourcePathRejectsReparsePointAncestors();
         await DispatchProgressIsMonotonicAndSerializedAsync();
+        await LegacyTaskSkipsNewImageDeliveryPreflightAsync();
         await PublishedBatchesRunAsSerializedTurnsAsync();
         await DispatchFailuresAreReportedWithoutRetryLoopsAsync();
         await ActiveDispatchReportsCanceledWhenCoordinatorStopsAsync();
+    }
+
+    private static async Task LegacyTaskSkipsNewImageDeliveryPreflightAsync()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "GAssetForge.LegacyDispatchPreflightSmokeTests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var store = new JsonGenerationTaskStore(root);
+            var task = await store.CreateAsync(new CreateGenerationTaskRequest
+            {
+                DisplayName = "legacy delivery task",
+                RequestedBy = "smoke-tests",
+                Constraints = new GenerationConstraintPackage
+                {
+                    WorkflowId = "legacy-workflow",
+                    PreferredSkill = "imagegen",
+                    Prompt = "legacy task without delivery workspace",
+                    Output = new GenerationOutputSpec
+                    {
+                        Width = 64,
+                        Height = 64,
+                        Count = 1,
+                        MaxParallelism = 1,
+                        Format = "png"
+                    }
+                }
+            });
+            var preflight = new FailIfCalledImageDeliveryPreflight();
+            string? observedPrompt = null;
+            var completion = new TaskCompletionSource<GenerationBatchDispatchCompletedEventArgs>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            await using var coordinator = new GenerationBatchDispatchCoordinator(
+                (prompt, _) =>
+                {
+                    observedPrompt = prompt;
+                    return Task.FromResult(new AgentTurnResult(
+                        ThreadId: "legacy-thread",
+                        TurnId: "legacy-turn",
+                        Status: "completed",
+                        ErrorMessage: null));
+                },
+                store,
+                preflight);
+            coordinator.DispatchCompleted += (_, eventArgs) => completion.TrySetResult(eventArgs);
+
+            True(coordinator.TryEnqueue("legacy-batch", [task.Id], isRetry: false),
+                "旧任务应能进入自动调度队列");
+            var completed = await completion.Task.WaitAsync(TimeSpan.FromSeconds(3));
+
+            True(completed.IsSuccess, "没有 workspace 的旧任务必须保留原自动调度流程");
+            Equal(0, preflight.InvocationCount,
+                "旧任务不得调用只适用于 recommendedSourcePath 的新预检");
+            True(observedPrompt?.Contains("若 claim 返回的旧任务没有 delivery.workspace", StringComparison.Ordinal) == true,
+                "旧任务调度必须保留旧 delivery 合同说明");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    private static void RecommendedSourcePathCannotEscapeFrozenAssetRoot()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "GAssetForge.GenerationBatchDispatchCoordinatorSmokeTests",
+            Guid.NewGuid().ToString("N"));
+        var assetRoot = Path.Combine(root, "Assets");
+        Directory.CreateDirectory(assetRoot);
+        try
+        {
+            var delivery = new GenerationDeliveryPlan { AssetRoot = assetRoot };
+            var valid = GenerationBatchDispatchCoordinator.ResolveRecommendedSourcePath(
+                "task-valid-source-path",
+                delivery,
+                "Generated/GAssetForge/Runs/run/30-model-output/model.png");
+            True(AssetRootService.IsWithinRoot(assetRoot, valid),
+                "合法 recommendedSourcePath 必须保持在冻结 Assets 根目录内");
+
+            Throws<InvalidDataException>(
+                () => GenerationBatchDispatchCoordinator.ResolveRecommendedSourcePath(
+                    "task-escaping-source-path",
+                    delivery,
+                    "../outside/model.png"),
+                "损坏任务不得让图片交付预检探测 Assets 根目录之外的位置");
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static void RecommendedSourcePathRejectsReparsePointAncestors()
+    {
+        var testRoot = Path.Combine(
+            Path.GetTempPath(),
+            "GAssetForge.RecommendedSourceReparseSmokeTests",
+            Guid.NewGuid().ToString("N"));
+        var assetRoot = Path.Combine(testRoot, "Project", "Assets");
+        var outside = Path.Combine(testRoot, "Outside");
+        var linkedGenerated = Path.Combine(assetRoot, "Generated");
+        Directory.CreateDirectory(assetRoot);
+        Directory.CreateDirectory(outside);
+        try
+        {
+            try
+            {
+                Directory.CreateSymbolicLink(linkedGenerated, outside);
+            }
+            catch (Exception exception) when (exception is
+                       UnauthorizedAccessException or
+                       PlatformNotSupportedException)
+            {
+                return;
+            }
+
+            Throws<InvalidDataException>(
+                () => GenerationBatchDispatchCoordinator.ResolveRecommendedSourcePath(
+                    "task-reparse-source-path",
+                    new GenerationDeliveryPlan { AssetRoot = assetRoot },
+                    "Generated/run/model.png"),
+                "recommendedSourcePath 不得经过 Assets 内的符号链接或目录联接");
+        }
+        finally
+        {
+            if (Directory.Exists(linkedGenerated))
+            {
+                Directory.Delete(linkedGenerated);
+            }
+
+            if (Directory.Exists(testRoot))
+            {
+                Directory.Delete(testRoot, recursive: true);
+            }
+        }
     }
 
     private static void AgentPromptDelegatesOnlyImageGenerationAndSingleOutputSubmission()
@@ -34,6 +181,47 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
                 "按 preferredSkill 调用真实图像生成能力",
                 StringComparison.Ordinal),
             "Agent 指令必须只委托真实图像生成能力");
+        True(prompt.Contains("recommendedSourcePath", StringComparison.Ordinal),
+            "Agent 指令必须使用 claim 返回的项目内绝对推荐源路径");
+        True(prompt.Contains(
+                "只允许检查本次内置调用明确返回的 sourcePath 或 claim 返回的精确 recommendedSourcePath",
+                StringComparison.Ordinal),
+            "Agent 指令必须同时允许本次内置 ImageGen 明确返回的路径和项目推荐路径");
+        False(prompt.Contains(
+                "只允许检查 claim 返回的精确 recommendedSourcePath",
+                StringComparison.Ordinal),
+            "Agent 指令不得用只允许 recommendedSourcePath 的条款否定本次内置工具的明确 sourcePath");
+        True(prompt.Contains(
+                "只出现可视图片但没有新本地路径不算完成",
+                StringComparison.Ordinal),
+            "内置 ImageGen 只有可视结果时不得误报得到可提交产物");
+        True(prompt.Contains(
+                "recommendedSourcePath 已存在且是可读的有效 PNG",
+                StringComparison.Ordinal) &&
+             prompt.Contains("禁止覆盖或使用 --force", StringComparison.Ordinal),
+            "断连恢复必须先提交精确现有 PNG，且不得盲目覆盖损坏文件");
+        True(prompt.Contains(
+                "严禁扫描、按时间挑选或复用 `~/.codex/generated_images`",
+                StringComparison.Ordinal),
+            "Agent 指令必须禁止从历史 generated_images 猜测本次源文件");
+        True(prompt.Contains("scripts/image_gen.py", StringComparison.Ordinal) &&
+             prompt.Contains("--out <recommendedSourcePath>", StringComparison.Ordinal),
+            "CLI 兜底必须把真实模型 PNG 直接写入推荐源路径");
+        True(prompt.Contains("imageGeneration.output.targetWidth", StringComparison.Ordinal) &&
+             prompt.Contains("imageGeneration.output.targetHeight", StringComparison.Ordinal) &&
+             prompt.Contains("imageGeneration.output.targetAspectRatio", StringComparison.Ordinal) &&
+             prompt.Contains("--size <imageGeneration.output.cliSize>", StringComparison.Ordinal),
+            "CLI 兜底必须使用冻结宽高、画幅和有效非方形生成尺寸");
+        True(prompt.Contains("imageGeneration.style.referenceSourcePaths", StringComparison.Ordinal) &&
+             prompt.Contains("edit --image", StringComparison.Ordinal) &&
+             prompt.Contains("无参考图时才使用 generate", StringComparison.Ordinal),
+            "CLI 兜底必须把冻结风格参考图作为 edit 输入");
+        True(prompt.Contains("网络未验证", StringComparison.Ordinal),
+            "Agent 必须知道 CLI 本地前置就绪不代表 Image API 网络已验证");
+        True(prompt.Contains(
+                "存在、可读且具有有效 PNG 签名",
+                StringComparison.Ordinal),
+            "提交前必须验证推荐源文件确实可读取");
         True(prompt.Contains("axisA/axisB", StringComparison.Ordinal) &&
              prompt.Contains("不得把控制角 90°、旋转 0°改写成 diamond/rhombus", StringComparison.Ordinal),
             "Agent 指令必须原样保留冻结的 Tilemap 朝向合同，禁止二次翻译为 45° 钻石形");
@@ -49,6 +237,10 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
                 "只有 imagegen 或 submit_generation_output 真实失败时才调用 fail_generation_task",
                 StringComparison.Ordinal),
             "Agent 指令必须把失败登记限制在真实生成或提交失败");
+        True(prompt.Contains(
+                "image_delivery_fallback_unavailable:",
+                StringComparison.Ordinal),
+            "CLI 兜底不可用时必须报告图片交付能力错误而不是误报模型失败");
         False(prompt.Contains("output.maxParallelism", StringComparison.Ordinal),
             "Agent 指令不得继续依赖页面并行数量");
         True(prompt.Contains("不要创建或复用固定命名的子 Agent 槽位", StringComparison.Ordinal),
@@ -319,6 +511,34 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
         if (!EqualityComparer<T>.Default.Equals(expected, actual))
         {
             throw new InvalidOperationException($"{message}：预期 {expected}，实际 {actual}。");
+        }
+    }
+
+    private static void Throws<TException>(Action action, string message)
+        where TException : Exception
+    {
+        try
+        {
+            action();
+        }
+        catch (TException)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(message);
+    }
+
+    private sealed class FailIfCalledImageDeliveryPreflight : IImageDeliveryPreflight
+    {
+        public int InvocationCount { get; private set; }
+
+        public Task<ImageDeliveryPreflightResult> CheckAsync(
+            IReadOnlyCollection<string> recommendedSourcePaths,
+            CancellationToken cancellationToken)
+        {
+            InvocationCount++;
+            throw new InvalidOperationException("旧任务不应进入 recommendedSourcePath 预检。");
         }
     }
 }

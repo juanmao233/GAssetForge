@@ -28,6 +28,7 @@ internal static class AgentConnectionLifecycleSmokeTests
         RuntimeFailureKeepsHealthyMcpAndAllowsRetry(temporaryRoot);
         StandaloneMcpStartsAndStopsWithoutStartingRuntime(temporaryRoot);
         HealthyMcpIsReusedWhenRuntimeRetrySucceeds(temporaryRoot);
+        RuntimeSessionReceivesFreshPathOverride(temporaryRoot);
         SlowRuntimeStartupCanBeDisposedWithoutUiDeadlock(temporaryRoot);
     }
 
@@ -206,6 +207,31 @@ internal static class AgentConnectionLifecycleSmokeTests
             "异步关闭完成后不得残留 MCP Server 子进程。");
     }
 
+    private static void RuntimeSessionReceivesFreshPathOverride(string temporaryRoot)
+    {
+        AgentSessionStartOptions? capturedOptions = null;
+        var fixture = CreateFixture(
+            temporaryRoot,
+            "runtime-fresh-path",
+            _ => FakeAgentSessionTransport.Ready(options => capturedOptions = options),
+            _ => FakeAgentSessionTransport.Failing("exec fallback should not start"));
+        using var viewModel = fixture.ViewModel;
+
+        viewModel.StartCommand.Execute(null);
+        PumpUntil(
+            () => viewModel.IsConnected && capturedOptions is not null,
+            CommandTimeout,
+            "Runtime 启动没有把环境快照交给 Codex 子进程。");
+
+        True(capturedOptions!.EnvironmentVariables.TryGetValue("PATH", out var childPath) &&
+             !string.IsNullOrWhiteSpace(childPath),
+            "Codex 子进程必须收到显式 PATH 覆盖，不能只继承应用启动时的旧 PATH。");
+        Equal(
+            ProcessEnvironmentSnapshot.BuildFreshPathEnvironment(),
+            childPath,
+            "Codex 子进程 PATH 必须来自当前进程、Machine 与 User 的最新合并快照");
+    }
+
     private static LifecycleFixture CreateFixture(
         string temporaryRoot,
         string testName,
@@ -356,21 +382,26 @@ internal static class AgentConnectionLifecycleSmokeTests
         private readonly string? _startFailure;
         private readonly bool _blockUntilCancelled;
         private readonly TaskCompletionSource<bool>? _startEntered;
+        private readonly Action<AgentSessionStartOptions>? _started;
         private AgentSessionTransportState _state = AgentSessionTransportState.Stopped;
 
         private FakeAgentSessionTransport(
             string? startFailure,
             bool blockUntilCancelled = false,
-            TaskCompletionSource<bool>? startEntered = null)
+            TaskCompletionSource<bool>? startEntered = null,
+            Action<AgentSessionStartOptions>? started = null)
         {
             _startFailure = startFailure;
             _blockUntilCancelled = blockUntilCancelled;
             _startEntered = startEntered;
+            _started = started;
         }
 
         public static FakeAgentSessionTransport Failing(string message) => new(message);
 
-        public static FakeAgentSessionTransport Ready() => new(null);
+        public static FakeAgentSessionTransport Ready(
+            Action<AgentSessionStartOptions>? started = null) =>
+            new(null, started: started);
 
         public static FakeAgentSessionTransport BlockingUntilCancelled(
             TaskCompletionSource<bool> startEntered) =>
@@ -427,6 +458,7 @@ internal static class AgentConnectionLifecycleSmokeTests
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            _started?.Invoke(options);
             Transition(AgentSessionTransportState.Starting, "fixture starting");
             if (_blockUntilCancelled)
             {

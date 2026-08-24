@@ -364,6 +364,7 @@ public sealed class CodexExecTransport : IAgentSessionTransport
         CodexProcessLaunch.AddConfig(
             startInfo,
             $"approval_policy={CodexProcessLaunch.TomlString(options.ApprovalPolicy)}");
+        CodexProcessLaunch.AddSandboxConfiguration(startInfo, options);
         CodexProcessLaunch.AddMcpConfiguration(startInfo, options);
         if (!string.IsNullOrWhiteSpace(resumeThreadId))
         {
@@ -384,63 +385,72 @@ public sealed class CodexExecTransport : IAgentSessionTransport
         string? status = null;
         string? errorMessage = null;
         JsonElement? rawTurn = null;
-        while (!cancellationToken.IsCancellationRequested)
+        var framingWarnings = new BoundedProtocolWarningReporter(
+            "codex exec JSONL",
+            message => WriteLog(AgentLogLevel.Warning, message));
+        try
         {
-            var line = await process.StandardOutput.ReadLineAsync(cancellationToken).ConfigureAwait(false);
-            if (line is null)
+            while (!cancellationToken.IsCancellationRequested)
             {
-                break;
-            }
-
-            if (string.IsNullOrWhiteSpace(line))
-            {
-                continue;
-            }
-
-            try
-            {
-                using var document = JsonDocument.Parse(line);
-                var root = document.RootElement;
-                var eventType = ReadString(root, "type") ?? string.Empty;
-                NotificationReceived?.Invoke(
-                    this,
-                    new AgentNotificationEventArgs(eventType, root.Clone()));
-                switch (eventType)
+                var line = await process.StandardOutput.ReadLineAsync(cancellationToken).ConfigureAwait(false);
+                if (line is null)
                 {
-                    case "thread.started":
-                        threadId = ReadString(root, "thread_id") ?? ReadString(root, "threadId") ?? threadId;
-                        if (!string.IsNullOrWhiteSpace(threadId))
-                        {
-                            lock (_stateLock)
-                            {
-                                _currentThreadId = threadId;
-                            }
-                        }
-
-                        break;
-                    case "turn.started":
-                        turnId = ReadString(root, "turn_id") ?? ReadString(root, "turnId") ?? turnId;
-                        break;
-                    case "turn.completed":
-                        status = "completed";
-                        rawTurn = root.Clone();
-                        break;
-                    case "turn.failed":
-                        status = "failed";
-                        errorMessage = ReadErrorMessage(root);
-                        rawTurn = root.Clone();
-                        break;
-                    case "error":
-                        status = "failed";
-                        errorMessage = ReadErrorMessage(root);
-                        rawTurn = root.Clone();
-                        break;
+                    break;
                 }
+
+                if (string.IsNullOrWhiteSpace(line))
+                {
+                    continue;
+                }
+
+                SafeJsonLineFramer.ProcessObjects(
+                    line,
+                    root =>
+                    {
+                        var eventType = ReadString(root, "type") ?? string.Empty;
+                        NotificationReceived?.Invoke(
+                            this,
+                            new AgentNotificationEventArgs(eventType, root.Clone()));
+                        switch (eventType)
+                        {
+                            case "thread.started":
+                                threadId = ReadString(root, "thread_id") ??
+                                           ReadString(root, "threadId") ??
+                                           threadId;
+                                if (!string.IsNullOrWhiteSpace(threadId))
+                                {
+                                    lock (_stateLock)
+                                    {
+                                        _currentThreadId = threadId;
+                                    }
+                                }
+
+                                break;
+                            case "turn.started":
+                                turnId = ReadString(root, "turn_id") ?? ReadString(root, "turnId") ?? turnId;
+                                break;
+                            case "turn.completed":
+                                status = "completed";
+                                rawTurn = root.Clone();
+                                break;
+                            case "turn.failed":
+                                status = "failed";
+                                errorMessage = ReadErrorMessage(root);
+                                rawTurn = root.Clone();
+                                break;
+                            case "error":
+                                status = "failed";
+                                errorMessage = ReadErrorMessage(root);
+                                rawTurn = root.Clone();
+                                break;
+                        }
+                    },
+                    framingWarnings.Report);
             }
-            catch (JsonException exception)
-            {
-                WriteLog(AgentLogLevel.Warning, $"忽略无效的 codex exec JSONL：{exception.Message}");
-            }
+        }
+        finally
+        {
+            framingWarnings.Flush();
         }
 
         return new ExecJsonResult(threadId, turnId, status, errorMessage, rawTurn);

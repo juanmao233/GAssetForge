@@ -71,10 +71,12 @@ OpenCode 仍显示为后续适配入口，但当前明确标记为 Adapter 待�
 1. 用户在 Agent 面板中明确指定的 `.cmd`、`.bat` 或 `.exe`；脚本通过 `cmd.exe /d /s /c` 启动。
 2. `%APPDATA%\npm\codex.cmd` / `codex.bat`，即 npm 全局安装的标准 shim，即使桌面进程继承的 PATH
    不含 npm 目录也会主动检查。
-3. PATH 中可启动的 `codex.cmd` / `codex.bat` shim；由 shim 自行解析其原生 Runtime。
-4. PATH 中包含 `codex-code-mode-host.exe` 配套组件、且可启动的完整 `codex.exe` Runtime。
-5. 应用目录中的完整 Runtime。
-6. PATH 中仍可启动的兼容旧版独立 `codex.exe`。
+3. `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe`，即官方 Windows standalone 安装位置；
+   即使应用启动时继承的 PATH 尚未刷新也会主动检查。
+4. PATH 中可启动的 `codex.cmd` / `codex.bat` shim；由 shim 自行解析其原生 Runtime。
+5. PATH 中包含 `codex-code-mode-host.exe` 配套组件、且可启动的完整 `codex.exe` Runtime。
+6. 应用目录中的完整 Runtime。
+7. PATH 中仍可启动的兼容旧版独立 `codex.exe`。
 
 自动模式优先选择 npm shim，是因为官方 launcher 能解析自己的原生资源，而 WindowsApps 下看似存在的
 `codex.exe` 可能因应用包执行权限被普通 WPF 进程拒绝。WindowsApps 原始 EXE 会作为明确的跳过项保留在
@@ -83,6 +85,10 @@ OpenCode 仍显示为后续适配入口，但当前明确标记为 Adapter 待�
 
 手动路径会保存在用户设置中，空值表示恢复自动检测。显式路径无效时不会静默改用其他 PATH 候选，避免
 软件实际运行的 CLI 与用户选择不一致。
+
+每次新建受管 Agent 会话时，桌面端会重新合并当前进程、Windows Machine 和 User 的 PATH，并把快照显式
+传给 Codex 子进程。这样用户在 GAssetForge 已打开后安装 Python 或修复用户 PATH，也不会让新 Agent 会话
+继续继承应用启动时的旧 PATH；图片 CLI 指令仍优先使用预检返回的绝对 Python 与脚本路径。
 
 ### 首选：Codex App Server
 
@@ -93,7 +99,17 @@ codex app-server --stdio
 ```
 
 MCP Endpoint、`required=true` 和 Bearer Token 环境变量名通过该子进程的临时 `-c` 配置注入，Token 值只在
-子进程环境中存在。协议使用 UTF-8 JSONL；每行一个 JSON-RPC 消息。桌面端执行的关键生命周期为：
+子进程环境中存在。协议流显式使用 UTF-8 no-BOM；正常情况下每行一个 JSON-RPC 消息。兼容分帧器也能从
+单行多个 JSON、垃圾前缀或中间片段后安全恢复，非协议内容只记录偏移、长度和短 SHA-256，不进入 Agent
+正文，也不会逐条淹没工作台日志。桌面端执行的关键生命周期为：
+
+受管 App Server 与 Exec fallback 都保持 `sandbox_mode = "workspace-write"`，并仅为该 sandbox 显式注入
+`sandbox_workspace_write.network_access=true`，让官方 `image_gen.py` 可以尝试访问 Image API；不会为此切换到
+`danger-full-access`。该配置只证明权限已声明，不证明用户网络、DNS/TLS、API Key、配额或 Image API 实际可用。
+每次 `turn/start` 还会显式冻结 `workspaceWrite`、当前项目唯一 `writableRoots` 和 `networkAccess=true`，避免
+进程默认值被 Turn 级策略覆盖。图片交付预检会分别验证输出目录、Python 启动、`image_gen.py --help`、
+`from openai import OpenAI` 和 `OPENAI_API_KEY`；因此素材生成状态只显示“CLI 本地前置已就绪 / 网络未验证”，
+实际请求失败时保留原始分类诊断。
 
 1. `initialize` / `initialized` 建立 App Server 协议连接并检查运行时版本。
 2. `account/read` 读取认证状态；需要登录时保留 App Server，而不是把认证问题误判为传输故障。
@@ -145,6 +161,9 @@ codex exec resume --json ... <threadId> -
 - [Codex CLI reference](https://developers.openai.com/codex/cli/reference/)
 - [Connect Codex to MCP servers](https://developers.openai.com/codex/mcp/)
 - [Run Codex as an MCP server](https://developers.openai.com/codex/mcp-server/)
+- [Codex sandbox](https://developers.openai.com/codex/sandboxing/)
+- [Codex configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference)
+- [Image generation guide](https://developers.openai.com/api/docs/guides/image-generation)
 
 ## 素材批次与自动发布
 
@@ -397,9 +416,17 @@ GAssetForge.McpServer.exe
 新任务的正常顺序：
 
 1. 使用发布 prompt 中的明确 task ID 调用 `claim_generation_task(taskId, agentId)`，读取冻结 prompt、风格
-   参考、底色合同、唯一目标路径和 `delivery.workspace`。
-2. 按 `preferredSkill` 调用真实图像模型，为这个单图任务取得本地 PNG `sourcePath`。不得用程序化绘图替代，
-   也不得自行创建 Run、搬运、缩放、抠图或修改 Alpha。
+   参考、底色合同、唯一目标路径、`delivery.workspace`、顶层的绝对 `recommendedSourcePath`，以及结构化
+   `imageGeneration` CLI 合同。`imageGeneration.output` 明确给出最终 `targetWidth`、`targetHeight`、约分后的
+   `targetAspectRatio`、符合 GPT Image 尺寸约束的非方形 `cliSize`，并标记是否精确保留画幅；
+   `imageGeneration.style.referenceSourcePaths` 是经过数据根边界、重解析点和冻结 SHA-256 内容校验的风格快照绝对路径；
+   快照缺失、被替换或被篡改时，认领会在任务状态写入前失败并保持 `Pending`。推荐源路径由软件从
+   冻结的 `delivery.assetRoot + delivery.workspace.modelOutputPaths[0]` 计算并做 Assets 边界校验，供 CLI 兜底
+   直接落盘；Agent 不得自行推断或改写。
+2. 按 `preferredSkill` 调用真实图像模型，为这个单图任务取得本地 PNG `sourcePath`。CLI fallback 必须传
+   `--size <imageGeneration.output.cliSize>`，并继续在提示中约束最终目标宽高与画幅，不能默认改成方形；存在
+   风格参考图时使用 `edit` 并为每张路径重复 `--image`，只有无参考图时才使用 `generate`。不得用程序化绘图
+   替代，也不得自行创建 Run、搬运、缩放、抠图或修改 Alpha。
 3. 调用
    `submit_generation_output(taskId, agentId, outputIndex=0, sourcePath=<模型返回绝对路径>)`。
 4. 软件归档源图、归一化冻结画布、补齐第一道纯色底、执行可选背景剔除、验证最终 Tilemap/PNG 合同、原子

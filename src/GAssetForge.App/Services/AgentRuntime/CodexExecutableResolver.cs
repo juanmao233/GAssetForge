@@ -63,6 +63,7 @@ internal static class CodexExecutableResolver
     internal const string CodeModeHostFileName = "codex-code-mode-host.exe";
     private const string AutomaticExecutableName = "codex";
     private const string AppDataNpmSource = "APPDATA npm shim";
+    private const string LocalAppDataOfficialInstallSource = "LOCALAPPDATA 官方安装";
     private const string PathShimSource = "PATH shim";
     private static readonly TimeSpan LaunchProbeTimeout = TimeSpan.FromSeconds(5);
     private static readonly ConcurrentDictionary<string, CodexExecutableProbeResult>
@@ -73,7 +74,8 @@ internal static class CodexExecutableResolver
         string? applicationDirectory = null,
         string? pathEnvironment = null,
         Func<CodexExecutableLaunch, bool>? launchProbe = null,
-        string? applicationDataDirectory = null)
+        string? applicationDataDirectory = null,
+        string? localApplicationDataDirectory = null)
     {
         Func<CodexExecutableLaunch, CodexExecutableProbeResult>? detailedProbe = launchProbe is null
             ? null
@@ -85,7 +87,8 @@ internal static class CodexExecutableResolver
             applicationDirectory,
             pathEnvironment,
             detailedProbe,
-            applicationDataDirectory);
+            applicationDataDirectory,
+            localApplicationDataDirectory);
         return resolution.Launch ?? throw new CodexExecutableResolutionException(
             resolution.Summary,
             resolution.Candidates);
@@ -96,11 +99,17 @@ internal static class CodexExecutableResolver
         string? applicationDirectory = null,
         string? pathEnvironment = null,
         Func<CodexExecutableLaunch, CodexExecutableProbeResult>? launchProbe = null,
-        string? applicationDataDirectory = null)
+        string? applicationDataDirectory = null,
+        string? localApplicationDataDirectory = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(requestedExecutable);
         var requested = requestedExecutable.Trim().Trim('"');
-        var canLaunch = launchProbe ?? ProbeCandidateWithSuccessfulCache;
+        var effectivePathEnvironment = pathEnvironment ??
+                                       Environment.GetEnvironmentVariable("PATH");
+        var canLaunch = launchProbe ??
+                        (candidate => ProbeCandidateWithSuccessfulCache(
+                            candidate,
+                            effectivePathEnvironment));
         if (!string.Equals(requested, AutomaticExecutableName, StringComparison.OrdinalIgnoreCase))
         {
             return ResolveExplicitExecutable(requested, canLaunch);
@@ -108,8 +117,8 @@ internal static class CodexExecutableResolver
 
         var applicationPath = NormalizeDirectory(applicationDirectory ?? AppContext.BaseDirectory);
         var appDataPath = ResolveApplicationDataDirectory(applicationDataDirectory);
-        var pathDirectories = EnumeratePathDirectories(
-                pathEnvironment ?? Environment.GetEnvironmentVariable("PATH"))
+        var localAppDataPath = ResolveLocalApplicationDataDirectory(localApplicationDataDirectory);
+        var pathDirectories = EnumeratePathDirectories(effectivePathEnvironment)
             .Where(path => !PathEquals(path, applicationPath))
             .ToArray();
         var diagnostics = new List<CodexExecutableCandidateDiagnostic>();
@@ -123,6 +132,30 @@ internal static class CodexExecutableResolver
                 var accepted = EvaluateCandidate(
                     npmShim,
                     AppDataNpmSource,
+                    canLaunch,
+                    diagnostics,
+                    seenCandidates);
+                if (accepted is not null)
+                {
+                    return CreateSuccessfulResolution(accepted, diagnostics);
+                }
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(localAppDataPath))
+        {
+            var officialInstallDirectory = Path.Combine(
+                localAppDataPath,
+                "Programs",
+                "OpenAI",
+                "Codex",
+                "bin");
+            var officialInstall = TryCreateOfficialInstall(officialInstallDirectory);
+            if (officialInstall is not null)
+            {
+                var accepted = EvaluateCandidate(
+                    officialInstall,
+                    LocalAppDataOfficialInstallSource,
                     canLaunch,
                     diagnostics,
                     seenCandidates);
@@ -384,6 +417,22 @@ internal static class CodexExecutableResolver
             : null;
     }
 
+    private static CodexExecutableLaunch? TryCreateOfficialInstall(string directory)
+    {
+        var executablePath = Path.Combine(directory, "codex.exe");
+        if (!File.Exists(executablePath))
+        {
+            return null;
+        }
+
+        return new CodexExecutableLaunch(
+            Path.GetFullPath(executablePath),
+            [],
+            Path.GetFullPath(executablePath),
+            HasCodeModeCompanion: File.Exists(
+                Path.Combine(directory, CodeModeHostFileName)));
+    }
+
     private static CodexExecutableLaunch? TryCreateLegacyExecutable(string directory)
     {
         var executablePath = Path.Combine(directory, "codex.exe");
@@ -397,9 +446,10 @@ internal static class CodexExecutableResolver
     }
 
     private static CodexExecutableProbeResult ProbeCandidateWithSuccessfulCache(
-        CodexExecutableLaunch candidate)
+        CodexExecutableLaunch candidate,
+        string? pathEnvironment)
     {
-        var cacheKey = CreateProbeCacheKey(candidate);
+        var cacheKey = CreateProbeCacheKey(candidate, pathEnvironment);
         if (SuccessfulLaunchProbeCache.TryGetValue(cacheKey, out var cachedResult))
         {
             return cachedResult with
@@ -408,7 +458,7 @@ internal static class CodexExecutableResolver
             };
         }
 
-        var probeResult = ProbeCandidate(candidate);
+        var probeResult = ProbeCandidate(candidate, pathEnvironment);
         if (probeResult.IsSuccess)
         {
             SuccessfulLaunchProbeCache.TryAdd(cacheKey, probeResult);
@@ -417,14 +467,19 @@ internal static class CodexExecutableResolver
         return probeResult;
     }
 
-    private static string CreateProbeCacheKey(CodexExecutableLaunch candidate) =>
+    private static string CreateProbeCacheKey(
+        CodexExecutableLaunch candidate,
+        string? pathEnvironment) =>
         string.Join(
             '\0',
             candidate.ProcessFileName,
             candidate.CodexExecutablePath,
-            string.Join('\0', candidate.PrefixArguments));
+            string.Join('\0', candidate.PrefixArguments),
+            pathEnvironment ?? string.Empty);
 
-    private static CodexExecutableProbeResult ProbeCandidate(CodexExecutableLaunch candidate)
+    private static CodexExecutableProbeResult ProbeCandidate(
+        CodexExecutableLaunch candidate,
+        string? pathEnvironment)
     {
         try
         {
@@ -439,6 +494,12 @@ internal static class CodexExecutableResolver
                 RedirectStandardOutput = true,
                 RedirectStandardError = true
             };
+            CodexProcessLaunch.ConfigureUtf8Redirection(startInfo);
+            if (pathEnvironment is not null)
+            {
+                startInfo.Environment["PATH"] = pathEnvironment;
+            }
+
             foreach (var prefixArgument in candidate.PrefixArguments)
             {
                 startInfo.ArgumentList.Add(prefixArgument);
@@ -560,11 +621,11 @@ internal static class CodexExecutableResolver
     {
         var candidateArray = diagnostics.ToArray();
         var message = new StringBuilder(
-            "未找到可用的 Codex Runtime。请安装 Codex CLI、确认 %APPDATA%\\npm\\codex.cmd 可执行，或手动指定 Codex CLI 路径。");
+            "未找到可用的 Codex Runtime。请安装 Codex CLI、确认 %APPDATA%\\npm\\codex.cmd 或 %LOCALAPPDATA%\\Programs\\OpenAI\\Codex\\bin\\codex.exe 可执行，或手动指定 Codex CLI 路径。");
         if (candidateArray.Length == 0)
         {
             message.AppendLine()
-                .Append("没有发现现存候选文件；已检查 APPDATA npm、PATH 和应用目录。");
+                .Append("没有发现现存候选文件；已检查 APPDATA npm、LOCALAPPDATA 官方安装、PATH 和应用目录。");
         }
         else
         {
@@ -591,6 +652,30 @@ internal static class CodexExecutableResolver
         var configuredPath = applicationDataDirectory ??
                              Environment.GetEnvironmentVariable("APPDATA") ??
                              Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData);
+        if (string.IsNullOrWhiteSpace(configuredPath))
+        {
+            return null;
+        }
+
+        try
+        {
+            return NormalizeDirectory(configuredPath);
+        }
+        catch (Exception exception) when (exception is
+            ArgumentException or
+            NotSupportedException or
+            PathTooLongException)
+        {
+            return null;
+        }
+    }
+
+    private static string? ResolveLocalApplicationDataDirectory(
+        string? localApplicationDataDirectory)
+    {
+        var configuredPath = localApplicationDataDirectory ??
+                             Environment.GetEnvironmentVariable("LOCALAPPDATA") ??
+                             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
         if (string.IsNullOrWhiteSpace(configuredPath))
         {
             return null;

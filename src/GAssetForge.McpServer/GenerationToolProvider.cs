@@ -1,4 +1,7 @@
+using System.Buffers;
+using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using GAssetForge.Core;
 using GAssetForge.Core.Generation;
 
@@ -345,6 +348,9 @@ internal sealed class GenerationToolProvider(
         }
 
         GenerationTask? task;
+        GenerationDeliveryPlan? delivery = null;
+        string? recommendedSourcePath = null;
+        object? imageGeneration = null;
         if (taskId is null)
         {
             var pendingTasks = await taskStore.ListAsync(
@@ -359,7 +365,14 @@ internal sealed class GenerationToolProvider(
             }
             else
             {
-                _ = ReadDeliveryOrThrow(candidate.Constraints);
+                delivery = ReadDeliveryOrThrow(candidate.Constraints);
+                if (delivery?.Workspace is not null)
+                {
+                    recommendedSourcePath = ResolveRecommendedSourcePath(delivery);
+                    imageGeneration = await BuildImageGenerationContractAsync(candidate, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+
                 task = await taskStore.ClaimAsync(candidate.Id, agentId, cancellationToken)
                     .ConfigureAwait(false);
             }
@@ -368,11 +381,17 @@ internal sealed class GenerationToolProvider(
         {
             var candidate = await taskStore.GetAsync(taskId, cancellationToken).ConfigureAwait(false)
                 ?? throw new KeyNotFoundException($"生成任务不存在：{taskId}");
-            _ = ReadDeliveryOrThrow(candidate.Constraints);
+            delivery = ReadDeliveryOrThrow(candidate.Constraints);
+            if (delivery?.Workspace is not null)
+            {
+                recommendedSourcePath = ResolveRecommendedSourcePath(delivery);
+                imageGeneration = await BuildImageGenerationContractAsync(candidate, cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
             task = await taskStore.ClaimAsync(taskId, agentId, cancellationToken).ConfigureAwait(false);
         }
 
-        var delivery = task is null ? null : ReadDeliveryOrThrow(task.Constraints);
         if (task is not null)
         {
             GenerationRunJournal.Append(
@@ -400,8 +419,263 @@ internal sealed class GenerationToolProvider(
             task,
             dataRoot = options.DataDirectory,
             delivery,
-            assetRoot = delivery?.AssetRoot ?? currentAssetRoot
+            assetRoot = delivery?.AssetRoot ?? currentAssetRoot,
+            recommendedSourcePath,
+            imageGeneration
         };
+    }
+
+    private async Task<object> BuildImageGenerationContractAsync(
+        GenerationTask task,
+        CancellationToken cancellationToken)
+    {
+        var output = task.Constraints.Output;
+        var targetDivisor = GreatestCommonDivisor(output.Width, output.Height);
+        var cliSize = ResolveCliSize(output.Width, output.Height);
+        var styleNode = task.Constraints.Parameters?["style"] as JsonObject;
+        var referenceSourcePaths = await ResolveStyleReferenceSourcePathsAsync(
+                styleNode,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return new
+        {
+            prompt = task.Constraints.Prompt,
+            negativePrompt = task.Constraints.NegativePrompt,
+            requiredRules = task.Constraints.Rules
+                .Where(rule => rule.Required)
+                .Select(rule => new { rule.Key, rule.Category, rule.Instruction })
+                .ToArray(),
+            output = new
+            {
+                targetWidth = output.Width,
+                targetHeight = output.Height,
+                targetAspectRatio = $"{output.Width / targetDivisor}:{output.Height / targetDivisor}",
+                cliSize = cliSize.Size,
+                preservesExactAspectRatio = cliSize.PreservesExactAspectRatio,
+                format = output.Format,
+                output.BackgroundRemoval
+            },
+            style = new
+            {
+                groupId = ReadOptionalString(styleNode, "groupId"),
+                name = ReadOptionalString(styleNode, "name"),
+                description = ReadOptionalString(styleNode, "description"),
+                prompt = ReadOptionalString(styleNode, "prompt"),
+                referenceSourcePaths
+            }
+        };
+    }
+
+    private async Task<string[]> ResolveStyleReferenceSourcePathsAsync(
+        JsonObject? styleNode,
+        CancellationToken cancellationToken)
+    {
+        if (styleNode?["references"] is not JsonArray references || references.Count == 0)
+        {
+            return [];
+        }
+
+        var dataRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(options.DataDirectory));
+        var results = new string[references.Count];
+        for (var index = 0; index < references.Count; index++)
+        {
+            if (references[index] is not JsonObject referenceNode)
+            {
+                throw new InvalidDataException("风格参考图合同包含无效对象。");
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            var relativePath = GenerationInputValidator.NormalizeRelativeAssetPath(
+                ReadRequiredString(referenceNode, "dataRootRelativePath", "风格参考图缺少 dataRootRelativePath。"));
+            var expectedSha256 = ReadRequiredString(
+                    referenceNode,
+                    "sha256",
+                    "风格参考图缺少冻结 SHA-256。")
+                .Trim();
+            if (expectedSha256.Length != 64 ||
+                expectedSha256.Any(character => !Uri.IsHexDigit(character)))
+            {
+                throw new InvalidDataException($"风格参考图冻结 SHA-256 无效：{relativePath}");
+            }
+
+            var fullPath = Path.GetFullPath(Path.Combine(
+                dataRoot,
+                relativePath.Replace('/', Path.DirectorySeparatorChar)));
+            var relativeToRoot = Path.GetRelativePath(dataRoot, fullPath);
+            if (Path.IsPathRooted(relativeToRoot) ||
+                relativeToRoot is "." or ".." ||
+                relativeToRoot.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal) ||
+                relativeToRoot.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal) ||
+                !File.Exists(fullPath))
+            {
+                throw new InvalidDataException($"风格参考图快照不存在或越出数据根：{relativePath}");
+            }
+
+            EnsureStyleReferencePathHasNoReparsePoints(dataRoot, fullPath, relativePath);
+            var actualSha256 = await ComputeSha256Async(fullPath, cancellationToken)
+                .ConfigureAwait(false);
+            if (!string.Equals(expectedSha256, actualSha256, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException(
+                    $"风格参考图快照内容与冻结 SHA-256 不一致：{relativePath}");
+            }
+
+            results[index] = fullPath;
+        }
+
+        return results;
+    }
+
+    private static async Task<string> ComputeSha256Async(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        const int bufferSize = 128 * 1024;
+        var buffer = ArrayPool<byte>.Shared.Rent(bufferSize);
+        try
+        {
+            await using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                bufferSize,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            while (true)
+            {
+                var bytesRead = await stream.ReadAsync(
+                        buffer.AsMemory(0, buffer.Length),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (bytesRead == 0)
+                {
+                    break;
+                }
+
+                hash.AppendData(buffer.AsSpan(0, bytesRead));
+            }
+
+            return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+        }
+        finally
+        {
+            ArrayPool<byte>.Shared.Return(buffer);
+        }
+    }
+
+    private static void EnsureStyleReferencePathHasNoReparsePoints(
+        string dataRoot,
+        string fullPath,
+        string relativePath)
+    {
+        if (!Directory.Exists(dataRoot))
+        {
+            throw new InvalidDataException($"风格参考图数据根不存在：{dataRoot}");
+        }
+
+        if ((File.GetAttributes(dataRoot) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidDataException("风格参考图数据根不能是符号链接或目录联接。");
+        }
+
+        var relativeToRoot = Path.GetRelativePath(dataRoot, fullPath);
+        var segments = relativeToRoot.Split(
+            new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+            StringSplitOptions.RemoveEmptyEntries);
+        var current = dataRoot;
+        foreach (var segment in segments)
+        {
+            current = Path.Combine(current, segment);
+            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidDataException(
+                    $"风格参考图快照路径不能经过符号链接或目录联接：{relativePath}");
+            }
+        }
+    }
+
+    private static (string Size, bool PreservesExactAspectRatio) ResolveCliSize(int width, int height)
+    {
+        const long minimumPixels = 655_360L;
+        const long maximumPixels = 8_294_400L;
+        const int maximumEdge = 3_840;
+        var divisor = GreatestCommonDivisor(width, height);
+        var baseWidth = width / divisor;
+        var baseHeight = height / divisor;
+        if ((long)Math.Max(baseWidth, baseHeight) > 3L * Math.Min(baseWidth, baseHeight))
+        {
+            return width >= height ? ("1440x480", false) : ("480x1440", false);
+        }
+
+        var widthStep = 16 / GreatestCommonDivisor(baseWidth, 16);
+        var heightStep = 16 / GreatestCommonDivisor(baseHeight, 16);
+        var multiplierStep = LeastCommonMultiple(widthStep, heightStep);
+        var minimumMultiplier = (int)Math.Ceiling(Math.Sqrt(
+            minimumPixels / ((double)baseWidth * baseHeight)));
+        var multiplier = Math.Max(
+            multiplierStep,
+            ((minimumMultiplier + multiplierStep - 1) / multiplierStep) * multiplierStep);
+        var candidateWidth = (long)baseWidth * multiplier;
+        var candidateHeight = (long)baseHeight * multiplier;
+        var candidatePixels = candidateWidth * candidateHeight;
+        if (candidateWidth <= maximumEdge &&
+            candidateHeight <= maximumEdge &&
+            candidatePixels is >= minimumPixels and <= maximumPixels)
+        {
+            return ($"{candidateWidth}x{candidateHeight}", true);
+        }
+
+        return width == height
+            ? ("1024x1024", false)
+            : width > height
+                ? ("1536x1024", false)
+                : ("1024x1536", false);
+    }
+
+    private static int GreatestCommonDivisor(int left, int right)
+    {
+        left = Math.Abs(left);
+        right = Math.Abs(right);
+        while (right != 0)
+        {
+            (left, right) = (right, left % right);
+        }
+
+        return Math.Max(1, left);
+    }
+
+    private static int LeastCommonMultiple(int left, int right) =>
+        checked(left / GreatestCommonDivisor(left, right) * right);
+
+    private static string ReadOptionalString(JsonObject? node, string name) =>
+        node?[name] is JsonValue value && value.TryGetValue<string>(out var result)
+            ? result ?? string.Empty
+            : string.Empty;
+
+    private static string ReadRequiredString(JsonObject node, string name, string error) =>
+        node[name] is JsonValue value &&
+        value.TryGetValue<string>(out var result) &&
+        !string.IsNullOrWhiteSpace(result)
+            ? result
+            : throw new InvalidDataException(error);
+
+    private string ResolveRecommendedSourcePath(GenerationDeliveryPlan delivery)
+    {
+        var workspace = delivery.Workspace
+            ?? throw new InvalidDataException("推荐模型源路径要求 generation workspace。");
+        if (workspace.ModelOutputPaths.Length != 1)
+        {
+            throw new InvalidDataException(
+                "新生成任务必须为单图 workspace，才能返回唯一 recommendedSourcePath。");
+        }
+
+        return contextResolver.ResolveDeliveryAssetPath(
+                workspace.ModelOutputPaths[0],
+                delivery.AssetRoot,
+                requireExistingFile: false,
+                "推荐模型源文件")
+            .FullPath;
     }
 
     private async Task<object?> CompleteTaskAsync(JsonElement arguments, CancellationToken cancellationToken)

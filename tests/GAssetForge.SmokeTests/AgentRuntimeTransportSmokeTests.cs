@@ -17,13 +17,24 @@ internal static class AgentRuntimeTransportSmokeTests
     public static async Task RunAllAsync()
     {
         await JsonLineRpcRoutesConcurrentResponsesByIdAsync();
+        await JsonLineRpcAcceptsMultipleMessagesOnOnePhysicalLineAsync();
+        await JsonLineRpcRecoversValidMessageAfterNonJsonPrefixAsync();
+        await JsonLineRpcRecoversValidMessageAfterNonJsonMiddleSegmentAsync();
+        await JsonLineRpcDoesNotResynchronizeAtNestedObjectsInsideMalformedEnvelopeAsync();
+        await JsonLineRpcDispatchesValidMessageAndRedactsNonJsonTailAsync();
+        await JsonLineRpcRejectsJsonScalarsWithoutTerminatingTheConnectionAsync();
+        await JsonLineRpcKeepsFullyNonJsonInputOutOfAgentNotificationsAsync();
+        await JsonLineRpcBoundsAndSummarizesRepeatedInvalidInputAsync();
         await JsonLineRpcFailureFailsEveryPendingRequestAsync();
         await JsonLineRpcDispatchesInboundServerRequestsAsync();
         await CodexAppServerUsesExpectedInitializationShapeAsync();
+        await CodexAppServerFreezesWorkspaceWriteSandboxPolicyPerTurnAsync();
         await CodexAppServerFailsActiveTurnWhenProtocolStreamEndsAsync();
         await CodexAppServerScopesGAssetForgeMcpApprovalsToTheActiveBatchAsync();
         await CodexAppServerRejectsPreBaselineVersionAsync();
-        CodexExecutableResolverPrefersAppDataNpmShimBeforeWindowsApps();
+        CodexProcessLaunchUsesOptionsPathForAutomaticRuntimeResolution();
+        CodexExecutableResolverPrefersAppDataNpmShimBeforeOfficialInstallAndWindowsApps();
+        CodexExecutableResolverDiscoversOfficialLocalAppDataRuntimeWithoutPath();
         CodexExecutableResolverSkipsWindowsAppsExecutableWithDiagnostic();
         CodexExecutableResolverProbesExplicitScriptAndExecutable();
         CodexExecutableResolverReportsEveryRejectedCandidate();
@@ -33,7 +44,12 @@ internal static class AgentRuntimeTransportSmokeTests
         CodexProcessLaunchFallsBackToLegacyPathScript();
         CodexProcessLaunchExplainsMissingCompanionWithoutFallback();
         CodexProcessLaunchKeepsBearerTokenOutOfArguments();
+        CodexProcessLaunchScopesImageApiNetworkToWorkspaceWriteSandbox();
+        CodexProcessLaunchUsesUtf8NoBomForProtocolStreams();
+        await CodexProcessLaunchRoundTripsUtf8ThroughRealChildAsync();
         await CodexExecDeclaresFallbackCapabilitiesAndBuildsArgumentsAsync();
+        await CodexExecAcceptsConcatenatedJsonAndRedactsInvalidTailAsync();
+        await CodexExecBoundsAndSummarizesRepeatedInvalidInputAsync();
         await CodexExecCancellationKillsTheEntireProcessTreeAsync();
     }
 
@@ -82,6 +98,279 @@ internal static class AgentRuntimeTransportSmokeTests
         Equal("second", secondResult.GetProperty("routed").GetString(),
             "JSON-RPC 第二请求应兼容字符串形式的数值 id");
         Equal(0, connection.PendingRequestCount, "JSON-RPC 完成后 pending 数量");
+    }
+
+    private static async Task JsonLineRpcAcceptsMultipleMessagesOnOnePhysicalLineAsync()
+    {
+        var notifications = new List<(string Method, string Text)>();
+        var warnings = new List<string>();
+        await using var connection = new JsonLineRpcConnection(
+            new StringReader(string.Empty),
+            new StringWriter(),
+            TimeSpan.FromSeconds(3));
+        connection.NotificationReceived += (method, parameters) =>
+            notifications.Add((method, parameters.GetProperty("text").GetString() ?? string.Empty));
+        connection.ProtocolWarning += warnings.Add;
+
+        var first = JsonSerializer.Serialize(new
+        {
+            method = "item/agentMessage/delta",
+            @params = new { text = "正在生成图片" }
+        });
+        var second = JsonSerializer.Serialize(new
+        {
+            method = "item/completed",
+            @params = new { text = "图片已经生成" }
+        });
+        connection.ProcessLine(first + " \t " + second + "  ");
+
+        Equal(2, notifications.Count, "同一物理行中的两个完整 JSON-RPC 消息都必须被处理");
+        Equal("正在生成图片", notifications[0].Text, "第一条中文通知不得损坏");
+        Equal("图片已经生成", notifications[1].Text, "第二条中文通知不得损坏");
+        Equal(0, warnings.Count, "两个完整 JSON 值及正常尾随空白不应产生协议警告");
+    }
+
+    private static async Task JsonLineRpcRecoversValidMessageAfterNonJsonPrefixAsync()
+    {
+        var notifications = new List<string>();
+        var warnings = new List<string>();
+        await using var connection = new JsonLineRpcConnection(
+            new StringReader(string.Empty),
+            new StringWriter(),
+            TimeSpan.FromSeconds(3));
+        connection.NotificationReceived += (_, parameters) =>
+            notifications.Add(parameters.GetProperty("text").GetString() ?? string.Empty);
+        connection.ProtocolWarning += warnings.Add;
+
+        const string sensitivePrefix = "event: private-prefix-token-must-not-be-logged ";
+        var validMessage = JsonSerializer.Serialize(new
+        {
+            method = "item/agentMessage/delta",
+            @params = new { text = "前缀后的合法中文状态" }
+        });
+        connection.ProcessLine(sensitivePrefix + validMessage);
+
+        Equal(1, notifications.Count, "非 JSON 前缀不得吞掉同一物理行后方的完整 JSON-RPC 消息");
+        Equal("前缀后的合法中文状态", notifications[0], "恢复后的中文通知不得损坏");
+        Equal(1, warnings.Count, "恢复前的非 JSON 前缀必须形成一条脱敏协议诊断");
+        True(warnings[0].Contains("offset=0", StringComparison.Ordinal),
+            "前缀诊断必须记录无效片段起始偏移");
+        True(warnings[0].Contains("segmentBytes=", StringComparison.Ordinal),
+            "前缀诊断必须记录无效片段长度");
+        True(warnings[0].Contains("sha256=", StringComparison.Ordinal),
+            "前缀诊断必须记录不可逆短摘要");
+        False(warnings[0].Contains(sensitivePrefix, StringComparison.Ordinal),
+            "前缀诊断不得记录 raw 非协议输入");
+        False(warnings[0].Contains("private-prefix-token", StringComparison.Ordinal),
+            "前缀诊断不得泄露敏感词");
+    }
+
+    private static async Task JsonLineRpcRecoversValidMessageAfterNonJsonMiddleSegmentAsync()
+    {
+        var notifications = new List<string>();
+        var warnings = new List<string>();
+        await using var connection = new JsonLineRpcConnection(
+            new StringReader(string.Empty),
+            new StringWriter(),
+            TimeSpan.FromSeconds(3));
+        connection.NotificationReceived += (_, parameters) =>
+            notifications.Add(parameters.GetProperty("text").GetString() ?? string.Empty);
+        connection.ProtocolWarning += warnings.Add;
+
+        var first = JsonSerializer.Serialize(new
+        {
+            method = "item/agentMessage/delta",
+            @params = new { text = "第一条合法消息" }
+        });
+        var second = JsonSerializer.Serialize(new
+        {
+            method = "item/completed",
+            @params = new { text = "第二条合法消息" }
+        });
+        const string sensitiveMiddle = " event: private-middle-token-must-not-be-logged ";
+        connection.ProcessLine(first + sensitiveMiddle + second);
+
+        Equal(2, notifications.Count, "中间非 JSON 片段不得吞掉前后任一完整 JSON-RPC 消息");
+        Equal("第一条合法消息", notifications[0], "中间片段前方消息顺序");
+        Equal("第二条合法消息", notifications[1], "中间片段后方消息顺序");
+        Equal(1, warnings.Count, "中间非 JSON 片段必须形成一条脱敏协议诊断");
+        True(warnings[0].Contains("processedMessages=1", StringComparison.Ordinal),
+            "中间片段诊断必须记录已成功处理的消息数量");
+        True(warnings[0].Contains("segmentBytes=", StringComparison.Ordinal),
+            "中间片段诊断必须记录无效片段长度");
+        True(warnings[0].Contains("sha256=", StringComparison.Ordinal),
+            "中间片段诊断必须记录不可逆短摘要");
+        False(warnings[0].Contains(sensitiveMiddle, StringComparison.Ordinal),
+            "中间片段诊断不得记录 raw 非协议输入");
+        False(warnings[0].Contains("private-middle-token", StringComparison.Ordinal),
+            "中间片段诊断不得泄露敏感词");
+    }
+
+    private static async Task JsonLineRpcDoesNotResynchronizeAtNestedObjectsInsideMalformedEnvelopeAsync()
+    {
+        var writer = new RecordingTextWriter();
+        var notifications = new List<string>();
+        var warnings = new List<string>();
+        await using var connection = new JsonLineRpcConnection(
+            new StringReader(string.Empty),
+            writer,
+            TimeSpan.FromSeconds(3));
+        connection.NotificationReceived += (_, parameters) =>
+            notifications.Add(parameters.GetProperty("text").GetString() ?? string.Empty);
+        connection.ProtocolWarning += warnings.Add;
+
+        var request = connection.SendRequestAsync("fixture/top-level-resynchronization", new { });
+        await WaitUntilAsync(
+            () => writer.Lines.Count == 1 && connection.PendingRequestCount == 1,
+            TimeSpan.FromSeconds(2),
+            "顶层重同步 fixture 请求没有进入 pending。");
+        using var outboundRequest = JsonDocument.Parse(writer.Lines[0]);
+        var requestId = outboundRequest.RootElement.GetProperty("id").GetInt64();
+
+        var nestedResponse = JsonSerializer.Serialize(new
+        {
+            id = requestId,
+            result = new { routed = "nested-spoof" }
+        });
+        var nestedNotification = JsonSerializer.Serialize(new
+        {
+            method = "item/completed",
+            @params = new { text = "nested-spoof" }
+        });
+        var actualResponse = JsonSerializer.Serialize(new
+        {
+            id = requestId,
+            result = new { routed = "actual-top-level" }
+        });
+        var actualNotification = JsonSerializer.Serialize(new
+        {
+            method = "item/completed",
+            @params = new { text = "actual-top-level" }
+        });
+        const string sensitiveJunk = " private-resync-token-must-not-be-logged ";
+        var malformedEnvelope =
+            "{\"broken\":true \"nestedResponse\":" + nestedResponse +
+            ",\"nestedNotification\":" + nestedNotification + "}";
+
+        connection.ProcessLine(
+            malformedEnvelope + sensitiveJunk + actualResponse + actualNotification);
+
+        var result = await request;
+        Equal("actual-top-level", result.GetProperty("routed").GetString(),
+            "损坏外层中的嵌套 response 不得被误认作顶层协议响应");
+        SequenceEqual(
+            new[] { "actual-top-level" },
+            notifications,
+            "损坏外层中的嵌套 notification 不得被派发，真正的后续顶层消息仍应恢复");
+        Equal(1, warnings.Count,
+            "损坏外层及其后方 junk 应作为一个脱敏无效片段报告");
+        True(warnings[0].Contains("recoveryOffset=", StringComparison.Ordinal),
+            "顶层重同步诊断必须记录恢复偏移");
+        True(warnings[0].Contains("sha256=", StringComparison.Ordinal),
+            "顶层重同步诊断必须保留不可逆摘要");
+        False(warnings[0].Contains(sensitiveJunk, StringComparison.Ordinal),
+            "顶层重同步诊断不得记录 raw 非协议输入");
+        False(warnings[0].Contains("private-resync-token", StringComparison.Ordinal),
+            "顶层重同步诊断不得泄露敏感词");
+    }
+
+    private static async Task JsonLineRpcDispatchesValidMessageAndRedactsNonJsonTailAsync()
+    {
+        var notifications = new List<string>();
+        var warnings = new List<string>();
+        await using var connection = new JsonLineRpcConnection(
+            new StringReader(string.Empty),
+            new StringWriter(),
+            TimeSpan.FromSeconds(3));
+        connection.NotificationReceived += (_, parameters) =>
+            notifications.Add(parameters.GetProperty("text").GetString() ?? string.Empty);
+        connection.ProtocolWarning += warnings.Add;
+
+        var validMessage = JsonSerializer.Serialize(new
+        {
+            method = "item/agentMessage/delta",
+            @params = new { text = "Agent 中文状态正常" }
+        });
+        const string sensitiveTail = "event: private-tail-token-must-not-be-logged";
+        connection.ProcessLine(validMessage + sensitiveTail);
+
+        Equal(1, notifications.Count, "非 JSON 尾部不得阻止前方完整消息派发");
+        Equal("Agent 中文状态正常", notifications[0], "前方完整消息正文不得被尾部污染");
+        Equal(1, warnings.Count, "非 JSON 尾部必须单独形成一条协议诊断");
+        True(warnings[0].Contains("offset=", StringComparison.Ordinal), "尾部诊断应记录安全字节偏移");
+        True(warnings[0].Contains("remainingBytes=", StringComparison.Ordinal), "尾部诊断应记录剩余字节数");
+        True(warnings[0].Contains("sha256=", StringComparison.Ordinal), "尾部诊断应记录不可逆短摘要");
+        False(warnings[0].Contains(sensitiveTail, StringComparison.Ordinal), "尾部诊断不得记录 raw 尾部");
+        False(warnings[0].Contains("private-tail-token", StringComparison.Ordinal), "尾部诊断不得泄露敏感词");
+    }
+
+    private static async Task JsonLineRpcRejectsJsonScalarsWithoutTerminatingTheConnectionAsync()
+    {
+        var notificationCount = 0;
+        var warnings = new List<string>();
+        await using var connection = new JsonLineRpcConnection(
+            new StringReader(string.Empty),
+            new StringWriter(),
+            TimeSpan.FromSeconds(3));
+        connection.NotificationReceived += (_, _) => notificationCount++;
+        connection.ProtocolWarning += warnings.Add;
+
+        connection.ProcessLine("42");
+
+        Equal(0, notificationCount, "JSON 标量不得进入 Agent 通知正文");
+        Equal(1, warnings.Count, "JSON 标量应产生可诊断的协议警告");
+        True(warnings[0].Contains("kind=Number", StringComparison.Ordinal), "协议警告应标识非对象 JSON 类型");
+    }
+
+    private static async Task JsonLineRpcKeepsFullyNonJsonInputOutOfAgentNotificationsAsync()
+    {
+        var notificationCount = 0;
+        var warnings = new List<string>();
+        await using var connection = new JsonLineRpcConnection(
+            new StringReader(string.Empty),
+            new StringWriter(),
+            TimeSpan.FromSeconds(3));
+        connection.NotificationReceived += (_, _) => notificationCount++;
+        connection.ProtocolWarning += warnings.Add;
+
+        const string sensitiveLine = "event: fully-private-protocol-line";
+        connection.ProcessLine(sensitiveLine);
+
+        Equal(0, notificationCount, "完全非 JSON 输入不得进入 Agent 通知正文");
+        Equal(1, warnings.Count, "完全非 JSON 输入应产生一条协议诊断");
+        True(warnings[0].Contains("remainingBytes=", StringComparison.Ordinal), "协议诊断应记录剩余字节数");
+        True(warnings[0].Contains("sha256=", StringComparison.Ordinal), "协议诊断应记录不可逆摘要");
+        False(warnings[0].Contains(sensitiveLine, StringComparison.Ordinal), "协议诊断不得记录 raw 非 JSON 输入");
+        False(warnings[0].Contains("fully-private", StringComparison.Ordinal), "协议诊断不得泄露敏感词");
+    }
+
+    private static async Task JsonLineRpcBoundsAndSummarizesRepeatedInvalidInputAsync()
+    {
+        var warnings = new List<string>();
+        var connection = new JsonLineRpcConnection(
+            new StringReader(string.Empty),
+            new StringWriter(),
+            TimeSpan.FromSeconds(3));
+        connection.ProtocolWarning += warnings.Add;
+
+        const string sensitiveLine = "event: repeated-private-protocol-line";
+        for (var index = 0; index < 1_000; index++)
+        {
+            connection.ProcessLine(sensitiveLine);
+        }
+
+        await connection.DisposeAsync();
+
+        True(warnings.Count <= 5,
+            "重复非协议输入必须指数限频，不能逐条排队到 UI 与同步日志");
+        True(warnings.Any(message =>
+                message.Contains("total=1000", StringComparison.Ordinal) &&
+                message.Contains("suppressed=999", StringComparison.Ordinal)),
+            "重复非协议输入必须回传累计与抑制数量");
+        False(warnings.Any(message => message.Contains(sensitiveLine, StringComparison.Ordinal)),
+            "限频样本和汇总都不得记录 raw 非协议输入");
+        False(warnings.Any(message => message.Contains("repeated-private", StringComparison.Ordinal)),
+            "限频诊断不得泄露重复输入中的敏感词");
     }
 
     private static async Task JsonLineRpcFailureFailsEveryPendingRequestAsync()
@@ -192,6 +481,8 @@ internal static class AgentRuntimeTransportSmokeTests
         {
             ExecutablePath = "codex-fixture",
             WorkingDirectory = Environment.CurrentDirectory,
+            SandboxMode = "workspace-write",
+            AllowSandboxNetworkAccess = true,
             RequestTimeout = TimeSpan.FromSeconds(3)
         });
 
@@ -204,9 +495,15 @@ internal static class AgentRuntimeTransportSmokeTests
         Equal("0.139.0", transport.RuntimeVersion,
             "app-server 应从 initialize.userAgent 解析兼容版本");
         SequenceEqual(
-            new[] { "app-server", "--stdio" },
+            new[]
+            {
+                "app-server",
+                "--stdio",
+                "-c",
+                "sandbox_workspace_write.network_access=true"
+            },
             factory.StartInfos.Single().ArgumentList,
-            "Codex app-server 启动参数");
+            "Codex app-server 必须在 workspace-write 内显式配置 Image API 出站网络");
 
         var protocolLines = standardInput.Lines;
         using (var initializeDocument = JsonDocument.Parse(protocolLines[0]))
@@ -245,6 +542,100 @@ internal static class AgentRuntimeTransportSmokeTests
         await transport.StopAsync();
         True(process.KillCallCount > 0 && process.LastKillUsedEntireProcessTree,
             "停止 app-server 必须终止整个进程树");
+    }
+
+    private static async Task CodexAppServerFreezesWorkspaceWriteSandboxPolicyPerTurnAsync()
+    {
+        const string threadId = "thread-sandbox-policy-fixture";
+        const string turnId = "turn-sandbox-policy-fixture";
+        var configuredWorkingDirectory = Path.Combine(Environment.CurrentDirectory, "src", "..");
+        var expectedWorkingDirectory = Path.GetFullPath(configuredWorkingDirectory);
+        var standardOutput = new AsyncLineTextReader();
+        JsonElement? capturedTurnParameters = null;
+        var standardInput = new RecordingTextWriter(line =>
+        {
+            using var document = JsonDocument.Parse(line);
+            var root = document.RootElement;
+            if (!root.TryGetProperty("id", out var requestId) ||
+                !root.TryGetProperty("method", out var method))
+            {
+                return ValueTask.CompletedTask;
+            }
+
+            switch (method.GetString())
+            {
+                case "initialize":
+                    standardOutput.EnqueueLine(JsonSerializer.Serialize(new
+                    {
+                        id = requestId.GetInt64(),
+                        result = new
+                        {
+                            codexHome = expectedWorkingDirectory,
+                            platformFamily = "windows",
+                            platformOs = "windows",
+                            userAgent = "codex_app_server/0.139.0"
+                        }
+                    }));
+                    break;
+                case "thread/start":
+                    standardOutput.EnqueueLine(JsonSerializer.Serialize(new
+                    {
+                        id = requestId.GetInt64(),
+                        result = new { thread = new { id = threadId } }
+                    }));
+                    break;
+                case "turn/start":
+                    capturedTurnParameters = root.GetProperty("params").Clone();
+                    standardOutput.EnqueueLine(JsonSerializer.Serialize(new
+                    {
+                        id = requestId.GetInt64(),
+                        result = new { turn = new { id = turnId } }
+                    }));
+                    standardOutput.EnqueueLine(JsonSerializer.Serialize(new
+                    {
+                        method = "turn/completed",
+                        @params = new
+                        {
+                            threadId,
+                            turn = new { id = turnId, status = "completed" }
+                        }
+                    }));
+                    break;
+            }
+
+            return ValueTask.CompletedTask;
+        });
+        var process = new FakeAgentChildProcess(
+            4105,
+            standardInput,
+            standardOutput,
+            new StringReader(string.Empty),
+            standardOutput.Complete);
+        await using var transport = new CodexAppServerTransport(
+            new FakeAgentProcessFactory((_, _) => process));
+
+        await transport.StartAsync(new AgentSessionStartOptions
+        {
+            ExecutablePath = "codex-fixture",
+            WorkingDirectory = configuredWorkingDirectory,
+            SandboxMode = "workspace-write",
+            AllowSandboxNetworkAccess = true,
+            RequestTimeout = TimeSpan.FromSeconds(3)
+        });
+        var result = await transport.StartTurnAsync("exercise the per-turn sandbox policy fixture");
+
+        True(result.IsSuccess, "带显式 sandboxPolicy 的 App Server Turn 应正常完成");
+        var turnParameters = capturedTurnParameters ??
+                             throw new InvalidOperationException("turn/start 必须发送 params。");
+        var sandboxPolicy = turnParameters.GetProperty("sandboxPolicy");
+        Equal("workspaceWrite", sandboxPolicy.GetProperty("type").GetString(),
+            "turn/start sandboxPolicy.type");
+        var writableRoots = sandboxPolicy.GetProperty("writableRoots").EnumerateArray().ToArray();
+        Equal(1, writableRoots.Length, "turn/start sandboxPolicy 只应开放当前项目工作目录");
+        Equal(expectedWorkingDirectory, writableRoots[0].GetString(),
+            "turn/start writableRoots 必须使用规范化工作目录");
+        True(sandboxPolicy.GetProperty("networkAccess").GetBoolean(),
+            "turn/start 必须显式冻结 Image API 出站网络权限");
     }
 
     private static async Task CodexAppServerScopesGAssetForgeMcpApprovalsToTheActiveBatchAsync()
@@ -537,6 +928,114 @@ internal static class AgentRuntimeTransportSmokeTests
             "日志脱敏不得保留 Bearer Token");
     }
 
+    private static void CodexProcessLaunchScopesImageApiNetworkToWorkspaceWriteSandbox()
+    {
+        var options = new AgentSessionStartOptions
+        {
+            ExecutablePath = "codex-fixture",
+            WorkingDirectory = Environment.CurrentDirectory,
+            SandboxMode = "workspace-write",
+            ApprovalPolicy = "never",
+            AllowSandboxNetworkAccess = true
+        };
+        var startInfo = CodexProcessLaunch.CreateBaseStartInfo(options);
+        CodexProcessLaunch.AddSandboxConfiguration(startInfo, options);
+
+        SequenceEqual(
+            new[] { "-c", "sandbox_workspace_write.network_access=true" },
+            startInfo.ArgumentList,
+            "Image API 网络权限必须以 workspace-write 精确配置注入");
+
+        var unrestricted = options with { SandboxMode = "danger-full-access" };
+        var unrestrictedStartInfo = CodexProcessLaunch.CreateBaseStartInfo(unrestricted);
+        Throws<InvalidOperationException>(
+            () => CodexProcessLaunch.AddSandboxConfiguration(unrestrictedStartInfo, unrestricted),
+            "GAssetForge 不得为图片 API 兜底隐式扩大到 danger-full-access");
+    }
+
+    private static void CodexProcessLaunchUsesUtf8NoBomForProtocolStreams()
+    {
+        var options = CreateOptions(
+            new Uri("http://127.0.0.1:43119/mcp"),
+            $"runtime-smoke-{Guid.NewGuid():N}");
+        var startInfo = CodexProcessLaunch.CreateBaseStartInfo(options);
+
+        AssertUtf8NoBom(startInfo.StandardInputEncoding, "Codex stdin");
+        AssertUtf8NoBom(startInfo.StandardOutputEncoding, "Codex stdout");
+        AssertUtf8NoBom(startInfo.StandardErrorEncoding, "Codex stderr");
+
+        var outputOnlyProbe = new ProcessStartInfo
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        CodexProcessLaunch.ConfigureUtf8Redirection(outputOnlyProbe);
+        Equal<Encoding?>(null, outputOnlyProbe.StandardInputEncoding,
+            "未重定向 stdin 的版本探针不应配置输入编码");
+        AssertUtf8NoBom(outputOnlyProbe.StandardOutputEncoding, "Codex --version stdout");
+        AssertUtf8NoBom(outputOnlyProbe.StandardErrorEncoding, "Codex --version stderr");
+    }
+
+    private static void AssertUtf8NoBom(Encoding? encoding, string channel)
+    {
+        True(encoding is not null, $"{channel} 必须显式声明 UTF-8，不能继承 Windows 控制台代码页");
+        Equal(Encoding.UTF8.CodePage, encoding!.CodePage, $"{channel} 编码代码页");
+        Equal(0, encoding.GetPreamble().Length, $"{channel} 不得写入 UTF-8 BOM");
+    }
+
+    private static async Task CodexProcessLaunchRoundTripsUtf8ThroughRealChildAsync()
+    {
+        var powershellPath = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.System),
+            "WindowsPowerShell",
+            "v1.0",
+            "powershell.exe");
+        True(File.Exists(powershellPath), "Windows PowerShell 子进程 fixture 必须存在");
+        const string script = """
+            $utf8 = [System.Text.UTF8Encoding]::new($false)
+            [Console]::InputEncoding = $utf8
+            [Console]::OutputEncoding = $utf8
+            [Console]::Error.WriteLine('子进程错误流中文')
+            $inputLine = [Console]::In.ReadLine()
+            $payload = @{ method = 'fixture/status'; params = @{ text = ('子进程回显：' + $inputLine) } }
+            [Console]::Out.WriteLine(($payload | ConvertTo-Json -Compress))
+            """;
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = powershellPath,
+            UseShellExecute = false,
+            CreateNoWindow = true,
+            RedirectStandardInput = true,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true
+        };
+        startInfo.ArgumentList.Add("-NoLogo");
+        startInfo.ArgumentList.Add("-NoProfile");
+        startInfo.ArgumentList.Add("-NonInteractive");
+        startInfo.ArgumentList.Add("-Command");
+        startInfo.ArgumentList.Add(script);
+        CodexProcessLaunch.ConfigureUtf8Redirection(startInfo);
+
+        using var process = Process.Start(startInfo) ??
+                            throw new InvalidOperationException("无法启动 UTF-8 子进程 fixture。");
+        const string input = "正在生成像素素材";
+        await process.StandardInput.WriteLineAsync(input);
+        process.StandardInput.Close();
+        var standardOutput = process.StandardOutput.ReadToEndAsync();
+        var standardError = process.StandardError.ReadToEndAsync();
+        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        var output = await standardOutput;
+        var error = await standardError;
+
+        Equal(0, process.ExitCode, "UTF-8 子进程 fixture 退出码");
+        using var document = JsonDocument.Parse(output);
+        Equal("子进程回显：正在生成像素素材",
+            document.RootElement.GetProperty("params").GetProperty("text").GetString(),
+            "真实 stdin/stdout 管道中的中文 JSON 不得损坏");
+        True(error.Contains("子进程错误流中文", StringComparison.Ordinal),
+            "真实 stderr 管道中的中文不得损坏");
+    }
+
     private static async Task CodexAppServerRejectsPreBaselineVersionAsync()
     {
         var standardOutput = new AsyncLineTextReader();
@@ -586,7 +1085,7 @@ internal static class AgentRuntimeTransportSmokeTests
             "拒绝旧版 app-server 时必须清理进程树");
     }
 
-    private static void CodexExecutableResolverPrefersAppDataNpmShimBeforeWindowsApps()
+    private static void CodexExecutableResolverPrefersAppDataNpmShimBeforeOfficialInstallAndWindowsApps()
     {
         var root = Path.Combine(
             Path.GetTempPath(),
@@ -596,6 +1095,13 @@ internal static class AgentRuntimeTransportSmokeTests
         var applicationDirectory = Path.Combine(root, "distribution");
         var applicationDataDirectory = Path.Combine(root, "AppData", "Roaming");
         var npmDirectory = Path.Combine(applicationDataDirectory, "npm");
+        var localApplicationDataDirectory = Path.Combine(root, "AppData", "Local");
+        var officialBinDirectory = Path.Combine(
+            localApplicationDataDirectory,
+            "Programs",
+            "OpenAI",
+            "Codex",
+            "bin");
         var windowsAppsDirectory = Path.Combine(
             root,
             "Program Files",
@@ -607,9 +1113,11 @@ internal static class AgentRuntimeTransportSmokeTests
         {
             Directory.CreateDirectory(applicationDirectory);
             Directory.CreateDirectory(npmDirectory);
+            Directory.CreateDirectory(officialBinDirectory);
             Directory.CreateDirectory(windowsAppsDirectory);
             var expectedShimPath = Path.Combine(npmDirectory, "codex.cmd");
             File.WriteAllText(expectedShimPath, "@echo off\r\nexit /b 0\r\n");
+            File.WriteAllBytes(Path.Combine(officialBinDirectory, "codex.exe"), [0x03]);
             var windowsAppsExecutable = Path.Combine(windowsAppsDirectory, "codex.exe");
             File.WriteAllBytes(windowsAppsExecutable, [0x01]);
             File.WriteAllBytes(
@@ -629,14 +1137,138 @@ internal static class AgentRuntimeTransportSmokeTests
                         expectedShimPath,
                         StringComparison.OrdinalIgnoreCase);
                 },
-                applicationDataDirectory);
+                applicationDataDirectory,
+                localApplicationDataDirectory);
 
             Equal(Path.GetFullPath(expectedShimPath), resolution.CodexExecutablePath,
-                "%APPDATA%\\npm 中的 codex.cmd 必须先于仅在 PATH 中出现的 WindowsApps exe");
+                "%APPDATA%\\npm 中的 codex.cmd 必须先于 LOCALAPPDATA 官方安装和 WindowsApps exe");
             SequenceEqual(
                 new[] { Path.GetFullPath(expectedShimPath) },
                 probedCandidates,
-                "命中 AppData npm shim 后不应再探测 WindowsApps 候选");
+                "命中 AppData npm shim 后不应再探测 LOCALAPPDATA 或 WindowsApps 候选");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    private static void CodexProcessLaunchUsesOptionsPathForAutomaticRuntimeResolution()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "GAssetForge.SmokeTests",
+            "codex-runtime-options-path",
+            Guid.NewGuid().ToString("N"));
+        var applicationDirectory = Path.Combine(root, "distribution");
+        var applicationDataDirectory = Path.Combine(root, "empty-appdata");
+        var localApplicationDataDirectory = Path.Combine(root, "empty-localappdata");
+        var freshPathDirectory = Path.Combine(root, "fresh-path");
+        try
+        {
+            Directory.CreateDirectory(applicationDirectory);
+            Directory.CreateDirectory(applicationDataDirectory);
+            Directory.CreateDirectory(localApplicationDataDirectory);
+            Directory.CreateDirectory(freshPathDirectory);
+            var expectedShimPath = Path.Combine(freshPathDirectory, "codex.cmd");
+            const string dependencyName = "gassetforge-codex-runtime-dependency.cmd";
+            File.WriteAllText(
+                Path.Combine(freshPathDirectory, dependencyName),
+                "@echo off\r\nexit /b 0\r\n");
+            File.WriteAllText(
+                expectedShimPath,
+                $"@echo off\r\ncall {dependencyName}\r\nif errorlevel 1 exit /b 23\r\nexit /b 0\r\n");
+            var options = new AgentSessionStartOptions
+            {
+                ExecutablePath = "codex",
+                WorkingDirectory = Environment.CurrentDirectory,
+                EnvironmentVariables = new Dictionary<string, string?>(
+                    StringComparer.OrdinalIgnoreCase)
+                {
+                    ["PATH"] = freshPathDirectory
+                }
+            };
+
+            var startInfo = CodexProcessLaunch.CreateBaseStartInfo(
+                options,
+                applicationDirectory,
+                applicationDataDirectory: applicationDataDirectory,
+                localApplicationDataDirectory: localApplicationDataDirectory);
+
+            Equal(
+                Environment.GetEnvironmentVariable("ComSpec") ??
+                Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe"),
+                startInfo.FileName,
+                "自动解析必须使用本次 Agent 启动配置中的 fresh PATH");
+            SequenceEqual(
+                new[] { "/d", "/s", "/c", "call", Path.GetFullPath(expectedShimPath) },
+                startInfo.ArgumentList,
+                "fresh PATH 中的 codex.cmd 必须成为实际启动目标");
+            Equal(freshPathDirectory, startInfo.Environment["PATH"],
+                "解析成功后同一 fresh PATH 必须继续传给 Codex 子进程");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    private static void CodexExecutableResolverDiscoversOfficialLocalAppDataRuntimeWithoutPath()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "GAssetForge.SmokeTests",
+            "codex-runtime-localappdata",
+            Guid.NewGuid().ToString("N"));
+        var applicationDirectory = Path.Combine(root, "distribution");
+        var applicationDataDirectory = Path.Combine(root, "empty-appdata");
+        var localApplicationDataDirectory = Path.Combine(root, "LocalAppData");
+        var officialBinDirectory = Path.Combine(
+            localApplicationDataDirectory,
+            "Programs",
+            "OpenAI",
+            "Codex",
+            "bin");
+        try
+        {
+            Directory.CreateDirectory(applicationDirectory);
+            Directory.CreateDirectory(applicationDataDirectory);
+            Directory.CreateDirectory(officialBinDirectory);
+            var expectedExecutablePath = Path.Combine(officialBinDirectory, "codex.exe");
+            File.WriteAllBytes(expectedExecutablePath, [0x01]);
+            var probedCandidates = new List<string>();
+
+            var resolution = CodexExecutableResolver.ResolveWithDiagnostics(
+                "codex",
+                applicationDirectory,
+                pathEnvironment: string.Empty,
+                launchProbe: candidate =>
+                {
+                    probedCandidates.Add(candidate.CodexExecutablePath);
+                    return CodexExecutableProbeResult.Successful("fixture 官方安装可启动");
+                },
+                applicationDataDirectory: applicationDataDirectory,
+                localApplicationDataDirectory: localApplicationDataDirectory);
+
+            True(resolution.IsSuccess,
+                "PATH 为空时仍应直接检测 LOCALAPPDATA 下的官方 Codex 安装");
+            Equal(Path.GetFullPath(expectedExecutablePath), resolution.Launch!.CodexExecutablePath,
+                "LOCALAPPDATA 官方安装路径");
+            SequenceEqual(
+                new[] { Path.GetFullPath(expectedExecutablePath) },
+                probedCandidates,
+                "无 PATH 时只应探测注入 LOCALAPPDATA 中的官方候选");
+            var diagnostic = resolution.Candidates.Single();
+            Equal(CodexExecutableCandidateStatus.Accepted, diagnostic.Status,
+                "LOCALAPPDATA 官方安装候选状态");
+            True(diagnostic.Source.Contains("LOCALAPPDATA", StringComparison.OrdinalIgnoreCase),
+                "候选诊断必须明确官方安装来源");
         }
         finally
         {
@@ -684,7 +1316,8 @@ internal static class AgentRuntimeTransportSmokeTests
                     probeCount++;
                     return CodexExecutableProbeResult.Successful("fixture 可启动");
                 },
-                applicationDataDirectory);
+                applicationDataDirectory,
+                Path.Combine(root, "empty-localappdata"));
 
             False(resolution.IsSuccess,
                 "WindowsApps 包内 codex.exe 不得被当作可用 Runtime");
@@ -800,7 +1433,8 @@ internal static class AgentRuntimeTransportSmokeTests
                     "codex",
                     applicationDirectory,
                     pathDirectory,
-                    applicationDataDirectory: applicationDataDirectory);
+                    applicationDataDirectory: applicationDataDirectory,
+                    localApplicationDataDirectory: Path.Combine(root, "empty-localappdata"));
             }
             catch (CodexExecutableResolutionException exception)
             {
@@ -908,7 +1542,8 @@ internal static class AgentRuntimeTransportSmokeTests
                     candidate.CodexExecutablePath,
                     expectedShimPath,
                     StringComparison.OrdinalIgnoreCase),
-                Path.Combine(root, "empty-appdata"));
+                Path.Combine(root, "empty-appdata"),
+                Path.Combine(root, "empty-localappdata"));
 
             Equal(Path.GetFullPath(expectedShimPath), resolution.CodexExecutablePath,
                 "PATH 中可启动的 codex.cmd 应覆盖不可直接启动的打包 Runtime");
@@ -972,7 +1607,8 @@ internal static class AgentRuntimeTransportSmokeTests
                         usableExecutable,
                         StringComparison.OrdinalIgnoreCase);
                 },
-                Path.Combine(root, "empty-appdata"));
+                Path.Combine(root, "empty-appdata"),
+                Path.Combine(root, "empty-localappdata"));
 
             Equal(Path.GetFullPath(usableExecutable), resolution.CodexExecutablePath,
                 "启动探测失败的完整 Runtime 必须被跳过");
@@ -1015,7 +1651,8 @@ internal static class AgentRuntimeTransportSmokeTests
                 },
                 applicationDirectory,
                 legacyDirectory,
-                Path.Combine(root, "empty-appdata"));
+                Path.Combine(root, "empty-appdata"),
+                Path.Combine(root, "empty-localappdata"));
 
             Equal(
                 Environment.GetEnvironmentVariable("ComSpec") ??
@@ -1064,7 +1701,8 @@ internal static class AgentRuntimeTransportSmokeTests
                     },
                     applicationDirectory,
                     pathEnvironment: string.Empty,
-                    applicationDataDirectory: Path.Combine(root, "empty-appdata"));
+                    applicationDataDirectory: Path.Combine(root, "empty-appdata"),
+                    localApplicationDataDirectory: Path.Combine(root, "empty-localappdata"));
             }
             catch (InvalidOperationException exception)
             {
@@ -1130,6 +1768,7 @@ internal static class AgentRuntimeTransportSmokeTests
             Model = "gpt-runtime-fixture",
             SandboxMode = "workspace-write",
             ApprovalPolicy = "never",
+            AllowSandboxNetworkAccess = true,
             SkipGitRepositoryCheck = true
         };
         await transport.StartAsync(options);
@@ -1156,6 +1795,7 @@ internal static class AgentRuntimeTransportSmokeTests
         True(resumedResult.IsSuccess, "Codex exec 恢复 Turn 应完成");
 
         var approvalConfig = $"approval_policy={CodexProcessLaunch.TomlString(options.ApprovalPolicy)}";
+        const string networkConfig = "sandbox_workspace_write.network_access=true";
         var urlConfig = $"mcp_servers.gasset_forge.url={CodexProcessLaunch.TomlString(endpoint.AbsoluteUri)}";
         var tokenVariableConfig =
             $"mcp_servers.gasset_forge.bearer_token_env_var={CodexProcessLaunch.TomlString(TestTokenVariable)}";
@@ -1175,6 +1815,8 @@ internal static class AgentRuntimeTransportSmokeTests
                 "workspace-write",
                 "-c",
                 approvalConfig,
+                "-c",
+                networkConfig,
                 "-c",
                 urlConfig,
                 "-c",
@@ -1200,6 +1842,8 @@ internal static class AgentRuntimeTransportSmokeTests
                 "gpt-runtime-fixture",
                 "-c",
                 approvalConfig,
+                "-c",
+                networkConfig,
                 "-c",
                 urlConfig,
                 "-c",
@@ -1230,6 +1874,121 @@ internal static class AgentRuntimeTransportSmokeTests
         Equal("resume the fixture task",
             ((RecordingTextWriter)factory.Processes[1].StandardInput).WrittenText,
             "Codex exec resume prompt 应从 stdin 输入");
+    }
+
+    private static async Task CodexExecAcceptsConcatenatedJsonAndRedactsInvalidTailAsync()
+    {
+        var threadStarted = JsonSerializer.Serialize(new
+        {
+            type = "thread.started",
+            thread_id = "thread-concatenated-exec"
+        });
+        var turnStarted = JsonSerializer.Serialize(new
+        {
+            type = "turn.started",
+            turn_id = "turn-concatenated-exec"
+        });
+        var turnCompleted = JsonSerializer.Serialize(new { type = "turn.completed" });
+        const string sensitiveTail = "event: exec-private-tail-must-not-be-logged";
+        var output = string.Concat(
+            threadStarted,
+            " \t ",
+            turnStarted,
+            turnCompleted,
+            sensitiveTail,
+            Environment.NewLine);
+        var factory = new FakeAgentProcessFactory((_, _) => FakeAgentChildProcess.Exited(
+            id: 4250,
+            new RecordingTextWriter(),
+            new StringReader(output),
+            exitCode: 0));
+        await using var transport = new CodexExecTransport(factory);
+        var notifications = new List<string>();
+        var logs = new List<string>();
+        transport.NotificationReceived += (_, args) => notifications.Add(args.Method);
+        transport.LogReceived += (_, args) => logs.Add(args.Message);
+        await transport.StartAsync(new AgentSessionStartOptions
+        {
+            ExecutablePath = "codex-fixture",
+            WorkingDirectory = Environment.CurrentDirectory,
+            RequestTimeout = TimeSpan.FromSeconds(3)
+        });
+
+        var result = await transport.StartTurnAsync("parse concatenated exec fixture");
+
+        Equal("thread-concatenated-exec", result.ThreadId,
+            "Codex exec 必须保留同一物理行第一条 JSON 消息");
+        Equal("turn-concatenated-exec", result.TurnId,
+            "Codex exec 必须保留同一物理行后续 JSON 消息");
+        True(result.IsSuccess, "合法 JSON 后的非协议尾部不得破坏已完成 Turn");
+        SequenceEqual(
+            new[] { "thread.started", "turn.started", "turn.completed" },
+            notifications,
+            "非协议尾部不得进入 Agent 正文或阻止前方 JSON 事件派发");
+        True(logs.Any(message =>
+                message.Contains("sha256=", StringComparison.Ordinal) &&
+                message.Contains("remainingBytes=", StringComparison.Ordinal)),
+            "Codex exec 非协议尾部应形成脱敏诊断");
+        False(logs.Any(message => message.Contains(sensitiveTail, StringComparison.Ordinal)),
+            "Codex exec 日志不得记录 raw 非协议尾部");
+        False(logs.Any(message => message.Contains("exec-private-tail", StringComparison.Ordinal)),
+            "Codex exec 日志不得泄露尾部敏感词");
+    }
+
+    private static async Task CodexExecBoundsAndSummarizesRepeatedInvalidInputAsync()
+    {
+        const string sensitiveLine = "event: repeated-exec-private-protocol-line";
+        var outputLines = new List<string>
+        {
+            JsonSerializer.Serialize(new
+            {
+                type = "thread.started",
+                thread_id = "thread-bounded-exec"
+            }),
+            JsonSerializer.Serialize(new
+            {
+                type = "turn.started",
+                turn_id = "turn-bounded-exec"
+            })
+        };
+        outputLines.AddRange(Enumerable.Repeat(sensitiveLine, 1_000));
+        outputLines.Add(JsonSerializer.Serialize(new { type = "turn.completed" }));
+        var output = string.Join(Environment.NewLine, outputLines) + Environment.NewLine;
+        var factory = new FakeAgentProcessFactory((_, _) => FakeAgentChildProcess.Exited(
+            id: 4260,
+            new RecordingTextWriter(),
+            new StringReader(output),
+            exitCode: 0));
+        await using var transport = new CodexExecTransport(factory);
+        var logs = new List<string>();
+        transport.LogReceived += (_, args) => logs.Add(args.Message);
+        await transport.StartAsync(new AgentSessionStartOptions
+        {
+            ExecutablePath = "codex-fixture",
+            WorkingDirectory = Environment.CurrentDirectory,
+            RequestTimeout = TimeSpan.FromSeconds(3)
+        });
+
+        var result = await transport.StartTurnAsync("bound repeated exec diagnostics");
+        var protocolWarnings = logs
+            .Where(message => message.Contains("非协议", StringComparison.Ordinal))
+            .ToArray();
+
+        Equal("thread-bounded-exec", result.ThreadId,
+            "重复非协议行不得阻止 Codex exec 线程事件");
+        Equal("turn-bounded-exec", result.TurnId,
+            "重复非协议行不得阻止 Codex exec Turn 事件");
+        True(result.IsSuccess, "重复非协议行不得破坏后续完成事件");
+        True(protocolWarnings.Length <= 5,
+            "Codex exec 重复非协议行必须指数限频");
+        True(protocolWarnings.Any(message =>
+                message.Contains("total=1000", StringComparison.Ordinal) &&
+                message.Contains("suppressed=999", StringComparison.Ordinal)),
+            "Codex exec 必须汇总重复非协议行数量");
+        False(protocolWarnings.Any(message => message.Contains(sensitiveLine, StringComparison.Ordinal)),
+            "Codex exec 限频日志不得记录 raw 输入");
+        False(protocolWarnings.Any(message => message.Contains("repeated-exec-private", StringComparison.Ordinal)),
+            "Codex exec 限频日志不得泄露敏感词");
     }
 
     private static async Task CodexExecCancellationKillsTheEntireProcessTreeAsync()
@@ -1303,6 +2062,27 @@ internal static class AgentRuntimeTransportSmokeTests
         {
             throw new InvalidOperationException(message);
         }
+    }
+
+    private static TException Throws<TException>(Action action, string message)
+        where TException : Exception
+    {
+        try
+        {
+            action();
+        }
+        catch (TException exception)
+        {
+            return exception;
+        }
+        catch (Exception exception)
+        {
+            throw new InvalidOperationException(
+                $"{message}：预期 {typeof(TException).Name}，实际 {exception.GetType().Name}。",
+                exception);
+        }
+
+        throw new InvalidOperationException($"{message}：没有抛出 {typeof(TException).Name}。");
     }
 
     private static async Task<TException> ThrowsAsync<TException>(

@@ -291,7 +291,7 @@
                                     Content="重新检测" />
                         </WrapPanel>
                         <TextBlock Style="{StaticResource MutedTextStyle}"
-                                   Text="自动检测会优先检查 %APPDATA%\npm 下的官方 shim；显式路径支持 .cmd、.bat 与 .exe。" />
+                                   Text="自动检测会依次检查 %APPDATA%\npm shim、%LOCALAPPDATA% 官方 standalone、PATH 与应用目录；显式路径支持 .cmd、.bat 与 .exe。" />
                         <Expander x:Name="CodexRuntimeDiagnosticsExpander"
                                   Margin="0,9,0,0"
                                   Header="候选路径与失败原因"

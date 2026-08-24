@@ -739,7 +739,9 @@ public sealed class ShellViewModel : ObservableObject
     {
         var coordinator = new GenerationBatchDispatchCoordinator(
             AgentConnection.RunTurnAsync,
-            _generationTaskStore);
+            _generationTaskStore,
+            new ImageDeliveryPreflight(
+                sandboxNetworkAccessConfiguredProvider: () => true));
         coordinator.DispatchProgressChanged += OnAgentDispatchProgressChanged;
         coordinator.DispatchCompleted += OnAgentDispatchCompleted;
         return coordinator;

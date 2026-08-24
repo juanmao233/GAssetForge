@@ -175,6 +175,14 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
             }
 
             await StopTransportAsync(CancellationToken.None).ConfigureAwait(false);
+            var environmentVariables = new Dictionary<string, string?>(
+                StringComparer.OrdinalIgnoreCase);
+            var freshPath = ProcessEnvironmentSnapshot.BuildFreshPathEnvironment();
+            if (!string.IsNullOrWhiteSpace(freshPath))
+            {
+                environmentVariables["PATH"] = freshPath;
+            }
+
             var options = new AgentSessionStartOptions
             {
                 ExecutablePath = CodexExecutablePath,
@@ -182,8 +190,10 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
                 McpEndpoint = mcpServer.Endpoint,
                 McpBearerTokenEnvironmentVariableName = mcpServer.TokenEnvironmentVariableName,
                 McpBearerToken = mcpServer.TokenEnvironmentVariableValue,
+                EnvironmentVariables = environmentVariables,
                 SandboxMode = "workspace-write",
-                ApprovalPolicy = "never"
+                ApprovalPolicy = "never",
+                AllowSandboxNetworkAccess = true
             };
 
             LastError = null;

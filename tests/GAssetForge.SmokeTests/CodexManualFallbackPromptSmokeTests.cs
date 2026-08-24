@@ -76,6 +76,16 @@ internal static class CodexManualFallbackPromptSmokeTests
                 "人工接力必须把模型源文件交给客户端提交工具");
             Contains(batchPrompt, "sourcePath=<模型返回的绝对路径>",
                 "人工接力必须直接提交真实图像模型返回的本地文件");
+            Contains(batchPrompt, "recommendedSourcePath",
+                "人工接力必须使用 claim 返回的项目内推荐源路径");
+            Contains(batchPrompt, "只出现可视图片但没有新本地路径不算完成",
+                "人工接力不得把无本地路径的内置可视结果当成可交付产物");
+            Contains(batchPrompt, "严禁扫描、按时间挑选或复用 `~/.codex/generated_images`",
+                "人工接力不得从 Codex 历史图片目录猜测本次产物");
+            Contains(batchPrompt, "scripts/image_gen.py",
+                "人工接力必须包含官方 ImageGen CLI 直接落盘兜底");
+            Contains(batchPrompt, "--out <recommendedSourcePath>",
+                "人工接力 CLI 兜底必须写入推荐源路径");
             Contains(batchPrompt, "GAssetForge 会自行把原图导入项目运行工作区",
                 "人工接力必须把项目落盘和确定性后处理交给客户端");
             Contains(batchPrompt, "Agent 不得自行建目录、搬运、缩放、抠图",
@@ -115,7 +125,7 @@ internal static class CodexManualFallbackPromptSmokeTests
                 "批次提示缺少真实图像生成步骤");
             var submitIndex = RequiredIndex(
                 executionSegment,
-                "4. 图像模型返回本地文件后，直接调用 submit_generation_output",
+                "4. 只有确认本次 sourcePath 文件存在",
                 "批次提示缺少单图源文件提交步骤");
             var failIndex = RequiredIndex(
                 executionSegment,

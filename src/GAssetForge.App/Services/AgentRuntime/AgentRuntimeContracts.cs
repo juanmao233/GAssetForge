@@ -72,6 +72,8 @@ public sealed record AgentSessionStartOptions
 
     public string ApprovalPolicy { get; init; } = "never";
 
+    public bool AllowSandboxNetworkAccess { get; init; }
+
     public string? DeveloperInstructions { get; init; }
 
     public TimeSpan RequestTimeout { get; init; } = TimeSpan.FromSeconds(30);

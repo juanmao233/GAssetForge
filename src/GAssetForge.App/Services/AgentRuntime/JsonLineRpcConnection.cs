@@ -15,6 +15,7 @@ internal sealed class JsonLineRpcConnection : IAsyncDisposable
     private readonly SemaphoreSlim _writeGate = new(1, 1);
     private readonly ConcurrentDictionary<long, TaskCompletionSource<JsonElement>> _pending = new();
     private readonly CancellationTokenSource _disposeCancellation = new();
+    private readonly BoundedProtocolWarningReporter _framingWarnings;
     private long _nextRequestId;
     private int _failed;
 
@@ -28,6 +29,9 @@ internal sealed class JsonLineRpcConnection : IAsyncDisposable
         _requestTimeout = requestTimeout > TimeSpan.Zero
             ? requestTimeout
             : throw new ArgumentOutOfRangeException(nameof(requestTimeout));
+        _framingWarnings = new BoundedProtocolWarningReporter(
+            "Agent JSONL",
+            message => ProtocolWarning?.Invoke(message));
     }
 
     internal event Action<string, JsonElement>? NotificationReceived;
@@ -150,69 +154,72 @@ internal sealed class JsonLineRpcConnection : IAsyncDisposable
             Fail(exception);
             throw;
         }
+        finally
+        {
+            _framingWarnings.Flush();
+        }
     }
 
     internal void ProcessLine(string line)
     {
-        try
+        SafeJsonLineFramer.ProcessObjects(
+            line,
+            ProcessMessage,
+            _framingWarnings.Report);
+    }
+
+    private void ProcessMessage(JsonElement root)
+    {
+        var hasMethod = root.TryGetProperty("method", out var methodElement) &&
+                        methodElement.ValueKind == JsonValueKind.String;
+        var hasId = root.TryGetProperty("id", out var idElement);
+
+        if (hasMethod && hasId)
         {
-            using var document = JsonDocument.Parse(line);
-            var root = document.RootElement;
-            var hasMethod = root.TryGetProperty("method", out var methodElement) &&
-                            methodElement.ValueKind == JsonValueKind.String;
-            var hasId = root.TryGetProperty("id", out var idElement);
-
-            if (hasMethod && hasId)
-            {
-                var parameters = root.TryGetProperty("params", out var parametersElement)
-                    ? parametersElement.Clone()
-                    : EmptyObject.Clone();
-                _ = HandleServerRequestAsync(
-                    idElement.Clone(),
-                    methodElement.GetString() ?? "unknown",
-                    parameters);
-                return;
-            }
-
-            if (hasMethod)
-            {
-                var parameters = root.TryGetProperty("params", out var parametersElement)
-                    ? parametersElement.Clone()
-                    : EmptyObject.Clone();
-                NotificationReceived?.Invoke(methodElement.GetString()!, parameters);
-                return;
-            }
-
-            if (!hasId || !TryReadNumericId(idElement, out var requestId) ||
-                !_pending.TryRemove(requestId, out var completion))
-            {
-                ProtocolWarning?.Invoke("收到无法关联的 Agent JSON-RPC 响应。");
-                return;
-            }
-
-            if (root.TryGetProperty("error", out var errorElement) &&
-                errorElement.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined)
-            {
-                var code = errorElement.TryGetProperty("code", out var codeElement) &&
-                           codeElement.TryGetInt32(out var parsedCode)
-                    ? parsedCode
-                    : -1;
-                var message = errorElement.TryGetProperty("message", out var messageElement)
-                    ? messageElement.GetString() ?? "Agent JSON-RPC 请求失败。"
-                    : "Agent JSON-RPC 请求失败。";
-                completion.TrySetException(new AgentRpcException(code, message));
-                return;
-            }
-
-            var result = root.TryGetProperty("result", out var resultElement)
-                ? resultElement.Clone()
+            var parameters = root.TryGetProperty("params", out var parametersElement)
+                ? parametersElement.Clone()
                 : EmptyObject.Clone();
-            completion.TrySetResult(result);
+            _ = HandleServerRequestAsync(
+                idElement.Clone(),
+                methodElement.GetString() ?? "unknown",
+                parameters);
+            return;
         }
-        catch (JsonException exception)
+
+        if (hasMethod)
         {
-            ProtocolWarning?.Invoke($"忽略无效的 Agent JSONL：{exception.Message}");
+            var parameters = root.TryGetProperty("params", out var parametersElement)
+                ? parametersElement.Clone()
+                : EmptyObject.Clone();
+            NotificationReceived?.Invoke(methodElement.GetString()!, parameters);
+            return;
         }
+
+        if (!hasId || !TryReadNumericId(idElement, out var requestId) ||
+            !_pending.TryRemove(requestId, out var completion))
+        {
+            ProtocolWarning?.Invoke("收到无法关联的 Agent JSON-RPC 响应。");
+            return;
+        }
+
+        if (root.TryGetProperty("error", out var errorElement) &&
+            errorElement.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined)
+        {
+            var code = errorElement.TryGetProperty("code", out var codeElement) &&
+                       codeElement.TryGetInt32(out var parsedCode)
+                ? parsedCode
+                : -1;
+            var message = errorElement.TryGetProperty("message", out var messageElement)
+                ? messageElement.GetString() ?? "Agent JSON-RPC 请求失败。"
+                : "Agent JSON-RPC 请求失败。";
+            completion.TrySetException(new AgentRpcException(code, message));
+            return;
+        }
+
+        var result = root.TryGetProperty("result", out var resultElement)
+            ? resultElement.Clone()
+            : EmptyObject.Clone();
+        completion.TrySetResult(result);
     }
 
     internal void Fail(Exception exception)
@@ -345,6 +352,7 @@ internal sealed class JsonLineRpcConnection : IAsyncDisposable
 
     public ValueTask DisposeAsync()
     {
+        _framingWarnings.Flush();
         _disposeCancellation.Cancel();
         Fail(new ObjectDisposedException(nameof(JsonLineRpcConnection)));
         _disposeCancellation.Dispose();
