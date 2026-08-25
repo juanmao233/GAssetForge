@@ -27,6 +27,7 @@ public partial class MainWindow : Window
     public const string AssetGenerationContentId = "asset-generation";
     public const string BackgroundRemovalContentId = "background-removal";
     public const string ImageOutlineContentId = "image-outline";
+    public const string IconDesignContentId = "icon-design";
     public const string PixelAlignmentContentId = "pixel-grid-alignment";
     public const string BlueprintContentId = "workflow-blueprint";
     public const string AgentConnectionContentId = "mcp-agent-connection";
@@ -86,6 +87,7 @@ public partial class MainWindow : Window
         _panelHosts[AssetGenerationContentId] = CreateHost();
         _panelHosts[BackgroundRemovalContentId] = CreateHost();
         _panelHosts[ImageOutlineContentId] = CreateHost();
+        _panelHosts[IconDesignContentId] = CreateHost();
         _panelHosts[PixelAlignmentContentId] = CreateHost();
         _panelHosts[BlueprintContentId] = CreateHost();
         _panelHosts[AgentConnectionContentId] = CreateHost();
@@ -116,6 +118,10 @@ public partial class MainWindow : Window
         _sharedPanelViews[ImageOutlineContentId] = new ImageOutlineView
         {
             DataContext = _viewModel.ImageOutline
+        };
+        _sharedPanelViews[IconDesignContentId] = new IconDesignView
+        {
+            DataContext = _viewModel.IconDesign
         };
         _sharedPanelViews[PixelAlignmentContentId] = new PixelAlignmentView
         {
@@ -237,6 +243,7 @@ public partial class MainWindow : Window
         var assetGeneration = CreateAnchorable(AssetGenerationContentId);
         var backgroundRemoval = CreateAnchorable(BackgroundRemovalContentId);
         var imageOutline = CreateAnchorable(ImageOutlineContentId);
+        var iconDesign = CreateAnchorable(IconDesignContentId);
         var pixelAlignment = CreateAnchorable(PixelAlignmentContentId);
         var blueprint = CreateAnchorable(BlueprintContentId);
         var agentConnection = CreateAnchorable(AgentConnectionContentId);
@@ -273,6 +280,7 @@ public partial class MainWindow : Window
         projectPane.Children.Add(assetGeneration);
         projectPane.Children.Add(backgroundRemoval);
         projectPane.Children.Add(imageOutline);
+        projectPane.Children.Add(iconDesign);
         projectPane.Children.Add(pixelAlignment);
         projectPane.Children.Add(blueprint);
         projectPane.Children.Add(commandConsole);
@@ -346,6 +354,7 @@ public partial class MainWindow : Window
             AssetGenerationContentId => (1120d, 780d),
             BackgroundRemovalContentId => (1180d, 760d),
             ImageOutlineContentId => (1180d, 760d),
+            IconDesignContentId => (1280d, 800d),
             PixelAlignmentContentId => (1180d, 760d),
             BlueprintContentId => (1180d, 760d),
             AgentConnectionContentId => (860d, 560d),
@@ -603,6 +612,8 @@ public partial class MainWindow : Window
         ShowBackgroundRemovalMenuItem.IsChecked = backgroundRemoval is { IsHidden: false, IsVisible: true };
         var imageOutline = FindContent(ImageOutlineContentId) as LayoutAnchorable;
         ShowImageOutlineMenuItem.IsChecked = imageOutline is { IsHidden: false, IsVisible: true };
+        var iconDesign = FindContent(IconDesignContentId) as LayoutAnchorable;
+        ShowIconDesignMenuItem.IsChecked = iconDesign is { IsHidden: false, IsVisible: true };
         var pixelAlignment = FindContent(PixelAlignmentContentId) as LayoutAnchorable;
         ShowPixelAlignmentMenuItem.IsChecked = pixelAlignment is { IsHidden: false, IsVisible: true };
         var blueprint = FindContent(BlueprintContentId) as LayoutAnchorable;
@@ -665,6 +676,7 @@ public partial class MainWindow : Window
                 AssetGenerationContentId => AnchorableShowStrategy.Bottom,
                 BackgroundRemovalContentId => AnchorableShowStrategy.Bottom,
                 ImageOutlineContentId => AnchorableShowStrategy.Bottom,
+                IconDesignContentId => AnchorableShowStrategy.Bottom,
                 PixelAlignmentContentId => AnchorableShowStrategy.Bottom,
                 BlueprintContentId => AnchorableShowStrategy.Bottom,
                 AgentConnectionContentId => AnchorableShowStrategy.Bottom,
@@ -749,7 +761,7 @@ public partial class MainWindow : Window
             .OfType<LayoutPanel>()
             .FirstOrDefault(panel => panel.Descendents()
                 .OfType<LayoutContent>()
-                .Any(content => content.ContentId is ProjectContentId or StyleLibraryContentId or AssetGenerationContentId or BackgroundRemovalContentId or ImageOutlineContentId or PixelAlignmentContentId or BlueprintContentId or AgentConnectionContentId or CommandConsoleContentId));
+                .Any(content => content.ContentId is ProjectContentId or StyleLibraryContentId or AssetGenerationContentId or BackgroundRemovalContentId or ImageOutlineContentId or IconDesignContentId or PixelAlignmentContentId or BlueprintContentId or AgentConnectionContentId or CommandConsoleContentId));
         centerPanel ??= rootPanel.Children.Count > 1
             ? rootPanel.Children[1] as LayoutPanel
             : null;
@@ -835,7 +847,7 @@ public partial class MainWindow : Window
         }
 
         if (contentId is StyleLibraryContentId or AssetGenerationContentId or
-            BackgroundRemovalContentId or ImageOutlineContentId or PixelAlignmentContentId or AgentConnectionContentId)
+            BackgroundRemovalContentId or ImageOutlineContentId or IconDesignContentId or PixelAlignmentContentId or AgentConnectionContentId)
         {
             _activeToolContextContentId = GetWorkflowDocumentContentId(_viewModel.CurrentWorkflow);
             RefreshActiveToolPalette();
@@ -1020,6 +1032,7 @@ public partial class MainWindow : Window
         AssetGenerationContentId => "素材生成",
         BackgroundRemovalContentId => "背景剔除工具",
         ImageOutlineContentId => "图片描边工具",
+        IconDesignContentId => "Icon 图标制作",
         PixelAlignmentContentId => "像素点对齐工具",
         BlueprintContentId => "蓝图窗口",
         AgentConnectionContentId => "MCP Agent 接入",
@@ -1028,7 +1041,7 @@ public partial class MainWindow : Window
     };
 
     private static bool IsKnownPanel(string? contentId) => contentId is
-        ToolsContentId or PropertiesContentId or LayersContentId or ProjectContentId or StyleLibraryContentId or AssetGenerationContentId or BackgroundRemovalContentId or ImageOutlineContentId or PixelAlignmentContentId or BlueprintContentId or AgentConnectionContentId or CommandConsoleContentId;
+        ToolsContentId or PropertiesContentId or LayersContentId or ProjectContentId or StyleLibraryContentId or AssetGenerationContentId or BackgroundRemovalContentId or ImageOutlineContentId or IconDesignContentId or PixelAlignmentContentId or BlueprintContentId or AgentConnectionContentId or CommandConsoleContentId;
 
     private void FocusNewProjectDialog()
     {

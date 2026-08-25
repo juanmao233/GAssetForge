@@ -9,7 +9,7 @@ namespace GAssetForge.SmokeTests;
 
 internal static class ReleaseVersionConsistencySmokeTests
 {
-    private const string ExpectedReleaseVersion = "1.0.8t1";
+    private const string ExpectedReleaseVersion = "1.0.9t1";
 
     public static async Task RunAsync(string temporaryRoot)
     {

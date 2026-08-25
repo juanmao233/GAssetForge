@@ -11,10 +11,10 @@ namespace GAssetForge.App.Services;
 public sealed class AvalonDockLayoutService(WorkspacePaths paths)
 {
     private const int SchemaVersion = 1;
-    private const int PresetRevision = 11;
+    private const int PresetRevision = 12;
     private const string Engine = "AvalonDock";
     private static readonly string[] RequiredContentIds =
-        ["ui-tools", "ui-properties", "ui-layers", "ui-project", "art-style-library", "asset-generation", "background-removal", "image-outline", "pixel-grid-alignment", "workflow-blueprint", "mcp-agent-connection", "command-console"];
+        ["ui-tools", "ui-properties", "ui-layers", "ui-project", "art-style-library", "asset-generation", "background-removal", "image-outline", "icon-design", "pixel-grid-alignment", "workflow-blueprint", "mcp-agent-connection", "command-console"];
     private static readonly string[] OptionalDocumentContentIds =
         ["ui-canvas", "workspace-tilemap", "workspace-card-design", "workspace-parallel-perspective"];
     private static readonly string[] KnownContentIds =

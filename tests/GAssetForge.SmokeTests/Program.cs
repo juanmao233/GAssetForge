@@ -62,12 +62,16 @@ internal static class Program
             Console.WriteLine("PASS  Tilemap 0° 使用水平/垂直屏幕坐标基准，45° 再整体顺时针旋转");
             TilemapGeometryDiagnosticsSmokeTests.Run(_temporaryRoot);
             Console.WriteLine("PASS  Tilemap 几何校验区分长方形、旋转方形与真实菱形并输出结构化诊断");
+            IconPerspectiveProjectionSmokeTests.Run();
+            Console.WriteLine("PASS  Icon 指定角度投影遵循稳定世界坐标、镜头滚转与构图缩放规则");
             ProductIdentityCompatibilitySmokeTests.Run();
             Console.WriteLine("PASS  GAssetForge 新标识与旧数据、项目、MCP 和调度身份兼容");
             ReleaseVersionConsistencySmokeTests.RunAsync(_temporaryRoot).GetAwaiter().GetResult();
             Console.WriteLine("PASS  server_info、MCP initialize 与 EXE ProductVersion 使用同一正式程序集版本");
             DefaultDockLayoutHasStableTopology();
             Console.WriteLine("PASS  默认停靠布局包含可中央标签化的工具页、可关闭主视图及顶部标签拓扑");
+            IconDesignSettingsLoadAndPersistImmediately();
+            Console.WriteLine("PASS  Icon 图标制作相机与画幅参数可从用户设置加载并即时持久化");
             DockPanelsFloatHideAndRestoreFromViewMenu();
             Console.WriteLine("PASS  工具页可停靠中央，主视图可关闭并从视图菜单重新创建聚焦");
             BlueprintDockPanelProvidesWorkflowCanvas();
@@ -421,6 +425,71 @@ internal static class Program
         }
     }
 
+    private static void IconDesignSettingsLoadAndPersistImmediately()
+    {
+        var paths = new WorkspacePaths(Path.Combine(_temporaryRoot, "icon-design-settings"));
+        var settingsService = new UserSettingsService(paths);
+        settingsService.Save(new UserSettingsModel
+        {
+            HasCompletedWorkflowSelection = true,
+            IconDesignModeKey = "SpecifiedAngle",
+            IconDesignImageWidth = 768,
+            IconDesignImageHeight = 640,
+            IconDesignCameraAzimuthDegrees = -35d,
+            IconDesignCameraElevationDegrees = 22d,
+            IconDesignCameraRollDegrees = 8d,
+            IconDesignCameraDistance = 6.25d,
+            IconDesignFocalLengthMillimeters = 70d
+        });
+        var editor = new EditorWorkspaceViewModel(
+            new JsonProjectRepository(paths),
+            new DesktopFileDialogService(),
+            new ProjectHistoryService());
+        var shell = new ShellViewModel(new ThemeService(), settingsService, editor);
+
+        try
+        {
+            var iconDesign = shell.IconDesign;
+            Equal("SpecifiedAngle", iconDesign.CaptureSettings().Mode,
+                "Icon 制作模式应从用户设置加载");
+            Equal(768, iconDesign.ImageWidth, "Icon 图片宽度应从用户设置加载");
+            Equal(640, iconDesign.ImageHeight, "Icon 图片高度应从用户设置加载");
+            Equal(-35d, iconDesign.CameraAzimuthDegrees, "Icon 相机方位角应从用户设置加载");
+            Equal(22d, iconDesign.CameraElevationDegrees, "Icon 相机仰角应从用户设置加载");
+            Equal(8d, iconDesign.CameraRollDegrees, "Icon 镜头滚转应从用户设置加载");
+            Equal(6.25d, iconDesign.CameraDistance, "Icon 相机物距应从用户设置加载");
+            Equal(70d, iconDesign.FocalLengthMillimeters, "Icon 镜头焦距应从用户设置加载");
+
+            iconDesign.ImageWidth = 1024;
+            iconDesign.ImageHeight = 896;
+            iconDesign.CameraAzimuthDegrees = 58d;
+            iconDesign.CameraElevationDegrees = 34d;
+            iconDesign.CameraRollDegrees = -12d;
+            iconDesign.CameraDistance = 7.5d;
+            iconDesign.FocalLengthMillimeters = 85d;
+
+            var persisted = new UserSettingsService(paths).Load();
+            Equal(1024, persisted.IconDesignImageWidth,
+                "Icon 图片宽度应在参数变化后即时持久化");
+            Equal(896, persisted.IconDesignImageHeight,
+                "Icon 图片高度应在参数变化后即时持久化");
+            Equal(58d, persisted.IconDesignCameraAzimuthDegrees,
+                "Icon 相机方位角应在参数变化后即时持久化");
+            Equal(34d, persisted.IconDesignCameraElevationDegrees,
+                "Icon 相机仰角应在参数变化后即时持久化");
+            Equal(-12d, persisted.IconDesignCameraRollDegrees,
+                "Icon 镜头滚转应在参数变化后即时持久化");
+            Equal(7.5d, persisted.IconDesignCameraDistance,
+                "Icon 相机物距应在参数变化后即时持久化");
+            Equal(85d, persisted.IconDesignFocalLengthMillimeters,
+                "Icon 镜头焦距应在参数变化后即时持久化");
+        }
+        finally
+        {
+            shell.Shutdown();
+        }
+    }
+
     private static void ThemeSwitchUpdatesWpfAndAvalonDockResources()
     {
         var paths = new WorkspacePaths(Path.Combine(_temporaryRoot, "theme-switch"));
@@ -733,6 +802,16 @@ internal static class Program
             Equal(MainWindow.ImageOutlineContentId, imageOutlineMenuItem.CommandParameter as string,
                 "图片描边工具开关的 ContentId");
 
+            var iconDesignMenuItem = window.FindName("ShowIconDesignMenuItem") as MenuItem
+                ?? throw new SmokeTestException("视图菜单缺少 Icon 图标制作开关。");
+            iconDesignMenuItem.GetBindingExpression(MenuItem.CommandProperty)?.UpdateTarget();
+            True(iconDesignMenuItem.IsCheckable,
+                "Icon 图标制作菜单应显示当前开启状态");
+            True(ReferenceEquals(shell.TogglePanelCommand, iconDesignMenuItem.Command),
+                "Icon 图标制作菜单应绑定 TogglePanelCommand");
+            Equal(MainWindow.IconDesignContentId, iconDesignMenuItem.CommandParameter as string,
+                "Icon 图标制作开关的 ContentId");
+
             var pixelAlignmentMenuItem = window.FindName("ShowPixelAlignmentMenuItem") as MenuItem
                 ?? throw new SmokeTestException("视图菜单缺少像素点对齐工具开关。");
             pixelAlignmentMenuItem.GetBindingExpression(MenuItem.CommandProperty)?.UpdateTarget();
@@ -800,6 +879,7 @@ internal static class Program
                 MainWindow.AssetGenerationContentId,
                 MainWindow.BackgroundRemovalContentId,
                 MainWindow.ImageOutlineContentId,
+                MainWindow.IconDesignContentId,
                 MainWindow.PixelAlignmentContentId,
                 MainWindow.BlueprintContentId,
                 MainWindow.AgentConnectionContentId,
@@ -928,6 +1008,106 @@ internal static class Program
                 "单图执行按钮应绑定图片描边命令");
             True(ReferenceEquals(shell.ImageOutline.ProcessBatchCommand, outlineBatchProcessButton.Command),
                 "批量执行按钮应绑定批量描边命令");
+
+            var iconDesign = FindDockContent(manager, MainWindow.IconDesignContentId) as LayoutAnchorable
+                ?? throw new SmokeTestException("停靠交互测试未找到 Icon 图标制作面板。");
+            True(iconDesign.IsVisible && !iconDesign.IsHidden,
+                "Icon 图标制作面板初始应作为 Project 同区标签页存在");
+            iconDesignMenuItem.Command!.Execute(iconDesignMenuItem.CommandParameter);
+            True(iconDesign.IsHidden, "从视图菜单关闭后 Icon 图标制作面板应隐藏");
+            False(iconDesignMenuItem.IsChecked,
+                "Icon 图标制作面板隐藏后视图菜单应取消勾选");
+            iconDesignMenuItem.Command.Execute(iconDesignMenuItem.CommandParameter);
+            False(iconDesign.IsHidden, "再次点击视图菜单应恢复 Icon 图标制作面板");
+            True(iconDesign.IsVisible && iconDesign.IsSelected && iconDesign.IsActive,
+                "重新开启后 Icon 图标制作面板应可见、选中并激活");
+            True(iconDesignMenuItem.IsChecked,
+                "Icon 图标制作面板重新开启后视图菜单应恢复勾选");
+
+            var iconDesignHost = iconDesign.Content as ContentControl
+                ?? throw new SmokeTestException("Icon 图标制作缺少稳定 ContentControl host。");
+            var iconDesignView = iconDesignHost.Content as IconDesignView
+                ?? throw new SmokeTestException("Icon 图标制作 host 未承载 IconDesignView。");
+            True(ReferenceEquals(shell.IconDesign, iconDesignView.DataContext),
+                "Icon 图标制作应绑定 Shell 持有的单实例 ViewModel");
+
+            var iconModeComboBox = RequireNamedElement<ComboBox>(
+                iconDesignView,
+                "IconDesignModeComboBox",
+                "Icon 图标制作缺少制作模式下拉框。");
+            iconModeComboBox.GetBindingExpression(ItemsControl.ItemsSourceProperty)?.UpdateTarget();
+            True(ReferenceEquals(shell.IconDesign.ModeOptions, iconModeComboBox.ItemsSource),
+                "Icon 制作模式下拉框应使用 ViewModel 稳定选项");
+            Equal(nameof(IconDesignViewModel.SelectedMode),
+                BindingOperations.GetBindingExpression(
+                    iconModeComboBox,
+                    Selector.SelectedItemProperty)?.ParentBinding.Path.Path,
+                "Icon 制作模式选择绑定");
+
+            var iconImageWidthTextBox = RequireNamedElement<TextBox>(
+                iconDesignView,
+                "IconImageWidthTextBox",
+                "Icon 图标制作缺少图片宽度输入框。");
+            var iconImageHeightTextBox = RequireNamedElement<TextBox>(
+                iconDesignView,
+                "IconImageHeightTextBox",
+                "Icon 图标制作缺少图片高度输入框。");
+            Equal(nameof(IconDesignViewModel.ImageWidth),
+                BindingOperations.GetBindingExpression(
+                    iconImageWidthTextBox,
+                    TextBox.TextProperty)?.ParentBinding.Path.Path,
+                "Icon 图片宽度绑定");
+            Equal(nameof(IconDesignViewModel.ImageHeight),
+                BindingOperations.GetBindingExpression(
+                    iconImageHeightTextBox,
+                    TextBox.TextProperty)?.ParentBinding.Path.Path,
+                "Icon 图片高度绑定");
+
+            var iconSliderBindings = new[]
+            {
+                (Name: "IconCameraAzimuthSlider", Path: nameof(IconDesignViewModel.CameraAzimuthDegrees), Minimum: -180d, Maximum: 180d),
+                (Name: "IconCameraElevationSlider", Path: nameof(IconDesignViewModel.CameraElevationDegrees), Minimum: -85d, Maximum: 85d),
+                (Name: "IconCameraRollSlider", Path: nameof(IconDesignViewModel.CameraRollDegrees), Minimum: -180d, Maximum: 180d),
+                (Name: "IconFocalLengthSlider", Path: nameof(IconDesignViewModel.FocalLengthMillimeters), Minimum: 12d, Maximum: 200d),
+                (Name: "IconCameraDistanceSlider", Path: nameof(IconDesignViewModel.CameraDistance), Minimum: 1.5d, Maximum: 20d)
+            };
+            foreach (var sliderBinding in iconSliderBindings)
+            {
+                var slider = RequireNamedElement<Slider>(
+                    iconDesignView,
+                    sliderBinding.Name,
+                    $"Icon 图标制作缺少 {sliderBinding.Name}。");
+                Equal(sliderBinding.Path,
+                    BindingOperations.GetBindingExpression(
+                        slider,
+                        RangeBase.ValueProperty)?.ParentBinding.Path.Path,
+                    $"{sliderBinding.Name} 参数绑定");
+                Equal(sliderBinding.Minimum, slider.Minimum, $"{sliderBinding.Name} 最小值");
+                Equal(sliderBinding.Maximum, slider.Maximum, $"{sliderBinding.Name} 最大值");
+            }
+
+            var iconSpatialSurface = RequireNamedElement<IconPerspectiveSurface>(
+                iconDesignView,
+                "IconSpatialSetupSurface",
+                "Icon 图标制作缺少左侧相机三维空间预览。");
+            var iconCameraFrameSurface = RequireNamedElement<IconPerspectiveSurface>(
+                iconDesignView,
+                "IconCameraFrameSurface",
+                "Icon 图标制作缺少右侧镜头画面预览。");
+            foreach (var surface in new[] { iconSpatialSurface, iconCameraFrameSurface })
+            {
+                Equal(nameof(IconDesignViewModel.Projection),
+                    BindingOperations.GetBindingExpression(
+                        surface,
+                        IconPerspectiveSurface.ProjectionProperty)?.ParentBinding.Path.Path,
+                    "Icon 双主视图投影绑定");
+                True(ReferenceEquals(shell.IconDesign.Projection, surface.Projection),
+                    "Icon 双主视图应共享当前实时投影快照");
+            }
+            Equal(IconPerspectiveSurfaceViewKind.SpatialSetup, iconSpatialSurface.ViewKind,
+                "Icon 左侧主视图类型");
+            Equal(IconPerspectiveSurfaceViewKind.CameraFrame, iconCameraFrameSurface.ViewKind,
+                "Icon 右侧主视图类型");
 
             var backgroundRemovalHost = backgroundRemoval.Content as ContentControl
                 ?? throw new SmokeTestException("背景剔除工具缺少稳定 ContentControl host。");
@@ -1401,6 +1581,7 @@ internal static class Program
                 [MainWindow.AssetGenerationContentId] = NewPanelHost(),
                 [MainWindow.BackgroundRemovalContentId] = NewPanelHost(),
                 [MainWindow.ImageOutlineContentId] = NewPanelHost(),
+                [MainWindow.IconDesignContentId] = NewPanelHost(),
                 [MainWindow.PixelAlignmentContentId] = NewPanelHost(),
                 [MainWindow.BlueprintContentId] = NewPanelHost(),
                 [MainWindow.AgentConnectionContentId] = NewPanelHost(),
@@ -4738,6 +4919,7 @@ internal static class Program
                 [MainWindow.AssetGenerationContentId] = NewPanelHost(),
                 [MainWindow.BackgroundRemovalContentId] = NewPanelHost(),
                 [MainWindow.ImageOutlineContentId] = NewPanelHost(),
+                [MainWindow.IconDesignContentId] = NewPanelHost(),
                 [MainWindow.PixelAlignmentContentId] = NewPanelHost(),
                 [MainWindow.BlueprintContentId] = NewPanelHost(),
                 [MainWindow.AgentConnectionContentId] = NewPanelHost(),
@@ -4778,20 +4960,20 @@ internal static class Program
                  FindDockContent(optionalManager, MainWindow.ParallelPerspectiveWorkspaceContentId) is LayoutDocument,
                 "关闭一个业务文档不得影响其它业务文档的布局恢复");
 
-            var revisionElevenLayout = File.ReadAllText(paths.LayoutPath);
-            var revisionTenLayout = revisionElevenLayout.Replace(
+            var revisionTwelveLayout = File.ReadAllText(paths.LayoutPath);
+            var revisionElevenLayout = revisionTwelveLayout.Replace(
+                "\"presetRevision\": 12",
                 "\"presetRevision\": 11",
-                "\"presetRevision\": 10",
                 StringComparison.Ordinal);
-            False(string.Equals(revisionElevenLayout, revisionTenLayout, StringComparison.Ordinal),
+            False(string.Equals(revisionTwelveLayout, revisionElevenLayout, StringComparison.Ordinal),
                 "布局迁移测试必须真实降级 presetRevision");
-            File.WriteAllText(paths.LayoutPath, revisionTenLayout);
-            var revisionTenManager = new DockingManager();
-            False(layoutService.TryRestore(revisionTenManager, restoredContent),
-                "缺少图片描边工具的 rev10 布局应回退到 rev11 默认布局");
+            File.WriteAllText(paths.LayoutPath, revisionElevenLayout);
+            var revisionElevenManager = new DockingManager();
+            False(layoutService.TryRestore(revisionElevenManager, restoredContent),
+                "缺少 Icon 图标制作的 rev11 布局应回退到 rev12 默认布局");
             Equal("default", layoutService.LastRecoverySource,
                 "旧布局版本应明确标记为默认布局回退");
-            File.WriteAllText(paths.LayoutPath, revisionElevenLayout);
+            File.WriteAllText(paths.LayoutPath, revisionTwelveLayout);
             layoutService = new AvalonDockLayoutService(paths);
 
             layoutService.Save(sourceManager);
@@ -5581,6 +5763,7 @@ internal static class Program
             MainWindow.AssetGenerationContentId,
             MainWindow.BackgroundRemovalContentId,
             MainWindow.ImageOutlineContentId,
+            MainWindow.IconDesignContentId,
             MainWindow.PixelAlignmentContentId,
             MainWindow.BlueprintContentId,
             MainWindow.AgentConnectionContentId,
@@ -5655,6 +5838,7 @@ internal static class Program
         AssertPaneContains(center.Children[2], MainWindow.AssetGenerationContentId, "下方素材生成区");
         AssertPaneContains(center.Children[2], MainWindow.BackgroundRemovalContentId, "下方背景剔除工具区");
         AssertPaneContains(center.Children[2], MainWindow.ImageOutlineContentId, "下方图片描边工具区");
+        AssertPaneContains(center.Children[2], MainWindow.IconDesignContentId, "下方 Icon 图标制作区");
         AssertPaneContains(center.Children[2], MainWindow.PixelAlignmentContentId, "下方像素点对齐工具区");
         AssertPaneContains(center.Children[2], MainWindow.BlueprintContentId, "下方蓝图窗口区");
         AssertPaneContains(center.Children[2], MainWindow.CommandConsoleContentId, "下方指令日志区");

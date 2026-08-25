@@ -5,6 +5,24 @@ development track; versioning policy will be finalized before the first public r
 
 ## Unreleased
 
+## 1.0.9t1 - 2026-08-25
+
+### Added
+
+- Added the dockable `Icon 图标制作` workspace. Its first `指定角度生成` mode controls output width and
+  height, camera azimuth, elevation, roll, subject distance, and focal length with persistent settings and
+  reusable front, three-quarter, and high three-quarter presets.
+- Added synchronized dual perspective previews: a left spatial rig view renders the cube, world axes,
+  camera body, lens, target line, and view frustum, while the right camera-frame view shows the projected
+  cube inside the requested output aspect ratio and warns when the subject leaves the frame.
+- Added a deterministic camera projection contract and live generation description so later icon-generation
+  workflows can consume the exact angle, focal length, field of view, framing, and image-size constraints.
+
+### Changed
+
+- Registered `icon-design` as a persistent AvalonDock panel, View-menu entry, console `show icon` target,
+  layout-migration requirement, and single-instance settings-backed workspace.
+
 ## 1.0.8t1 - 2026-08-25
 
 ### Added

@@ -337,6 +337,11 @@
                           IsCheckable="True"
                           Command="{Binding TogglePanelCommand}"
                           CommandParameter="image-outline" />
+                <MenuItem x:Name="ShowIconDesignMenuItem"
+                          Header="Icon 图标制作"
+                          IsCheckable="True"
+                          Command="{Binding TogglePanelCommand}"
+                          CommandParameter="icon-design" />
                 <MenuItem x:Name="ShowPixelAlignmentMenuItem"
                           Header="像素点对齐工具"
                           IsCheckable="True"

@@ -46,6 +46,7 @@ AvalonDock 的模块接口只承担面板拓扑、大小、停靠位置、隐藏
 | `asset-generation` | 素材生成 | 与 Project 共用画布下方标签停靠区 |
 | `background-removal` | 背景剔除 / 假透明棋盘格恢复 | 与 Project 共用画布下方标签停靠区 |
 | `image-outline` | 图片描边工具 | 与 Project 共用画布下方标签停靠区 |
+| `icon-design` | Icon 指定角度与镜头构图设计 | 与 Project 共用画布下方标签停靠区 |
 | `pixel-grid-alignment` | 像素点对齐工具 | 与 Project 共用画布下方标签停靠区 |
 | `workflow-blueprint` | Agent 与工具工作流蓝图 | 与 Project 共用画布下方标签停靠区 |
 | `mcp-agent-connection` | MCP Agent 连接管理 | 默认隐藏；拉起后位于宽底部区域 |
@@ -59,7 +60,7 @@ AvalonDock 的模块接口只承担面板拓扑、大小、停靠位置、隐藏
 | 项目清单 | `ProjectWorkspaceService` | `<ProjectRoot>\ProjectSettings\gassetforge.project.json`；项目身份、工作流与 Tilemap 参数 |
 | UI 编辑数据 | `JsonProjectRepository` | `<ProjectRoot>\ProjectSettings\ui-project.pfui.json`；自动保存、备份、导入、导出、Undo / Redo |
 | 停靠布局 | `AvalonDockLayoutService` | 窗口关闭保存、启动恢复、可独立重置 |
-| 用户设置 | `UserSettingsService` | 主题、最近项目、Agent/MCP 配置、Codex thread ID + 工作目录、素材生成草稿、背景/棋盘格剔除、图片描边与像素对齐偏好 |
+| 用户设置 | `UserSettingsService` | 主题、最近项目、Agent/MCP 配置、Codex thread ID + 工作目录、素材生成草稿、背景/棋盘格剔除、图片描边、Icon 相机参数与像素对齐偏好 |
 | 美术风格素材库 | `JsonArtStyleLibraryRepository` | 风格组、人工提示词、统一提示词样本与当前选择即时原子保存；参考图片复制到受管目录 |
 | 风格提示词分析请求 | `AgentArtStylePromptAnalysisService` | Agent 工作目录下 `.gassetforge\style-analysis\<requestId>` 的一次性 request/result/diagnostics；不作为风格库真相源 |
 | AI 生成任务 | `JsonGenerationTaskStore` | 本地跨进程持久化单图任务、原子状态迁移、风格快照与冻结交付计划 |
@@ -112,6 +113,18 @@ expansion 防止外描边被裁切。
 `ImageOutlineViewModel` 负责单图与最多 256 项的顺序批处理、碰撞安全文件名、逐项状态和进度。与像素工具一致，
 批量清单属于会话瞬态状态，不进入用户设置；描边种类、宽度、颜色、Alpha threshold、扩画布开关和最近目录即时
 持久化。Core 服务不依赖 AvalonDock、项目 Schema、Agent 或 MCP。
+
+### Icon 指定角度投影边界
+
+`IconPerspectiveProjectionService` 是不依赖 WPF 的确定性针孔相机投影。方块中心固定为 `(0,0,0)`、`+Y` 向上；
+方位角 `0°` 将相机放在 `+Z`，正值向 `+X` 环绕，正仰角令相机升高并朝原点俯视。镜头滚转只旋转相机的
+Right/Up 基向量，不修改方块世界姿态。服务根据图片宽高、固定 24 mm 传感器高度和焦距计算水平/垂直视场角，
+返回方块顶点、面朝向、镜头像素坐标、画面包围盒及是否完整入镜。
+
+`IconDesignViewModel` 持有单实例参数、预设、实时生成描述和用户设置快照。两个
+`IconPerspectiveSurface` 只消费同一份不可变投影快照：空间模式显示相机、方块和视锥，镜头模式按目标画幅比例显示
+投影结果。该页面目前不调用 Agent 或图片模型；它提供稳定的透视约束输入，后续生成工作流应冻结这些数值，而不是
+从预览像素反推相机角度。
 
 ### 风格分析一次性文件协议
 

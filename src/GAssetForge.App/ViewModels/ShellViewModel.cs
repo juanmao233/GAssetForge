@@ -191,6 +191,17 @@ public sealed class ShellViewModel : ObservableObject
             _settings.ImageOutlineLastOutputDirectory,
             _workbenchConsoleService);
         ImageOutline.SettingsChanged += OnImageOutlineSettingsChanged;
+        IconDesign = new IconDesignViewModel(
+            initialSettings: new IconDesignSettingsSnapshot(
+                _settings.IconDesignModeKey,
+                _settings.IconDesignImageWidth,
+                _settings.IconDesignImageHeight,
+                _settings.IconDesignCameraAzimuthDegrees,
+                _settings.IconDesignCameraElevationDegrees,
+                _settings.IconDesignCameraRollDegrees,
+                _settings.IconDesignCameraDistance,
+                _settings.IconDesignFocalLengthMillimeters));
+        IconDesign.SettingsChanged += OnIconDesignSettingsChanged;
         var configuredAssetRoot = _currentProject?.Paths.AssetDirectory ?? _settings.AssetRootPath;
         var configuredCurrentPath = _currentProject is null
             ? _settings.AssetCurrentPath
@@ -350,6 +361,8 @@ public sealed class ShellViewModel : ObservableObject
     public PixelAlignmentViewModel PixelAlignment { get; }
 
     public ImageOutlineViewModel ImageOutline { get; }
+
+    public IconDesignViewModel IconDesign { get; }
 
     public AgentConnectionViewModel AgentConnection { get; }
 
@@ -969,6 +982,7 @@ public sealed class ShellViewModel : ObservableObject
             BackgroundRemoval.SettingsChanged -= OnBackgroundRemovalSettingsChanged;
             PixelAlignment.SettingsChanged -= OnPixelAlignmentSettingsChanged;
             ImageOutline.SettingsChanged -= OnImageOutlineSettingsChanged;
+            IconDesign.SettingsChanged -= OnIconDesignSettingsChanged;
             AssetGeneration.StyleLibraryRequested -= OnAssetGenerationStyleLibraryRequested;
             AssetGeneration.AgentConnectionRequested -= OnAssetGenerationAgentConnectionRequested;
             AssetGeneration.BackgroundRemovalRequested -= OnAssetGenerationBackgroundRemovalRequested;
@@ -988,6 +1002,7 @@ public sealed class ShellViewModel : ObservableObject
             ApplyBackgroundRemovalSettings(BackgroundRemoval.CaptureSettings());
             ApplyPixelAlignmentSettings(PixelAlignment.CaptureSettings());
             ApplyImageOutlineSettings(ImageOutline.CaptureSettings());
+            ApplyIconDesignSettings(IconDesign.CaptureSettings());
             CaptureTilemapSettings();
             if (_currentProject is not null)
             {
@@ -1799,6 +1814,26 @@ public sealed class ShellViewModel : ObservableObject
         _settings.ImageOutlineLastOutputDirectory = settings.LastOutputDirectory;
     }
 
+    private void OnIconDesignSettingsChanged(
+        object? sender,
+        IconDesignSettingsChangedEventArgs e)
+    {
+        ApplyIconDesignSettings(e.Settings);
+        SaveSettings();
+    }
+
+    private void ApplyIconDesignSettings(IconDesignSettingsSnapshot settings)
+    {
+        _settings.IconDesignModeKey = settings.Mode;
+        _settings.IconDesignImageWidth = settings.ImageWidth;
+        _settings.IconDesignImageHeight = settings.ImageHeight;
+        _settings.IconDesignCameraAzimuthDegrees = settings.CameraAzimuthDegrees;
+        _settings.IconDesignCameraElevationDegrees = settings.CameraElevationDegrees;
+        _settings.IconDesignCameraRollDegrees = settings.CameraRollDegrees;
+        _settings.IconDesignCameraDistance = settings.CameraDistance;
+        _settings.IconDesignFocalLengthMillimeters = settings.FocalLengthMillimeters;
+    }
+
     private void OnAssetGenerationStyleLibraryRequested(object? sender, EventArgs e) =>
         PanelShowRequested?.Invoke(this, "art-style-library");
 
@@ -1829,7 +1864,7 @@ public sealed class ShellViewModel : ObservableObject
             "state");
         CommandConsole.RegisterCommand(
             "show",
-            "show <console|project|generation|background|outline|pixel|blueprint|agent|style|tools|canvas|properties|layers>",
+            "show <console|project|generation|background|outline|icon|pixel|blueprint|agent|style|tools|canvas|properties|layers>",
             "拉起并聚焦指定的 AvalonDock 停靠页。",
             HandleConsoleShowAsync,
             "panel.show");
@@ -1880,7 +1915,7 @@ public sealed class ShellViewModel : ObservableObject
             !TryResolveConsolePanel(invocation.Arguments[0], out var contentId, out var title))
         {
             return ConsoleResult(CommandConsoleResult.Failure(
-                "用法：show <console|project|generation|background|outline|pixel|blueprint|agent|style|tools|canvas|properties|layers>"));
+                "用法：show <console|project|generation|background|outline|icon|pixel|blueprint|agent|style|tools|canvas|properties|layers>"));
         }
 
         PanelShowRequested?.Invoke(this, contentId);
@@ -2032,6 +2067,8 @@ public sealed class ShellViewModel : ObservableObject
                 ("background-removal", "背景剔除工具"),
             "outline" or "stroke" or "描边" or "图片描边" =>
                 ("image-outline", "图片描边工具"),
+            "icon" or "icon-design" or "图标" or "图标制作" =>
+                ("icon-design", "Icon 图标制作"),
             "pixel" or "pixel-grid" or "像素对齐" or "像素点对齐" =>
                 ("pixel-grid-alignment", "像素点对齐工具"),
             "blueprint" or "graph" or "蓝图" => ("workflow-blueprint", "蓝图窗口"),

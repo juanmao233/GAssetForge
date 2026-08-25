@@ -1,3 +1,4 @@
+using GAssetForge.Core.IconDesign;
 using GAssetForge.Core.Imaging;
 using System.Text.Json;
 using System.IO;
@@ -74,6 +75,14 @@ public sealed class UserSettingsModel
     public bool ImageOutlineExpandCanvas { get; set; } = true;
     public string? ImageOutlineLastInputDirectory { get; set; }
     public string? ImageOutlineLastOutputDirectory { get; set; }
+    public string IconDesignModeKey { get; set; } = IconDesignMode.SpecifiedAngle.ToString();
+    public int IconDesignImageWidth { get; set; } = 512;
+    public int IconDesignImageHeight { get; set; } = 512;
+    public double IconDesignCameraAzimuthDegrees { get; set; } = 45d;
+    public double IconDesignCameraElevationDegrees { get; set; } = 30d;
+    public double IconDesignCameraRollDegrees { get; set; }
+    public double IconDesignCameraDistance { get; set; } = 4.5d;
+    public double IconDesignFocalLengthMillimeters { get; set; } = 50d;
     public int PixelAlignmentMinimumUpscaleFactor { get; set; } = 10;
     public int PixelAlignmentColumns { get; set; } = 32;
     public int PixelAlignmentRows { get; set; } = 32;
@@ -146,6 +155,39 @@ public sealed class UserSettingsService
                 settings.ImageOutlineAlphaThreshold,
                 ImageOutlineLimits.MinimumAlphaThreshold,
                 ImageOutlineLimits.MaximumAlphaThreshold);
+            settings.IconDesignImageWidth = Math.Clamp(
+                settings.IconDesignImageWidth,
+                IconPerspectiveProjectionService.MinimumImageDimension,
+                IconPerspectiveProjectionService.MaximumImageDimension);
+            settings.IconDesignImageHeight = Math.Clamp(
+                settings.IconDesignImageHeight,
+                IconPerspectiveProjectionService.MinimumImageDimension,
+                IconPerspectiveProjectionService.MaximumImageDimension);
+            settings.IconDesignCameraAzimuthDegrees = NormalizeFinite(
+                settings.IconDesignCameraAzimuthDegrees,
+                45d,
+                -180d,
+                180d);
+            settings.IconDesignCameraElevationDegrees = NormalizeFinite(
+                settings.IconDesignCameraElevationDegrees,
+                30d,
+                IconPerspectiveProjectionService.MinimumElevationDegrees,
+                IconPerspectiveProjectionService.MaximumElevationDegrees);
+            settings.IconDesignCameraRollDegrees = NormalizeFinite(
+                settings.IconDesignCameraRollDegrees,
+                0d,
+                -180d,
+                180d);
+            settings.IconDesignCameraDistance = NormalizeFinite(
+                settings.IconDesignCameraDistance,
+                4.5d,
+                IconPerspectiveProjectionService.MinimumCameraDistance,
+                20d);
+            settings.IconDesignFocalLengthMillimeters = NormalizeFinite(
+                settings.IconDesignFocalLengthMillimeters,
+                50d,
+                IconPerspectiveProjectionService.MinimumFocalLengthMillimeters,
+                IconPerspectiveProjectionService.MaximumFocalLengthMillimeters);
             settings.PixelAlignmentMaximumIndexedColors = Math.Clamp(
                 settings.PixelAlignmentMaximumIndexedColors,
                 PixelAlignmentLimits.MinimumIndexedColorCount,
@@ -164,4 +206,11 @@ public sealed class UserSettingsService
         File.WriteAllText(temporaryPath, JsonSerializer.Serialize(settings, Options));
         File.Move(temporaryPath, _paths.UserSettingsPath, true);
     }
+
+    private static double NormalizeFinite(
+        double value,
+        double fallback,
+        double minimum,
+        double maximum) =>
+        double.IsFinite(value) ? Math.Clamp(value, minimum, maximum) : fallback;
 }
