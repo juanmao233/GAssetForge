@@ -192,7 +192,7 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
                 StringComparison.Ordinal),
             "Agent 指令不得用只允许 recommendedSourcePath 的条款否定本次内置工具的明确 sourcePath");
         True(prompt.Contains(
-                "只出现可视图片但没有新本地路径不算完成",
+                "只出现可视图片但 savedPath 为空是协议允许的未落盘状态，不算取得可提交产物",
                 StringComparison.Ordinal),
             "内置 ImageGen 只有可视结果时不得误报得到可提交产物");
         True(prompt.Contains(
@@ -204,27 +204,29 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
                 "严禁扫描、按时间挑选或复用 `~/.codex/generated_images`",
                 StringComparison.Ordinal),
             "Agent 指令必须禁止从历史 generated_images 猜测本次源文件");
-        True(prompt.Contains("scripts/image_gen.py", StringComparison.Ordinal) &&
-             prompt.Contains("--out <recommendedSourcePath>", StringComparison.Ordinal),
-            "CLI 兜底必须把真实模型 PNG 直接写入推荐源路径");
-        True(prompt.Contains("imageGeneration.output.targetWidth", StringComparison.Ordinal) &&
-             prompt.Contains("imageGeneration.output.targetHeight", StringComparison.Ordinal) &&
-             prompt.Contains("imageGeneration.output.targetAspectRatio", StringComparison.Ordinal) &&
-             prompt.Contains("--size <imageGeneration.output.cliSize>", StringComparison.Ordinal),
-            "CLI 兜底必须使用冻结宽高、画幅和有效非方形生成尺寸");
-        True(prompt.Contains("imageGeneration.style.referenceSourcePaths", StringComparison.Ordinal) &&
-             prompt.Contains("edit --image", StringComparison.Ordinal) &&
-             prompt.Contains("无参考图时才使用 generate", StringComparison.Ordinal),
-            "CLI 兜底必须把冻结风格参考图作为 edit 输入");
-        True(prompt.Contains("网络未验证", StringComparison.Ordinal),
-            "Agent 必须知道 CLI 本地前置就绪不代表 Image API 网络已验证");
+        True(prompt.Contains(
+                "run_image_delivery_fallback(taskId, agentId)",
+                StringComparison.Ordinal),
+            "内置 ImageGen 没有 savedPath 时必须进入软件 Harness 的窄兜底工具");
+        True(prompt.Contains(
+                "savedPath 为空是协议允许的未落盘状态",
+                StringComparison.Ordinal),
+            "Agent 指令必须准确识别可视结果没有本地路径的 app-server 合同");
+        True(prompt.Contains(
+                "从冻结任务读取完整提示、required rules、风格参考、画幅、纯色底和 recommendedSourcePath",
+                StringComparison.Ordinal),
+            "Harness 兜底必须自行读取全部冻结生成合同");
+        True(prompt.Contains(
+                "Agent 禁止自行运行 python、py、uv 或脚本",
+                StringComparison.Ordinal),
+            "Agent 不得继续自行探测旧 PATH 或拼装图片 CLI");
         True(prompt.Contains(
                 "存在、可读且具有有效 PNG 签名",
                 StringComparison.Ordinal),
             "提交前必须验证推荐源文件确实可读取");
-        True(prompt.Contains("axisA/axisB", StringComparison.Ordinal) &&
-             prompt.Contains("不得把控制角 90°、旋转 0°改写成 diamond/rhombus", StringComparison.Ordinal),
-            "Agent 指令必须原样保留冻结的 Tilemap 朝向合同，禁止二次翻译为 45° 钻石形");
+        True(prompt.Contains("required rules", StringComparison.Ordinal) &&
+             prompt.Contains("画幅", StringComparison.Ordinal),
+            "Harness 指令必须从冻结合同保留 Tilemap 朝向与画幅规则");
         True(prompt.Contains(
                 "submit_generation_output(taskId, agentId, outputIndex=0",
                 StringComparison.Ordinal),
@@ -234,13 +236,13 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
                 StringComparison.Ordinal),
             "Agent 指令必须说明软件负责中间落盘与后处理");
         True(prompt.Contains(
-                "只有 imagegen 或 submit_generation_output 真实失败时才调用 fail_generation_task",
+                "只有内置 imagegen、run_image_delivery_fallback 或 submit_generation_output 返回真实错误时才调用 fail_generation_task",
                 StringComparison.Ordinal),
             "Agent 指令必须把失败登记限制在真实生成或提交失败");
         True(prompt.Contains(
-                "image_delivery_fallback_unavailable:",
+                "image_delivery_fallback_failed:",
                 StringComparison.Ordinal),
-            "CLI 兜底不可用时必须报告图片交付能力错误而不是误报模型失败");
+            "Harness 兜底失败时必须报告准确的图片交付错误而不是误报模型失败");
         False(prompt.Contains("output.maxParallelism", StringComparison.Ordinal),
             "Agent 指令不得继续依赖页面并行数量");
         True(prompt.Contains("不要创建或复用固定命名的子 Agent 槽位", StringComparison.Ordinal),

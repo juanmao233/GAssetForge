@@ -1,5 +1,6 @@
 using GAssetForge.App.Services.AgentRuntime;
 using GAssetForge.App.ViewModels;
+using System.IO;
 using System.Text.Json;
 
 namespace GAssetForge.SmokeTests;
@@ -9,6 +10,7 @@ internal static class AgentActivityParserSmokeTests
     public static void Run()
     {
         AppServerEventsProduceBoundedSafeActivities();
+        AppServerImageGenerationActivitiesPreserveDeliveryDiagnostics();
         ExecJsonlEventsUseTheSameActivityContract();
         StructuredLogTimingKeysPairStartsWithTerminalEvents();
         AgentConnectionExposesTheStableActivitySurface();
@@ -188,6 +190,99 @@ internal static class AgentActivityParserSmokeTests
         True(failed?.IsWarning == true && failed.IsTerminal, "exec turn.failed 应标记警告与终态");
         True(failed?.Message.Contains("connection reset", StringComparison.Ordinal) == true,
             "exec Turn 失败应保留安全错误摘要");
+    }
+
+    private static void AppServerImageGenerationActivitiesPreserveDeliveryDiagnostics()
+    {
+        var parser = new AgentActivityParser();
+        var timestamp = new DateTimeOffset(2026, 8, 25, 11, 0, 0, TimeSpan.Zero);
+        var savedPath = Path.GetFullPath(Path.Combine(
+            Path.GetTempPath(),
+            "GAssetForge.ImageGenerationActivity",
+            "generated model.png"));
+        const string visibleResult = "visible-image-result-must-not-be-echoed";
+
+        var started = parser.Parse(
+            Notification(
+                "item/started",
+                new
+                {
+                    threadId = "thread-image-generation",
+                    turnId = "turn-image-generation",
+                    item = new
+                    {
+                        id = "image-generation-1",
+                        type = "imageGeneration",
+                        status = "inProgress",
+                        result = string.Empty,
+                        savedPath = (string?)null
+                    }
+                }),
+            timestamp);
+        Equal(AgentActivityCategory.ToolStarted, started?.Category,
+            "imageGeneration 开始事件应作为内置工具活动");
+        Equal("imageGeneration", started?.ItemType,
+            "imageGeneration item 类型应稳定规范化");
+        True(started?.Message.Contains("inProgress", StringComparison.Ordinal) == true,
+            "imageGeneration 活动应保留协议 status 诊断");
+
+        var saved = parser.Parse(
+            Notification(
+                "item/completed",
+                new
+                {
+                    threadId = "thread-image-generation",
+                    turnId = "turn-image-generation",
+                    item = new
+                    {
+                        id = "image-generation-1",
+                        type = "imageGeneration",
+                        status = "completed",
+                        result = visibleResult,
+                        savedPath
+                    }
+                }),
+            timestamp.AddSeconds(4));
+        Equal(AgentActivityCategory.ToolCompleted, saved?.Category,
+            "已落盘 imageGeneration 应作为完成的内置工具活动");
+        True(saved?.IsTerminal == true && saved.IsWarning == false,
+            "已落盘 imageGeneration 应形成非警告终态");
+        True(saved?.Message.Contains(savedPath, StringComparison.OrdinalIgnoreCase) == true,
+            "结构化 imageGeneration 活动必须保留可诊断绝对 savedPath");
+        Equal(savedPath, saved?.SavedPath,
+            "结构化 imageGeneration 活动应单独保留规范化 savedPath 字段");
+        True(saved?.Message.Contains("completed", StringComparison.Ordinal) == true,
+            "已落盘 imageGeneration 活动应保留完成 status");
+        False(saved?.Message.Contains(visibleResult, StringComparison.Ordinal) == true,
+            "imageGeneration result 正文或图像数据不得进入活动日志");
+
+        var visibleOnly = parser.Parse(
+            Notification(
+                "item/completed",
+                new
+                {
+                    threadId = "thread-image-generation",
+                    turnId = "turn-image-generation",
+                    item = new
+                    {
+                        id = "image-generation-2",
+                        type = "imageGeneration",
+                        status = "completed",
+                        result = visibleResult,
+                        savedPath = (string?)null
+                    }
+                }),
+            timestamp.AddSeconds(8));
+        Equal(AgentActivityCategory.ToolCompleted, visibleOnly?.Category,
+            "只有可视结果的 imageGeneration 仍应收束工具计时");
+        True(visibleOnly?.IsTerminal == true && visibleOnly.IsWarning,
+            "只有可视结果但未落盘必须形成可诊断警告终态");
+        True(visibleOnly?.Message.Contains("可视结果但未落盘", StringComparison.Ordinal) == true,
+            "savedPath=null 必须明确标记可视结果但未落盘");
+        Equal<string?>(null, visibleOnly?.SavedPath,
+            "savedPath=null 不得伪造本地文件路径");
+        False(visibleOnly?.Message.Contains(visibleResult, StringComparison.Ordinal) == true,
+            "savedPath=null 时也不得回显 imageGeneration result");
     }
 
     private static void AgentConnectionExposesTheStableActivitySurface()

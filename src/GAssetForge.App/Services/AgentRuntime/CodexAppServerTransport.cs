@@ -18,6 +18,7 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
         StringComparer.Ordinal)
     {
         "claim_generation_task",
+        "run_image_delivery_fallback",
         "submit_generation_output",
         "process_generation_output",
         "complete_generation_task",

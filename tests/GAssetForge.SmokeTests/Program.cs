@@ -99,6 +99,8 @@ internal static class Program
             Console.WriteLine("PASS  MCP claim 在新旧合同和风格引用路径上保持认领前安全校验");
             ImageDeliveryPreflightSmokeTests.RunAllAsync().GetAwaiter().GetResult();
             Console.WriteLine("PASS  图片本地交付预检区分内置可用、CLI 兜底降级与输出目录阻断");
+            ImageGenerationCliFallbackSmokeTests.RunAllAsync(_temporaryRoot).GetAwaiter().GetResult();
+            Console.WriteLine("PASS  MCP Harness 使用官方 image_gen.py 将模型原图确定性写入项目路径");
             BackgroundRemovalSmokeTests.Run();
             Console.WriteLine("PASS  背景剔除六种底色、连通/全局模式、原有 Alpha 与原子 PNG 输出可用");
             PixelAlignmentSmokeTests.Run();
@@ -2251,7 +2253,10 @@ internal static class Program
             var codexConfig = codexProfile.CreateConfigSnippet(endpoint);
             var openCodeConfig = openCodeProfile.CreateConfigSnippet(endpoint);
             True(codexConfig.Contains("[mcp_servers.gasset_forge]", StringComparison.Ordinal) &&
-                 codexConfig.Contains(endpoint.AbsoluteUri, StringComparison.Ordinal),
+                 codexConfig.Contains(endpoint.AbsoluteUri, StringComparison.Ordinal) &&
+                 codexConfig.Contains(
+                     $"tool_timeout_sec = {GenerationMcpToolPolicy.ToolTimeoutSeconds}",
+                     StringComparison.Ordinal),
                 "Codex profile 应生成 Streamable HTTP MCP 配置");
             True(openCodeConfig.Contains("\"type\": \"remote\"", StringComparison.Ordinal) &&
                  openCodeConfig.Contains(endpoint.AbsoluteUri, StringComparison.Ordinal),

@@ -39,6 +39,10 @@ internal static class CodexManualFallbackPromptSmokeTests
                 "人工连接提示必须提供 Codex MCP 配置表");
             Contains(connectionPrompt, "bearer_token_env_var", "人工连接提示必须通过环境变量引用令牌");
             Contains(connectionPrompt, "required = true", "人工连接提示必须把本地 MCP 标记为必需");
+            Contains(
+                connectionPrompt,
+                $"tool_timeout_sec = {GenerationMcpToolPolicy.ToolTimeoutSeconds}",
+                "人工连接提示必须覆盖 Codex 默认 MCP 工具超时");
             Contains(connectionPrompt, "enabled_tools =", "人工连接提示必须收窄 MCP 工具范围");
             foreach (var toolName in GenerationMcpToolPolicy.EnabledTools)
             {
@@ -78,14 +82,14 @@ internal static class CodexManualFallbackPromptSmokeTests
                 "人工接力必须直接提交真实图像模型返回的本地文件");
             Contains(batchPrompt, "recommendedSourcePath",
                 "人工接力必须使用 claim 返回的项目内推荐源路径");
-            Contains(batchPrompt, "只出现可视图片但没有新本地路径不算完成",
+            Contains(batchPrompt, "savedPath 为空是协议允许的未落盘状态",
                 "人工接力不得把无本地路径的内置可视结果当成可交付产物");
             Contains(batchPrompt, "严禁扫描、按时间挑选或复用 `~/.codex/generated_images`",
                 "人工接力不得从 Codex 历史图片目录猜测本次产物");
-            Contains(batchPrompt, "scripts/image_gen.py",
-                "人工接力必须包含官方 ImageGen CLI 直接落盘兜底");
-            Contains(batchPrompt, "--out <recommendedSourcePath>",
-                "人工接力 CLI 兜底必须写入推荐源路径");
+            Contains(batchPrompt, "run_image_delivery_fallback(taskId, agentId)",
+                "人工接力必须使用 GAssetForge Harness 的官方 ImageGen CLI 落盘兜底");
+            Contains(batchPrompt, "Agent 禁止自行运行 python、py、uv 或脚本",
+                "人工接力不得自行拼装 CLI 或依赖旧 PATH");
             Contains(batchPrompt, "GAssetForge 会自行把原图导入项目运行工作区",
                 "人工接力必须把项目落盘和确定性后处理交给客户端");
             Contains(batchPrompt, "Agent 不得自行建目录、搬运、缩放、抠图",
@@ -125,11 +129,11 @@ internal static class CodexManualFallbackPromptSmokeTests
                 "批次提示缺少真实图像生成步骤");
             var submitIndex = RequiredIndex(
                 executionSegment,
-                "4. 只有确认本次 sourcePath 文件存在",
+                "4. 内置 ImageGen 返回明确本地路径时",
                 "批次提示缺少单图源文件提交步骤");
             var failIndex = RequiredIndex(
                 executionSegment,
-                "5. 只有 imagegen 或 submit_generation_output 真实失败时才调用 fail_generation_task",
+                "5. 只有内置 imagegen、run_image_delivery_fallback 或 submit_generation_output 返回真实错误时才调用 fail_generation_task",
                 "批次提示缺少失败回报步骤");
             True(
                 claimIndex < imagegenIndex &&

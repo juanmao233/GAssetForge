@@ -111,6 +111,9 @@ internal static class CodexProcessLaunch
         AddConfig(startInfo, $"{serverPrefix}.required=true");
         AddConfig(
             startInfo,
+            $"{serverPrefix}.tool_timeout_sec={GenerationMcpToolPolicy.ToolTimeoutSeconds}");
+        AddConfig(
+            startInfo,
             $"{serverPrefix}.enabled_tools={GenerationMcpToolPolicy.BuildTomlToolArray()}");
         // Clicking "Start Generation" is the user's explicit authorization for this app-owned,
         // loopback-only workflow. Codex MCP approvals are configured separately from the general

@@ -23,6 +23,7 @@ internal static class DirectToolInvocationExecutor
         "get_generation_task",
         "claim_generation_task",
         "submit_generation_output",
+        "run_image_delivery_fallback",
         "process_generation_output",
         "complete_generation_task",
         "fail_generation_task"

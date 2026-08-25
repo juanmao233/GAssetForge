@@ -17,6 +17,11 @@ internal static class ImageDeliveryPreflightSmokeTests
         try
         {
             FreshPathEnvironmentMergesCurrentMachineAndUserEntries();
+            await ConfiguredPythonPathTakesPrecedenceAsync(root);
+            await FreshEnvironmentProviderDrivesPythonApiKeyAndCodexHomeAsync(root);
+            await LocalAppDataPythonInstallIsDiscoveredWhenPathIsStaleAsync(root);
+            await PyLauncherUsesPython3SelectionArgumentAsync(root);
+            await PythonProbeDiagnosticsRedactApiKeyAsync(root);
             await CompleteLocalCliPrerequisitesRemainNetworkUnverifiedAsync(root);
             await ExistingButUnlaunchableImageGenScriptRemainsBuiltInOnlyAsync(root);
             await MissingOpenAiSdkRemainsBuiltInOnlyAsync(root);
@@ -49,6 +54,219 @@ internal static class ImageDeliveryPreflightSmokeTests
             string.Join(separator, processEntry, sharedEntry, userEntry),
             merged,
             "最新 PATH 快照必须合并进程、Machine/User 条目并稳定去重");
+    }
+
+    private static async Task LocalAppDataPythonInstallIsDiscoveredWhenPathIsStaleAsync(string root)
+    {
+        var localAppData = Path.Combine(root, "local-app-data");
+        var pythonPath = Path.Combine(
+            localAppData,
+            "Programs",
+            "Python",
+            "Python312",
+            "python.exe");
+        var codexHome = Path.Combine(root, "local-app-data-codex-home");
+        var outputDirectory = Path.Combine(root, "local-app-data-output");
+        Directory.CreateDirectory(Path.GetDirectoryName(pythonPath)!);
+        Directory.CreateDirectory(outputDirectory);
+        File.WriteAllBytes(pythonPath, [0x4d, 0x5a]);
+        var scriptPath = Path.Combine(
+            codexHome,
+            "skills",
+            ".system",
+            "imagegen",
+            "scripts",
+            "image_gen.py");
+        Directory.CreateDirectory(Path.GetDirectoryName(scriptPath)!);
+        File.WriteAllText(scriptPath, "# fixture");
+
+        var preflight = new ImageDeliveryPreflight(
+            pathProvider: () => string.Empty,
+            localAppDataProvider: () => localAppData,
+            codexHomeProvider: () => codexHome,
+            apiKeyProvider: () => "fixture-api-key",
+            executableProbe: new FixtureExecutableProbe(pythonPath));
+        var result = await preflight.CheckAsync(
+            [Path.Combine(outputDirectory, "model-output.png")],
+            CancellationToken.None);
+
+        Equal(ImageDeliveryPreflightState.LocalReadyNetworkUnverified, result.State,
+            "用户级 Python 安装未进入旧 PATH 时仍应由 LocalAppData 常见目录发现");
+        Equal(pythonPath, result.PythonExecutablePath,
+            "LocalAppData 直探测必须返回经过真实启动验证的绝对 Python 路径");
+    }
+
+    private static async Task ConfiguredPythonPathTakesPrecedenceAsync(string root)
+    {
+        var configuredPython = Path.Combine(root, "configured-python", "python.exe");
+        var localAppData = Path.Combine(root, "configured-local-app-data");
+        var localPython = Path.Combine(
+            localAppData,
+            "Programs",
+            "Python",
+            "Python313",
+            "python.exe");
+        var pathBin = Path.Combine(root, "configured-path-bin");
+        var pathPython = Path.Combine(pathBin, "python.exe");
+        var codexHome = Path.Combine(root, "configured-codex-home");
+        var outputDirectory = Path.Combine(root, "configured-output");
+        Directory.CreateDirectory(Path.GetDirectoryName(configuredPython)!);
+        Directory.CreateDirectory(Path.GetDirectoryName(localPython)!);
+        Directory.CreateDirectory(pathBin);
+        Directory.CreateDirectory(outputDirectory);
+        File.WriteAllBytes(configuredPython, [0x4d, 0x5a]);
+        File.WriteAllBytes(localPython, [0x4d, 0x5a]);
+        File.WriteAllBytes(pathPython, [0x4d, 0x5a]);
+        var scriptPath = Path.Combine(
+            codexHome,
+            "skills",
+            ".system",
+            "imagegen",
+            "scripts",
+            "image_gen.py");
+        Directory.CreateDirectory(Path.GetDirectoryName(scriptPath)!);
+        File.WriteAllText(scriptPath, "# fixture");
+
+        var preflight = new ImageDeliveryPreflight(
+            pathProvider: () => pathBin,
+            configuredPythonPathProvider: () => configuredPython,
+            localAppDataProvider: () => localAppData,
+            codexHomeProvider: () => codexHome,
+            apiKeyProvider: () => "fixture-api-key",
+            executableProbe: new FixtureExecutableProbe(
+                configuredPython,
+                localPython,
+                pathPython));
+        var result = await preflight.CheckAsync(
+            [Path.Combine(outputDirectory, "model-output.png")],
+            CancellationToken.None);
+
+        Equal(configuredPython, result.PythonExecutablePath,
+            "手动配置的 Python 必须优先于 LocalAppData 与 PATH 自动探测候选");
+    }
+
+    private static async Task FreshEnvironmentProviderDrivesPythonApiKeyAndCodexHomeAsync(string root)
+    {
+        var configuredPython = Path.Combine(root, "fresh-env-python", "python.exe");
+        var codexHome = Path.Combine(root, "fresh-env-codex-home");
+        var outputDirectory = Path.Combine(root, "fresh-env-output");
+        var scriptPath = Path.Combine(
+            codexHome,
+            "skills",
+            ".system",
+            "imagegen",
+            "scripts",
+            "image_gen.py");
+        Directory.CreateDirectory(Path.GetDirectoryName(configuredPython)!);
+        Directory.CreateDirectory(Path.GetDirectoryName(scriptPath)!);
+        Directory.CreateDirectory(outputDirectory);
+        File.WriteAllBytes(configuredPython, [0x4d, 0x5a]);
+        File.WriteAllText(scriptPath, "# fixture");
+        string? ReadFreshEnvironment(string name) => name switch
+        {
+            "GASSETFORGE_PYTHON_EXECUTABLE" => configuredPython,
+            "CODEX_HOME" => codexHome,
+            "OPENAI_API_KEY" => "fresh-environment-api-key",
+            _ => null
+        };
+        var preflight = new ImageDeliveryPreflight(
+            pathProvider: () => string.Empty,
+            localAppDataProvider: () => null,
+            executableProbe: new FixtureExecutableProbe(configuredPython),
+            environmentVariableProvider: ReadFreshEnvironment);
+
+        var result = await preflight.CheckAsync(
+            [Path.Combine(outputDirectory, "model-output.png")],
+            CancellationToken.None);
+
+        Equal(ImageDeliveryPreflightState.LocalReadyNetworkUnverified, result.State,
+            "UI 图片交付预检必须使用与 MCP Harness 一致的 fresh 环境读取语义");
+        Equal(configuredPython, result.PythonExecutablePath,
+            "fresh GASSETFORGE_PYTHON_EXECUTABLE 必须驱动 UI Python 探测");
+        Equal(scriptPath, result.ImageGenScriptPath,
+            "fresh CODEX_HOME 必须驱动 UI image_gen.py 定位");
+        True(result.ApiKeyAvailable,
+            "fresh OPENAI_API_KEY 必须反映为 UI CLI 本地前置可用");
+    }
+
+    private static async Task PyLauncherUsesPython3SelectionArgumentAsync(string root)
+    {
+        var bin = Path.Combine(root, "py-launcher-bin");
+        var codexHome = Path.Combine(root, "py-launcher-codex-home");
+        var outputDirectory = Path.Combine(root, "py-launcher-output");
+        Directory.CreateDirectory(bin);
+        Directory.CreateDirectory(outputDirectory);
+        var pyLauncherPath = Path.Combine(bin, "py.exe");
+        File.WriteAllBytes(pyLauncherPath, [0x4d, 0x5a]);
+        var scriptPath = Path.Combine(
+            codexHome,
+            "skills",
+            ".system",
+            "imagegen",
+            "scripts",
+            "image_gen.py");
+        Directory.CreateDirectory(Path.GetDirectoryName(scriptPath)!);
+        File.WriteAllText(scriptPath, "# fixture");
+
+        var probe = new Py3LauncherExecutableProbe(pyLauncherPath);
+        var preflight = new ImageDeliveryPreflight(
+            pathProvider: () => bin,
+            localAppDataProvider: () => null,
+            codexHomeProvider: () => codexHome,
+            apiKeyProvider: () => "fixture-api-key",
+            executableProbe: probe);
+        var result = await preflight.CheckAsync(
+            [Path.Combine(outputDirectory, "model-output.png")],
+            CancellationToken.None);
+
+        Equal(ImageDeliveryPreflightState.LocalReadyNetworkUnverified, result.State,
+            "Windows py 启动器应以 py -3 合同探测并运行 image_gen.py");
+        True(probe.AllProbesUsedPython3Selection,
+            "py 启动器的版本、脚本和 SDK 探针都必须保留 -3 前缀参数");
+        Equal("-3", string.Join(' ', result.PythonLauncherArguments),
+            "结构化预检结果必须保留 py -3，供软件 Harness 使用");
+        var prompt = GenerationAgentPromptBuilder.Build(["fixture-task"], result);
+        True(prompt.Contains("run_image_delivery_fallback", StringComparison.Ordinal) &&
+             !prompt.Contains(pyLauncherPath, StringComparison.Ordinal),
+            "Agent 应调用 Harness 兜底，不应自行执行或丢失 py -3 启动合同");
+    }
+
+    private static async Task PythonProbeDiagnosticsRedactApiKeyAsync(string root)
+    {
+        const string apiKey = "sk-fixture-image-delivery-secret";
+        var bin = Path.Combine(root, "secret-probe-bin");
+        var codexHome = Path.Combine(root, "secret-probe-codex-home");
+        var outputDirectory = Path.Combine(root, "secret-probe-output");
+        Directory.CreateDirectory(bin);
+        Directory.CreateDirectory(outputDirectory);
+        var pythonPath = Path.Combine(bin, "python.exe");
+        File.WriteAllBytes(pythonPath, [0x4d, 0x5a]);
+        var scriptPath = Path.Combine(
+            codexHome,
+            "skills",
+            ".system",
+            "imagegen",
+            "scripts",
+            "image_gen.py");
+        Directory.CreateDirectory(Path.GetDirectoryName(scriptPath)!);
+        File.WriteAllText(scriptPath, "# fixture");
+
+        var preflight = new ImageDeliveryPreflight(
+            pathProvider: () => bin,
+            localAppDataProvider: () => null,
+            codexHomeProvider: () => codexHome,
+            apiKeyProvider: () => apiKey,
+            executableProbe: new SecretEchoExecutableProbe(apiKey));
+        var result = await preflight.CheckAsync(
+            [Path.Combine(outputDirectory, "model-output.png")],
+            CancellationToken.None);
+
+        False(result.StatusText.Contains(apiKey, StringComparison.Ordinal),
+            "Python 启动失败诊断不得把 OPENAI_API_KEY 回显到 UI 或工作台日志");
+        False(result.Diagnostics.Any(message => message.Contains(apiKey, StringComparison.Ordinal)),
+            "结构化预检 Diagnostics 也不得保留探针意外回显的 API Key");
+        True(result.StatusText.Contains("[REDACTED]", StringComparison.Ordinal),
+            "被探针输出意外回显的 API Key 应替换为明确脱敏标记");
     }
 
     private static async Task ExistingValidModelOutputIsPreservedForResumeAsync(string root)
@@ -203,10 +421,10 @@ internal static class ImageDeliveryPreflightSmokeTests
         Equal(1, probe.OpenAiSdkProbeCount,
             "本地 CLI 前置就绪前必须验证 image_gen.py 所需的 OpenAI SDK");
         var prompt = GenerationAgentPromptBuilder.Build(["fixture-task"], result);
-        True(prompt.Contains(pythonPath, StringComparison.Ordinal) &&
-             prompt.Contains(scriptPath, StringComparison.Ordinal) &&
-             prompt.Contains("必须使用预检给出的绝对 Python 与 image_gen.py 路径", StringComparison.Ordinal),
-            "Agent CLI 兜底必须使用预检成功的绝对解释器和脚本路径，不能依赖旧 PATH");
+        True(prompt.Contains("run_image_delivery_fallback", StringComparison.Ordinal) &&
+             !prompt.Contains(pythonPath, StringComparison.Ordinal) &&
+             !prompt.Contains(scriptPath, StringComparison.Ordinal),
+            "解释器和脚本路径只应由软件 Harness 消费，Agent 不得依赖旧 PATH 自行执行 CLI");
     }
 
     private static async Task ExistingButUnlaunchableImageGenScriptRemainsBuiltInOnlyAsync(string root)
@@ -497,6 +715,44 @@ internal static class ImageDeliveryPreflightSmokeTests
 
             return Task.FromResult(
                 new ImageDeliveryExecutableProbeResult(true, "fixture Python ready"));
+        }
+    }
+
+    private sealed class Py3LauncherExecutableProbe(string pyLauncherPath) : IImageDeliveryExecutableProbe
+    {
+        private readonly string _pyLauncherPath = Path.GetFullPath(pyLauncherPath);
+
+        public bool AllProbesUsedPython3Selection { get; private set; } = true;
+
+        public Task<ImageDeliveryExecutableProbeResult> ProbeAsync(
+            string executablePath,
+            IReadOnlyList<string> arguments,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var normalized = Path.GetFullPath(executablePath);
+            var usesPython3Selection = arguments.Count > 0 &&
+                                       string.Equals(arguments[0], "-3", StringComparison.Ordinal);
+            AllProbesUsedPython3Selection &= usesPython3Selection;
+            return Task.FromResult(
+                string.Equals(normalized, _pyLauncherPath, StringComparison.OrdinalIgnoreCase) &&
+                usesPython3Selection
+                    ? new ImageDeliveryExecutableProbeResult(true, "Python 3.12 launcher fixture")
+                    : new ImageDeliveryExecutableProbeResult(false, "fixture requires py -3"));
+        }
+    }
+
+    private sealed class SecretEchoExecutableProbe(string secret) : IImageDeliveryExecutableProbe
+    {
+        public Task<ImageDeliveryExecutableProbeResult> ProbeAsync(
+            string executablePath,
+            IReadOnlyList<string> arguments,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            return Task.FromResult(new ImageDeliveryExecutableProbeResult(
+                false,
+                $"fixture process echoed OPENAI_API_KEY={secret}"));
         }
     }
 

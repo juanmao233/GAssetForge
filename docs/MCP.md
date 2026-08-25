@@ -125,14 +125,16 @@ App Server transport，并按协议返回 `accept` 或 `decline`，不再把受�
 受管 Turn 的 `gasset_forge` 配置固定为：
 
 ```toml
-enabled_tools = ["server_info", "get_generation_task", "claim_generation_task", "submit_generation_output", "process_generation_output", "complete_generation_task", "fail_generation_task"]
+tool_timeout_sec = 900
+enabled_tools = ["server_info", "get_generation_task", "claim_generation_task", "submit_generation_output", "run_image_delivery_fallback", "process_generation_output", "complete_generation_task", "fail_generation_task"]
 default_tools_approval_mode = "approve"
 ```
 
-因此 Codex 只能看到任务执行所需的七个工具，不能通过这条受管连接创建或枚举任意任务。点击“开始生成”
+`tool_timeout_sec = 900` 覆盖 Codex 默认的 60 秒 MCP 工具超时，为最长 8 分钟的官方 Image API CLI
+生成和本地后处理保留有界余量。因此 Codex 只能看到任务执行所需的八个工具，不能通过这条受管连接创建或枚举任意任务。点击“开始生成”
 就是用户对当前本机批次的显式授权。`default_tools_approval_mode = "approve"` 负责常规自动批准；如果 App
 Server 仍发送 elicitation，Host 仅接受当前 Running Turn 中、`gasset_forge` Server 上、当前 prompt
-所列 task ID 的 `claim_generation_task`、`submit_generation_output`、`process_generation_output`、
+所列 task ID 的 `claim_generation_task`、`submit_generation_output`、`run_image_delivery_fallback`、`process_generation_output`、
 `complete_generation_task` 或 `fail_generation_task`，其余请求全部 fail-closed 拒绝。日志只记录脱敏后的
 工具与短 task ID，不记录
 Bearer Token。
@@ -225,12 +227,13 @@ $argumentsBase64 = [Convert]::ToBase64String(
 Token 或其他不应出现在进程命令行中的秘密。需要隔离诊断时可同时传入
 `--data-root "D:\Temp\GAssetForge-Agent-Test"`；正式任务不要误指向测试数据根。
 
-桥接严格只允许以下七个工具：
+桥接严格只允许以下八个工具：
 
 - `server_info`
 - `get_generation_task`
 - `claim_generation_task`
 - `submit_generation_output`
+- `run_image_delivery_fallback`
 - `process_generation_output`
 - `complete_generation_task`
 - `fail_generation_task`
@@ -395,7 +398,7 @@ GAssetForge.McpServer.exe
 ## MCP 工具
 
 下面是 MCP Server 本身提供的完整工具集。受管 Codex Runtime 不会开放全部工具；其 `enabled_tools` 仅包含
-`server_info`、`get_generation_task`、`claim_generation_task`、`submit_generation_output`、
+`server_info`、`get_generation_task`、`claim_generation_task`、`submit_generation_output`、`run_image_delivery_fallback`、
 `process_generation_output`、`complete_generation_task` 和 `fail_generation_task`。
 `get_current_context`、`create_generation_task` 与 `list_generation_tasks` 只供外部 MCP 客户端、开发诊断或
 未来明确授权的流程使用。
@@ -409,6 +412,7 @@ GAssetForge.McpServer.exe
 | `get_generation_task` | 获取指定任务及交付计划 |
 | `claim_generation_task` | Agent 领取指定任务或下一个待处理任务 |
 | `submit_generation_output` | 新合同：导入真实模型 PNG `sourcePath`，归档、归一化、剔色、校验、原子提交并自动完成单图任务 |
+| `run_image_delivery_fallback` | 内置 ImageGen 只有可视结果且 `savedPath=null` 时，由 Harness 使用冻结任务调用官方 `image_gen.py`，验证并自动提交 |
 | `process_generation_output` | 旧兼容合同：按零基 `outputIndex` 把 staging 原图本地剔色并写入最终 target |
 | `complete_generation_task` | 旧兼容合同：校验完整目标集合后完成多图或无 Run 任务 |
 | `fail_generation_task` | 记录失败原因并结束任务 |
@@ -423,15 +427,15 @@ GAssetForge.McpServer.exe
    快照缺失、被替换或被篡改时，认领会在任务状态写入前失败并保持 `Pending`。推荐源路径由软件从
    冻结的 `delivery.assetRoot + delivery.workspace.modelOutputPaths[0]` 计算并做 Assets 边界校验，供 CLI 兜底
    直接落盘；Agent 不得自行推断或改写。
-2. 按 `preferredSkill` 调用真实图像模型，为这个单图任务取得本地 PNG `sourcePath`。CLI fallback 必须传
-   `--size <imageGeneration.output.cliSize>`，并继续在提示中约束最终目标宽高与画幅，不能默认改成方形；存在
-   风格参考图时使用 `edit` 并为每张路径重复 `--image`，只有无参考图时才使用 `generate`。不得用程序化绘图
-   替代，也不得自行创建 Run、搬运、缩放、抠图或修改 Alpha。
-3. 调用
+2. 按 `preferredSkill` 调用真实内置图像模型。若 app-server 返回明确的绝对 `savedPath/sourcePath`，调用
    `submit_generation_output(taskId, agentId, outputIndex=0, sourcePath=<模型返回绝对路径>)`。
+3. 若内置模型只返回可视图片且 `savedPath=null`，调用 `run_image_delivery_fallback(taskId, agentId)`。Harness
+   自行读取冻结提示、画幅、规则与参考图，使用绝对 Python/`py -3` 和官方 `image_gen.py`，以 `--prompt-file`、
+   `--size`、`--output-format png`、`--n 1`、`--no-augment`、`--out <recommendedSourcePath>` 确定性落盘；有参考图
+   时使用 `edit` 并重复 `--image`。Agent 不再运行 Python、uv 或自行拼装命令。
 4. 软件归档源图、归一化冻结画布、补齐第一道纯色底、执行可选背景剔除、验证最终 Tilemap/PNG 合同、原子
    写入 `delivery.targetPaths[0]`，并自动把任务登记为 `Completed`。
-5. 只有 ImageGen 或提交工具真实失败时才调用 `fail_generation_task`，并保留准确错误；单项失败不阻塞同批
+5. 只有 ImageGen、Harness 兜底或提交工具真实失败时才调用 `fail_generation_task`，并保留准确错误；单项失败不阻塞同批
    其它 task ID。
 
 Agent Host 可以并发调度多个单图任务，但协议不规定固定子 Agent 名称、槽位或页面并行数。新任务必须满足

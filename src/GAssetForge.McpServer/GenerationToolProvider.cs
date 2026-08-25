@@ -1,5 +1,6 @@
 using System.Buffers;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using GAssetForge.Core;
@@ -11,11 +12,14 @@ internal sealed class GenerationToolProvider(
     IGenerationTaskStore taskStore,
     WorkspaceContextResolver contextResolver,
     ServerOptions options,
-    string storeFilePath)
+    string storeFilePath,
+    IImageGenerationCliFallbackService? imageGenerationCliFallbackService = null)
 {
     private readonly GeneratedAssetPostProcessor _postProcessor = new(contextResolver);
     private readonly GeneratedOutputSubmissionService _submissionService =
         new(contextResolver, new GeneratedAssetPostProcessor(contextResolver));
+    private readonly IImageGenerationCliFallbackService _imageGenerationCliFallbackService =
+        imageGenerationCliFallbackService ?? new ImageGenerationCliFallbackService();
 
     public McpToolCatalog CreateCatalog() => new(CreateDefinitions());
 
@@ -177,6 +181,21 @@ internal sealed class GenerationToolProvider(
                 }
                 """),
             SubmitOutputAsync),
+        new(
+            "run_image_delivery_fallback",
+            "仅当本次内置 ImageGen 返回可视结果但 savedPath 为空时，调用 GAssetForge Harness 的官方 image_gen.py 本地交付兜底。软件从已认领任务读取冻结提示、参考图、尺寸和 recommendedSourcePath，自行发现 Python、执行模型 CLI、验证 PNG、完成后处理并提交；Agent 不得传入任意命令、路径或提示词。",
+            McpToolCatalog.Schema("""
+                {
+                  "type":"object",
+                  "properties":{
+                    "taskId":{"type":"string","minLength":1},
+                    "agentId":{"type":"string","minLength":1,"maxLength":128}
+                  },
+                  "required":["taskId","agentId"],
+                  "additionalProperties":false
+                }
+                """),
+            RunImageDeliveryFallbackAsync),
         new(
             "process_generation_output",
             "把已认领任务中指定 0-based outputIndex 的纯色底 staging PNG 交给 GAssetForge 本地剔色，验证最终尺寸、Alpha 与工作流约束后再原子提交到冻结的 targetPath。路径只能来自 parameters.delivery。",
@@ -791,7 +810,7 @@ internal sealed class GenerationToolProvider(
         var existingTask = await taskStore.GetAsync(taskId, cancellationToken).ConfigureAwait(false)
             ?? throw new KeyNotFoundException($"生成任务不存在：{taskId}");
         EnsureClaimOwnershipForProcessing(existingTask, agentId);
-        var task = await taskStore.RenewClaimAsync(taskId, agentId, cancellationToken)
+        var task = await taskStore.RenewClaimAsync(existingTask.Id, agentId, cancellationToken)
             .ConfigureAwait(false);
         var delivery = ReadDeliveryOrThrow(task.Constraints);
         var result = await _postProcessor.ProcessAsync(
@@ -829,6 +848,146 @@ internal sealed class GenerationToolProvider(
             ?? throw new KeyNotFoundException($"生成任务不存在：{taskId}");
         var delivery = ReadDeliveryOrThrow(existingTask.Constraints)
             ?? throw new InvalidDataException("submit_generation_output 要求冻结 parameters.delivery。");
+        return await SubmitOutputCoreAsync(
+                existingTask,
+                delivery,
+                agentId,
+                outputIndex,
+                sourcePath,
+                cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private async Task<object?> RunImageDeliveryFallbackAsync(
+        JsonElement arguments,
+        CancellationToken cancellationToken)
+    {
+        var taskId = JsonArguments.RequiredString(arguments, "taskId");
+        var agentId = JsonArguments.RequiredString(arguments, "agentId");
+        var existingTask = await taskStore.GetAsync(taskId, cancellationToken).ConfigureAwait(false)
+            ?? throw new KeyNotFoundException($"生成任务不存在：{taskId}");
+        var delivery = ReadDeliveryOrThrow(existingTask.Constraints)
+            ?? throw new InvalidDataException("图片本地交付兜底要求冻结 parameters.delivery。");
+        if (delivery.Workspace is not { } workspace)
+        {
+            throw new InvalidDataException(
+                "图片本地交付兜底只支持带 project-local workspace 的新单图任务。");
+        }
+
+        if (existingTask.Constraints.Output.Count != 1 ||
+            workspace.ModelOutputPaths.Length != 1 ||
+            delivery.TargetPaths.Length != 1)
+        {
+            throw new InvalidDataException(
+                "图片本地交付兜底要求一张图片一个任务，并且只有一个冻结模型源路径和最终目标。");
+        }
+
+        if (existingTask.Status == GenerationTaskStatus.Completed)
+        {
+            return new
+            {
+                task = existingTask,
+                idempotent = true,
+                targetPath = delivery.TargetPaths[0],
+                message = "任务已经完成；未重复调用 Image API。"
+            };
+        }
+
+        EnsureClaimOwnershipForProcessing(existingTask, agentId);
+        var task = await taskStore.RenewClaimAsync(existingTask.Id, agentId, cancellationToken)
+            .ConfigureAwait(false);
+        var recommendedSourcePath = ResolveRecommendedSourcePath(delivery);
+        var promptPlan = contextResolver.ResolveDeliveryAssetPath(
+            workspace.PromptPath,
+            delivery.AssetRoot,
+            requireExistingFile: false,
+            "图片 CLI 冻结提示文件");
+        var fallbackPromptPath = Path.Combine(
+            Path.GetDirectoryName(promptPlan.FullPath)!,
+            $"{Path.GetFileNameWithoutExtension(promptPlan.FullPath)}.imagegen-cli.txt");
+        var referenceSourcePaths = await ResolveStyleReferenceSourcePathsAsync(
+                task.Constraints.Parameters?["style"] as JsonObject,
+                cancellationToken)
+            .ConfigureAwait(false);
+        var fallbackRequest = new ImageGenerationCliFallbackRequest(
+            task.Id,
+            agentId,
+            BuildImageGenerationPrompt(task),
+            fallbackPromptPath,
+            referenceSourcePaths,
+            ResolveCliSize(
+                    task.Constraints.Output.Width,
+                    task.Constraints.Output.Height)
+                .Size,
+            recommendedSourcePath);
+
+        ImageGenerationCliFallbackResult fallback;
+        using (var measurement = GenerationRunJournal.Measure(
+                   delivery,
+                   task,
+                   "image.cli_fallback",
+                   agentId,
+                   0,
+                   workspace.ModelOutputPaths[0],
+                   recommendedSourcePath))
+        {
+            try
+            {
+                fallback = await _imageGenerationCliFallbackService.GenerateAsync(
+                        fallbackRequest,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (!PathsEqual(fallback.SourcePath, recommendedSourcePath))
+                {
+                    throw new InvalidDataException(
+                        "图片 CLI 兜底返回路径与冻结 recommendedSourcePath 不一致。");
+                }
+
+                measurement.Complete(
+                    fallback.AlreadyExisted
+                        ? "发现精确 recommendedSourcePath 已有有效 PNG，跳过重复 Image API 调用。"
+                        : "官方 image_gen.py 已把模型 PNG 直接写入冻结 recommendedSourcePath。",
+                    workspace.ModelOutputPaths[0]);
+            }
+            catch (Exception exception)
+            {
+                measurement.Fail(exception, "image_delivery_fallback_failed");
+                throw;
+            }
+        }
+
+        var refreshedTask = await taskStore.GetAsync(task.Id, cancellationToken).ConfigureAwait(false)
+            ?? throw new KeyNotFoundException($"生成任务不存在：{task.Id}");
+        var submission = await SubmitOutputCoreAsync(
+                refreshedTask,
+                delivery,
+                agentId,
+                0,
+                fallback.SourcePath,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return new
+        {
+            fallback = new
+            {
+                fallback.SourcePath,
+                fallback.PythonCommandDisplay,
+                fallback.ImageGenScriptPath,
+                fallback.DiagnosticSummary,
+                fallback.AlreadyExisted
+            },
+            submission
+        };
+    }
+
+    private async Task<object> SubmitOutputCoreAsync(
+        GenerationTask existingTask,
+        GenerationDeliveryPlan delivery,
+        string agentId,
+        int outputIndex,
+        string sourcePath,
+        CancellationToken cancellationToken)
+    {
         if (delivery.Workspace is null)
         {
             throw new InvalidDataException(
@@ -853,7 +1012,7 @@ internal sealed class GenerationToolProvider(
         }
 
         EnsureClaimOwnershipForProcessing(existingTask, agentId);
-        var task = await taskStore.RenewClaimAsync(taskId, agentId, cancellationToken)
+        var task = await taskStore.RenewClaimAsync(existingTask.Id, agentId, cancellationToken)
             .ConfigureAwait(false);
         var submission = await _submissionService.SubmitAsync(
                 task,
@@ -876,7 +1035,7 @@ internal sealed class GenerationToolProvider(
             try
             {
                 completed = await taskStore.CompleteAsync(
-                        taskId,
+                        existingTask.Id,
                         agentId,
                         delivery.TargetPaths,
                         cancellationToken)
@@ -901,6 +1060,86 @@ internal sealed class GenerationToolProvider(
             idempotent = false
         };
     }
+
+    private static string BuildImageGenerationPrompt(GenerationTask task)
+    {
+        var constraints = task.Constraints;
+        var output = constraints.Output;
+        var divisor = GreatestCommonDivisor(output.Width, output.Height);
+        var styleNode = constraints.Parameters?["style"] as JsonObject;
+        var builder = new StringBuilder()
+            .AppendLine("Create one production game-art raster asset for GAssetForge.")
+            .Append("Final target canvas: ")
+            .Append(output.Width)
+            .Append('x')
+            .Append(output.Height)
+            .Append(" pixels; aspect ratio ")
+            .Append(output.Width / divisor)
+            .Append(':')
+            .Append(output.Height / divisor)
+            .AppendLine(". Preserve this composition and orientation exactly.")
+            .AppendLine()
+            .AppendLine("Content:")
+            .AppendLine(constraints.Prompt.Trim());
+
+        var styleDescription = ReadOptionalString(styleNode, "description");
+        var stylePrompt = ReadOptionalString(styleNode, "prompt");
+        if (!string.IsNullOrWhiteSpace(styleDescription) || !string.IsNullOrWhiteSpace(stylePrompt))
+        {
+            builder.AppendLine().AppendLine("Style:");
+            if (!string.IsNullOrWhiteSpace(styleDescription))
+            {
+                builder.AppendLine(styleDescription.Trim());
+            }
+
+            if (!string.IsNullOrWhiteSpace(stylePrompt))
+            {
+                builder.AppendLine(stylePrompt.Trim());
+            }
+        }
+
+        var requiredRules = constraints.Rules.Where(rule => rule.Required).ToArray();
+        if (requiredRules.Length > 0)
+        {
+            builder.AppendLine().AppendLine("Required constraints (do not reinterpret or rotate):");
+            foreach (var rule in requiredRules)
+            {
+                builder.Append("- [")
+                    .Append(rule.Category)
+                    .Append('/')
+                    .Append(rule.Key)
+                    .Append("] ")
+                    .AppendLine(rule.Instruction.Trim());
+            }
+        }
+
+        if (output.BackgroundRemoval is { } removal)
+        {
+            builder.AppendLine()
+                .Append("Generation background: uniform opaque ")
+                .Append(removal.ColorHex)
+                .AppendLine(" across the full canvas and all pixels outside the asset silhouette. No gradient, texture, shadow, fog, checkerboard, or transparency in this first-stage model image.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(constraints.NegativePrompt))
+        {
+            builder.AppendLine()
+                .AppendLine("Negative constraints:")
+                .AppendLine(constraints.NegativePrompt.Trim());
+        }
+
+        builder.AppendLine()
+            .AppendLine("Return exactly one PNG image. Do not add labels, captions, borders, contact sheets, or alternate variants.");
+        return builder.ToString();
+    }
+
+    private static bool PathsEqual(string left, string right) =>
+        string.Equals(
+            Path.GetFullPath(left),
+            Path.GetFullPath(right),
+            OperatingSystem.IsWindows()
+                ? StringComparison.OrdinalIgnoreCase
+                : StringComparison.Ordinal);
 
     private async Task<object?> FailTaskAsync(JsonElement arguments, CancellationToken cancellationToken)
     {

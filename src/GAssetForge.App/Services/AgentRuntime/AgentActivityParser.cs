@@ -16,7 +16,8 @@ internal sealed record ParsedAgentActivity(
     string? ItemType,
     string? TaskId,
     string EventName,
-    bool IsTerminal);
+    bool IsTerminal,
+    string? SavedPath);
 
 /// <summary>
 /// Normalizes Codex app-server notifications and codex exec JSONL events into a small,
@@ -210,6 +211,9 @@ internal sealed class AgentActivityParser
         var itemFailed = string.Equals(status, "failed", StringComparison.OrdinalIgnoreCase) ||
                          ReadErrorMessage(item) is not null;
         var taskId = ReadTaskId(item);
+        var imageGeneration = CollapseToken(itemType) == "imagegeneration"
+            ? ReadImageGeneration(item)
+            : null;
 
         var category = ResolveItemCategory(itemType, completed);
         string message;
@@ -254,6 +258,12 @@ internal sealed class AgentActivityParser
             case "imageview":
                 message = BuildImageViewMessage(item, completed);
                 break;
+            case "imagegeneration":
+                message = BuildImageGenerationMessage(
+                    imageGeneration!,
+                    completed,
+                    itemFailed);
+                break;
             case "filechange":
                 message = completed ? "Agent 已完成文件变更步骤。" : "Agent 正在处理文件变更。";
                 break;
@@ -268,18 +278,21 @@ internal sealed class AgentActivityParser
             message = $"{message.TrimEnd('。')}：{itemError}";
         }
 
+        var imageGenerationWarning = imageGeneration is { HasInvalidSavedPath: true } ||
+                                     completed && imageGeneration is { SavedPath: null };
         return Create(
             timestamp,
             itemFailed ? AgentActivityCategory.Error : category,
             message,
-            itemFailed,
+            itemFailed || imageGenerationWarning,
             threadId,
             turnId,
             itemId,
             itemType,
             taskId,
             eventName,
-            completed);
+            completed,
+            imageGeneration?.SavedPath);
     }
 
     private static AgentActivityCategory ResolveItemCategory(string itemType, bool completed) =>
@@ -288,7 +301,7 @@ internal sealed class AgentActivityParser
             "agentmessage" => AgentActivityCategory.AgentMessage,
             "plan" => AgentActivityCategory.Plan,
             "reasoning" => AgentActivityCategory.Reasoning,
-            "mcptoolcall" or "dynamictoolcall" => completed
+            "mcptoolcall" or "dynamictoolcall" or "imagegeneration" => completed
                 ? AgentActivityCategory.ToolCompleted
                 : AgentActivityCategory.ToolStarted,
             "commandexecution" => completed
@@ -340,6 +353,93 @@ internal sealed class AgentActivityParser
             ? "图片"
             : $"图片 {LimitIdentifier(fileName, 120)}";
         return completed ? $"Agent 已检查{target}。" : $"Agent 正在检查{target}。";
+    }
+
+    private static string BuildImageGenerationMessage(
+        ImageGenerationActivityDetails details,
+        bool completed,
+        bool failed)
+    {
+        var status = LimitIdentifier(
+            details.Status ?? (completed ? "completed" : "unknown"),
+            80);
+        if (!string.IsNullOrWhiteSpace(details.SavedPath))
+        {
+            return failed
+                ? $"Agent 图像生成失败（status={status}），但报告了本地 savedPath：{details.SavedPath}"
+                : $"Agent 图像生成已落盘（status={status}）：{details.SavedPath}";
+        }
+
+        if (details.HasInvalidSavedPath)
+        {
+            return $"Agent 图像生成返回了不可用的非绝对 savedPath（status={status}）。";
+        }
+
+        if (details.HasVisibleResult)
+        {
+            return $"Agent 图像生成已返回可视结果但未落盘（status={status}，savedPath=null）。";
+        }
+
+        return completed
+            ? $"Agent 图像生成已结束，但未返回可视结果且未落盘（status={status}，savedPath=null）。"
+            : $"Agent 正在生成图片（status={status}）。";
+    }
+
+    private static ImageGenerationActivityDetails ReadImageGeneration(JsonElement item)
+    {
+        var status = ReadFirstString(item, "status");
+        var hasVisibleResult = item.TryGetProperty("result", out var result) &&
+                               result.ValueKind == JsonValueKind.String &&
+                               !string.IsNullOrWhiteSpace(result.GetString());
+        var savedPath = ReadAbsoluteSavedPath(item, out var hasInvalidSavedPath);
+        return new ImageGenerationActivityDetails(
+            status,
+            hasVisibleResult,
+            savedPath,
+            hasInvalidSavedPath);
+    }
+
+    private static string? ReadAbsoluteSavedPath(
+        JsonElement item,
+        out bool hasInvalidSavedPath)
+    {
+        hasInvalidSavedPath = false;
+        if (!item.TryGetProperty("savedPath", out var savedPathElement) ||
+            savedPathElement.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return null;
+        }
+
+        if (savedPathElement.ValueKind != JsonValueKind.String)
+        {
+            hasInvalidSavedPath = true;
+            return null;
+        }
+
+        var rawPath = FilterDisplayCharacters(savedPathElement.GetString() ?? string.Empty).Trim();
+        if (rawPath.Length == 0)
+        {
+            return null;
+        }
+
+        try
+        {
+            if (!Path.IsPathFullyQualified(rawPath))
+            {
+                hasInvalidSavedPath = true;
+                return null;
+            }
+
+            return Path.GetFullPath(rawPath);
+        }
+        catch (Exception exception) when (exception is
+                   ArgumentException or
+                   NotSupportedException or
+                   PathTooLongException)
+        {
+            hasInvalidSavedPath = true;
+            return null;
+        }
     }
 
     private static string? ReadTaskId(JsonElement item)
@@ -454,6 +554,7 @@ internal sealed class AgentActivityParser
         "commandexecution" => "commandExecution",
         "filechange" => "fileChange",
         "imageview" => "imageView",
+        "imagegeneration" => "imageGeneration",
         "websearch" => "webSearch",
         "reasoning" => "reasoning",
         "plan" => "plan",
@@ -485,7 +586,8 @@ internal sealed class AgentActivityParser
         string? itemType = null,
         string? taskId = null,
         string? eventName = null,
-        bool isTerminal = false) =>
+        bool isTerminal = false,
+        string? savedPath = null) =>
         new(
             timestamp,
             category,
@@ -497,7 +599,14 @@ internal sealed class AgentActivityParser
             CleanIdentifier(itemType, 80),
             CleanIdentifier(taskId, MaximumIdentifierLength),
             CleanIdentifier(eventName, 128) ?? string.Empty,
-            isTerminal);
+            isTerminal,
+            savedPath);
+
+    private sealed record ImageGenerationActivityDetails(
+        string? Status,
+        bool HasVisibleResult,
+        string? SavedPath,
+        bool HasInvalidSavedPath);
 
     private static bool TryReadObject(JsonElement element, string propertyName, out JsonElement value)
     {

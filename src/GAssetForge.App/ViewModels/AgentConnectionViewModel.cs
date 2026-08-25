@@ -738,7 +738,27 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
 
             Dispatch(() =>
             {
+                _lastTurnStatus = "正在刷新 Agent 执行环境";
+                RefreshState();
+            });
+            var resumeThreadId = _runtimeService.ThreadId ?? _resumeThreadId;
+            await _runtimeService.EnsureSessionAsync(
+                    WorkingDirectory,
+                    resumeThreadId,
+                    _serverService,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (!IsConnected)
+            {
+                throw new InvalidOperationException(
+                    "Agent 执行环境刷新后尚未达到可执行状态。请检查 Codex 认证与 MCP 工具初始化状态。");
+            }
+
+            Dispatch(() =>
+            {
+                _activeWorkingDirectory = WorkingDirectory;
                 _lastTurnStatus = "正在提交 Turn";
+                CaptureRuntimeSession();
                 RefreshState();
             });
             var result = await _runtimeService.RunTurnAsync(prompt, cancellationToken).ConfigureAwait(false);

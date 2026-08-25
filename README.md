@@ -118,9 +118,10 @@ Windows 下选择 Codex Runtime 时不会只依据文件是否存在。桌面端
 可用 CLI；所有候选均不可启动时会显示明确的 Runtime 诊断，而不会把状态伪装为已连接。
 
 受管 `gasset_forge` 配置只向 Codex 开放 `server_info`、`get_generation_task`、
-`claim_generation_task`、`process_generation_output`、`complete_generation_task` 和
-`fail_generation_task`，并设置
-`default_tools_approval_mode = "approve"`。点击“开始生成”已构成这条本机受管工作流的明确授权；同时 WPF
+`claim_generation_task`、`submit_generation_output`、`run_image_delivery_fallback`、
+`process_generation_output`、`complete_generation_task` 和 `fail_generation_task`，并设置
+`tool_timeout_sec = 900` 与 `default_tools_approval_mode = "approve"`。前者为最长 8 分钟的 Image API CLI
+和本地后处理留出有界余量，避免 Codex 默认 60 秒 MCP 工具超时提前取消任务。点击“开始生成”已构成这条本机受管工作流的明确授权；同时 WPF
 Host 已实现 Codex App Server 的 `mcpServer/elicitation/request` 入站请求处理，对当前 Running Turn、当前
 批次任务和上述写操作进行范围校验，超出范围仍然拒绝。此前 Host 把这类带 `method + id` 的请求统一返回
 `-32601`，会被 Codex 解释成 `user rejected MCP tool call`，正是任务无法被认领的协议根因；现在不再依赖
@@ -142,7 +143,8 @@ task ID，但绝不包含 Bearer Token 明文。连接指令必须在已经加�
 并用 `--arguments-base64` 传入 UTF-8 JSON 对象的标准 Base64。该模式每次只执行一个工具、输出 JSON 后退出，
 不需要启动 HTTP Server，也不需要 Bearer Token 或 MCP 会话；它与桌面端复用同一任务队列、认领状态机、
 路径边界和产物校验。桥接仅允许 `server_info`、`get_generation_task`、`claim_generation_task`、
-`submit_generation_output`、`process_generation_output`、`complete_generation_task`、`fail_generation_task`，
+`submit_generation_output`、`run_image_delivery_fallback`、`process_generation_output`、
+`complete_generation_task`、`fail_generation_task`，
 拒绝创建或枚举任意任务。
 Base64 只是命令行传输编码，不是加密；人工接力仍必须使用当前批次给出的明确 task ID，不能把工具白名单
 视为任意任务授权。完整调用示例与退出码见 [MCP 接入说明](docs/MCP.md)。

@@ -28,6 +28,7 @@ internal static class AgentRuntimeTransportSmokeTests
         await JsonLineRpcFailureFailsEveryPendingRequestAsync();
         await JsonLineRpcDispatchesInboundServerRequestsAsync();
         await CodexAppServerUsesExpectedInitializationShapeAsync();
+        await CodexAppServerKeepsImageGenerationNotificationsStructuredAsync();
         await CodexAppServerFreezesWorkspaceWriteSandboxPolicyPerTurnAsync();
         await CodexAppServerFailsActiveTurnWhenProtocolStreamEndsAsync();
         await CodexAppServerScopesGAssetForgeMcpApprovalsToTheActiveBatchAsync();
@@ -638,6 +639,103 @@ internal static class AgentRuntimeTransportSmokeTests
             "turn/start 必须显式冻结 Image API 出站网络权限");
     }
 
+    private static async Task CodexAppServerKeepsImageGenerationNotificationsStructuredAsync()
+    {
+        var standardOutput = new AsyncLineTextReader();
+        var standardInput = new RecordingTextWriter(line =>
+        {
+            using var document = JsonDocument.Parse(line);
+            var root = document.RootElement;
+            if (root.TryGetProperty("id", out var id) &&
+                root.TryGetProperty("method", out var method) &&
+                string.Equals(method.GetString(), "initialize", StringComparison.Ordinal))
+            {
+                standardOutput.EnqueueLine(JsonSerializer.Serialize(new
+                {
+                    id = id.GetInt64(),
+                    result = new
+                    {
+                        codexHome = Path.GetFullPath(Environment.CurrentDirectory),
+                        platformFamily = "windows",
+                        platformOs = "windows",
+                        userAgent = "codex_app_server/0.149.1"
+                    }
+                }));
+            }
+
+            return ValueTask.CompletedTask;
+        });
+        var process = new FakeAgentChildProcess(
+            id: 4106,
+            standardInput,
+            standardOutput,
+            new StringReader(string.Empty),
+            onExit: standardOutput.Complete);
+        await using var transport = new CodexAppServerTransport(
+            new FakeAgentProcessFactory((_, _) => process));
+        var notifications = new ConcurrentQueue<AgentNotificationEventArgs>();
+        var warnings = new ConcurrentQueue<string>();
+        transport.NotificationReceived += (_, eventArgs) => notifications.Enqueue(eventArgs);
+        transport.LogReceived += (_, eventArgs) =>
+        {
+            if (eventArgs.Level == AgentLogLevel.Warning)
+            {
+                warnings.Enqueue(eventArgs.Message);
+            }
+        };
+
+        await transport.StartAsync(new AgentSessionStartOptions
+        {
+            ExecutablePath = "codex-fixture",
+            WorkingDirectory = Environment.CurrentDirectory,
+            RequestTimeout = TimeSpan.FromSeconds(3)
+        });
+
+        const string ordinaryText = "visible image ordinary text must stay outside JSONL notifications";
+        var savedPath = Path.GetFullPath(Path.Combine(
+            Path.GetTempPath(),
+            "GAssetForge.ImageGenerationTransport",
+            "generated.png"));
+        standardOutput.EnqueueLine(ordinaryText);
+        standardOutput.EnqueueLine(JsonSerializer.Serialize(new
+        {
+            method = "item/completed",
+            @params = new
+            {
+                threadId = "thread-image-generation",
+                turnId = "turn-image-generation",
+                item = new
+                {
+                    id = "image-generation-transport",
+                    type = "imageGeneration",
+                    status = "completed",
+                    result = "visible-result",
+                    savedPath
+                }
+            }
+        }));
+
+        await WaitUntilAsync(
+            () => notifications.Count == 1 && warnings.Count > 0,
+            TimeSpan.FromSeconds(2),
+            "App Server 没有独立转发 imageGeneration JSON 通知与非协议文本诊断。");
+
+        var notification = notifications.Single();
+        Equal("item/completed", notification.Method,
+            "imageGeneration 必须保留正式 item/completed 事件名");
+        var item = notification.Parameters.GetProperty("item");
+        Equal("imageGeneration", item.GetProperty("type").GetString(),
+            "transport 必须保留 imageGeneration item 类型");
+        Equal("completed", item.GetProperty("status").GetString(),
+            "transport 必须保留 imageGeneration status");
+        Equal("visible-result", item.GetProperty("result").GetString(),
+            "transport 必须保留结构化 result 字段供解析器判断可视结果");
+        Equal(savedPath, item.GetProperty("savedPath").GetString(),
+            "transport 必须保留结构化绝对 savedPath");
+        True(warnings.All(message => !message.Contains(ordinaryText, StringComparison.Ordinal)),
+            "普通非 JSON 文本只能形成脱敏诊断，不能混入通知或日志正文");
+    }
+
     private static async Task CodexAppServerScopesGAssetForgeMcpApprovalsToTheActiveBatchAsync()
     {
         const string threadId = "thread-generation-fixture";
@@ -705,6 +803,18 @@ internal static class AgentRuntimeTransportSmokeTests
                             turnId,
                             "submit_generation_output",
                             approvedTaskId));
+                        standardOutput.EnqueueLine(CreateMcpApprovalRequest(
+                            805,
+                            threadId,
+                            turnId,
+                            "run_image_delivery_fallback",
+                            approvedTaskId));
+                        standardOutput.EnqueueLine(CreateMcpApprovalRequest(
+                            806,
+                            threadId,
+                            turnId,
+                            "run_image_delivery_fallback",
+                            taskId: null));
                         break;
                 }
 
@@ -713,13 +823,13 @@ internal static class AgentRuntimeTransportSmokeTests
 
             if (!root.TryGetProperty("id", out var responseId) ||
                 !responseId.TryGetInt64(out var numericResponseId) ||
-                numericResponseId is < 801 or > 804)
+                numericResponseId is < 801 or > 806)
             {
                 return ValueTask.CompletedTask;
             }
 
             approvalResponses[numericResponseId] = root.GetProperty("result").Clone();
-            if (numericResponseId == 804)
+            if (numericResponseId == 806)
             {
                 standardOutput.EnqueueLine(JsonSerializer.Serialize(new
                 {
@@ -756,7 +866,7 @@ internal static class AgentRuntimeTransportSmokeTests
 
         True(result.IsSuccess, "MCP 审批 fixture Turn 应正常完成");
         await WaitUntilAsync(
-            () => approvalResponses.Count == 4,
+            () => approvalResponses.Count == 6,
             TimeSpan.FromSeconds(2),
             "宿主没有响应全部 MCP elicitation 请求。");
         Equal("decline", approvalResponses[801].GetProperty("action").GetString(),
@@ -767,6 +877,10 @@ internal static class AgentRuntimeTransportSmokeTests
             "当前批次 claim 必须批准");
         Equal("accept", approvalResponses[804].GetProperty("action").GetString(),
             "当前批次 submit_generation_output 必须批准");
+        Equal("accept", approvalResponses[805].GetProperty("action").GetString(),
+            "当前批次 run_image_delivery_fallback 必须批准");
+        Equal("decline", approvalResponses[806].GetProperty("action").GetString(),
+            "缺少 taskId 的 run_image_delivery_fallback 必须拒绝");
         Equal(JsonValueKind.Object, approvalResponses[804].GetProperty("content").ValueKind,
             "批准响应 content 必须是空对象");
         Equal(0, approvalResponses[804].GetProperty("content").EnumerateObject().Count(),
@@ -856,13 +970,16 @@ internal static class AgentRuntimeTransportSmokeTests
         string threadId,
         string turnId,
         string toolName,
-        string taskId)
+        string? taskId)
     {
         var toolParameters = new Dictionary<string, object?>
         {
-            ["taskId"] = taskId,
             ["agentId"] = "codex-root"
         };
+        if (!string.IsNullOrWhiteSpace(taskId))
+        {
+            toolParameters["taskId"] = taskId;
+        }
         if (string.Equals(toolName, "submit_generation_output", StringComparison.Ordinal))
         {
             toolParameters["outputIndex"] = 0;
@@ -911,6 +1028,8 @@ internal static class AgentRuntimeTransportSmokeTests
                 $"mcp_servers.gasset_forge.bearer_token_env_var={CodexProcessLaunch.TomlString(TestTokenVariable)}",
                 "-c",
                 "mcp_servers.gasset_forge.required=true",
+                "-c",
+                $"mcp_servers.gasset_forge.tool_timeout_sec={GenerationMcpToolPolicy.ToolTimeoutSeconds}",
                 "-c",
                 $"mcp_servers.gasset_forge.enabled_tools={GenerationMcpToolPolicy.BuildTomlToolArray()}",
                 "-c",
@@ -1801,6 +1920,8 @@ internal static class AgentRuntimeTransportSmokeTests
             $"mcp_servers.gasset_forge.bearer_token_env_var={CodexProcessLaunch.TomlString(TestTokenVariable)}";
         var toolApprovalConfig =
             $"mcp_servers.gasset_forge.default_tools_approval_mode={CodexProcessLaunch.TomlString(GenerationMcpToolPolicy.DefaultToolsApprovalMode)}";
+        var toolTimeoutConfig =
+            $"mcp_servers.gasset_forge.tool_timeout_sec={GenerationMcpToolPolicy.ToolTimeoutSeconds}";
         var enabledToolsConfig =
             $"mcp_servers.gasset_forge.enabled_tools={GenerationMcpToolPolicy.BuildTomlToolArray()}";
         SequenceEqual(
@@ -1823,6 +1944,8 @@ internal static class AgentRuntimeTransportSmokeTests
                 tokenVariableConfig,
                 "-c",
                 "mcp_servers.gasset_forge.required=true",
+                "-c",
+                toolTimeoutConfig,
                 "-c",
                 enabledToolsConfig,
                 "-c",
@@ -1850,6 +1973,8 @@ internal static class AgentRuntimeTransportSmokeTests
                 tokenVariableConfig,
                 "-c",
                 "mcp_servers.gasset_forge.required=true",
+                "-c",
+                toolTimeoutConfig,
                 "-c",
                 enabledToolsConfig,
                 "-c",

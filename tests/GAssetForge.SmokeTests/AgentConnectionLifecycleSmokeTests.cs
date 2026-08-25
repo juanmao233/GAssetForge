@@ -29,6 +29,11 @@ internal static class AgentConnectionLifecycleSmokeTests
         StandaloneMcpStartsAndStopsWithoutStartingRuntime(temporaryRoot);
         HealthyMcpIsReusedWhenRuntimeRetrySucceeds(temporaryRoot);
         RuntimeSessionReceivesFreshPathOverride(temporaryRoot);
+        RuntimeEnvironmentSnapshotCoversImageApiAndProxyVariables();
+        EnvironmentFingerprintIsStableAndDoesNotExposeSecrets();
+        RuntimeSessionRestartsWhenFreshPathChanges(temporaryRoot);
+        RuntimeSessionRestartsWhenApiOrProxyEnvironmentChanges(temporaryRoot);
+        RunTurnRefreshesRuntimeWhenFreshPathChanges(temporaryRoot);
         SlowRuntimeStartupCanBeDisposedWithoutUiDeadlock(temporaryRoot);
     }
 
@@ -232,11 +237,232 @@ internal static class AgentConnectionLifecycleSmokeTests
             "Codex 子进程 PATH 必须来自当前进程、Machine 与 User 的最新合并快照");
     }
 
+    private static void RuntimeSessionRestartsWhenFreshPathChanges(string temporaryRoot)
+    {
+        var firstPath = Path.Combine(temporaryRoot, "runtime-path-first");
+        var refreshedPath = Path.Combine(temporaryRoot, "runtime-path-with-python");
+        var currentPath = firstPath;
+        var capturedPaths = new ConcurrentQueue<string?>();
+        var fixture = CreateFixture(
+            temporaryRoot,
+            "runtime-refreshes-changed-path",
+            _ => FakeAgentSessionTransport.Ready(options =>
+                capturedPaths.Enqueue(options.EnvironmentVariables["PATH"])),
+            _ => FakeAgentSessionTransport.Failing("exec fallback should not start"),
+            () => currentPath);
+        using var viewModel = fixture.ViewModel;
+
+        viewModel.StartCommand.Execute(null);
+        PumpUntil(
+            () => viewModel.IsConnected && capturedPaths.Count == 1,
+            CommandTimeout,
+            "Runtime 首次启动没有捕获 fixture PATH。");
+
+        currentPath = refreshedPath;
+        fixture.Runtime.EnsureSessionAsync(
+                fixture.WorkingDirectory,
+                fixture.Runtime.ThreadId,
+                fixture.Server)
+            .GetAwaiter()
+            .GetResult();
+
+        Equal(2, fixture.AppServerFactoryCallCount,
+            "PATH 在 Agent 会话启动后变化时 EnsureSessionAsync 必须重建受管 Runtime");
+        True(
+            capturedPaths.SequenceEqual(new[] { firstPath, refreshedPath }),
+            "重建后的 Codex 子进程必须收到最新 PATH 快照");
+
+        fixture.Runtime.EnsureSessionAsync(
+                fixture.WorkingDirectory,
+                fixture.Runtime.ThreadId,
+                fixture.Server)
+            .GetAwaiter()
+            .GetResult();
+        Equal(2, fixture.AppServerFactoryCallCount,
+            "PATH 快照未变化时 EnsureSessionAsync 必须继续复用当前 Runtime");
+    }
+
+    private static void EnvironmentFingerprintIsStableAndDoesNotExposeSecrets()
+    {
+        const string secret = "fixture-secret-must-not-appear";
+        var first = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["OPENAI_API_KEY"] = secret,
+            ["https_proxy"] = "http://proxy.example.invalid:8080",
+            ["OPENAI_ORG_ID"] = "org-fixture",
+            ["OPENAI_PROJECT_ID"] = "project-fixture",
+            ["SSL_CERT_DIR"] = Path.Combine("fixture", "certs")
+        };
+        var reordered = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["SSL_CERT_DIR"] = Path.Combine("fixture", "certs"),
+            ["OPENAI_PROJECT_ID"] = "project-fixture",
+            ["OPENAI_ORG_ID"] = "org-fixture",
+            ["https_proxy"] = "http://proxy.example.invalid:8080",
+            ["OPENAI_API_KEY"] = secret
+        };
+
+        var firstFingerprint = ProcessEnvironmentSnapshot.ComputeEnvironmentFingerprint(first);
+        var reorderedFingerprint = ProcessEnvironmentSnapshot.ComputeEnvironmentFingerprint(reordered);
+
+        Equal(firstFingerprint, reorderedFingerprint,
+            "Runtime 环境指纹不得因 Dictionary 插入顺序变化而触发无意义重启");
+        False(firstFingerprint.Contains(secret, StringComparison.Ordinal),
+            "Runtime 复用状态只能保存不可逆指纹，不得保存或回显 API 密钥");
+        reordered["OPENAI_PROJECT_ID"] = "project-fixture-updated";
+        False(string.Equals(
+                firstFingerprint,
+                ProcessEnvironmentSnapshot.ComputeEnvironmentFingerprint(reordered),
+                StringComparison.Ordinal),
+            "Image API 组织/项目/代理/证书变量变化必须改变 Runtime 环境指纹");
+    }
+
+    private static void RuntimeEnvironmentSnapshotCoversImageApiAndProxyVariables()
+    {
+        var snapshot = ProcessEnvironmentSnapshot.BuildFreshAgentEnvironmentVariables();
+        var expectedNames = new[]
+        {
+            "PATH",
+            "OPENAI_API_KEY",
+            "OPENAI_BASE_URL",
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "NO_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+            "no_proxy",
+            "OPENAI_ORG_ID",
+            "OPENAI_PROJECT_ID",
+            "CODEX_HOME",
+            "GASSETFORGE_PYTHON_EXECUTABLE",
+            "SSL_CERT_FILE",
+            "SSL_CERT_DIR",
+            "REQUESTS_CA_BUNDLE"
+        };
+
+        True(expectedNames.All(snapshot.ContainsKey),
+            "Runtime 环境快照必须覆盖 Harness 使用的 Image API、代理与证书变量集合");
+    }
+
+    private static void RunTurnRefreshesRuntimeWhenFreshPathChanges(string temporaryRoot)
+    {
+        var firstPath = Path.Combine(temporaryRoot, "turn-path-first");
+        var refreshedPath = Path.Combine(temporaryRoot, "turn-path-with-python");
+        var currentPath = firstPath;
+        var capturedPaths = new ConcurrentQueue<string?>();
+        var fixture = CreateFixture(
+            temporaryRoot,
+            "run-turn-refreshes-changed-path",
+            _ => FakeAgentSessionTransport.Ready(options =>
+                capturedPaths.Enqueue(options.EnvironmentVariables["PATH"])),
+            _ => FakeAgentSessionTransport.Failing("exec fallback should not start"),
+            () => currentPath);
+        using var viewModel = fixture.ViewModel;
+
+        viewModel.StartCommand.Execute(null);
+        PumpUntil(
+            () => viewModel.IsConnected && capturedPaths.Count == 1,
+            CommandTimeout,
+            "Runtime 首次启动没有捕获 Turn fixture PATH。");
+
+        currentPath = refreshedPath;
+        var turn = viewModel.RunTurnAsync("fixture generation turn");
+        PumpUntil(
+            () => turn.IsCompleted,
+            CommandTimeout,
+            "提交生成 Turn 前没有完成 Runtime 环境刷新。");
+        var result = turn.GetAwaiter().GetResult();
+
+        True(result.IsSuccess, "环境刷新后生成 Turn 应继续在恢复的 thread 上完成");
+        Equal(2, fixture.AppServerFactoryCallCount,
+            "生成按钮必须在提交 Turn 前触发 EnsureSessionAsync 并重建旧环境 Runtime");
+        True(
+            capturedPaths.SequenceEqual(new[] { firstPath, refreshedPath }),
+            "生成 Turn 重建后的 Codex 子进程必须收到最新 PATH 快照");
+        Equal("fixture-thread", result.ThreadId,
+            "环境刷新重启 Runtime 时必须恢复现有 Codex thread");
+    }
+
+    private static void RuntimeSessionRestartsWhenApiOrProxyEnvironmentChanges(string temporaryRoot)
+    {
+        const string firstApiKey = "fixture-api-key-first";
+        const string refreshedApiKey = "fixture-api-key-refreshed";
+        var currentApiKey = firstApiKey;
+        var currentBaseUrl = "https://api-first.example.invalid/v1";
+        var currentProxy = "http://proxy-first.example.invalid:8080";
+        var currentPython = Path.Combine(temporaryRoot, "Python312", "python.exe");
+        var capturedEnvironments = new ConcurrentQueue<IReadOnlyDictionary<string, string?>>();
+        IReadOnlyDictionary<string, string?> BuildEnvironment() =>
+            new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["OPENAI_API_KEY"] = currentApiKey,
+                ["OPENAI_BASE_URL"] = currentBaseUrl,
+                ["HTTPS_PROXY"] = currentProxy,
+                ["GASSETFORGE_PYTHON_EXECUTABLE"] = currentPython
+            };
+        var fixture = CreateFixture(
+            temporaryRoot,
+            "runtime-refreshes-api-proxy-environment",
+            _ => FakeAgentSessionTransport.Ready(options =>
+                capturedEnvironments.Enqueue(new Dictionary<string, string?>(
+                    options.EnvironmentVariables,
+                    StringComparer.OrdinalIgnoreCase))),
+            _ => FakeAgentSessionTransport.Failing("exec fallback should not start"),
+            () => Path.Combine(temporaryRoot, "stable-runtime-path"),
+            BuildEnvironment);
+        using var viewModel = fixture.ViewModel;
+
+        viewModel.StartCommand.Execute(null);
+        PumpUntil(
+            () => viewModel.IsConnected && capturedEnvironments.Count == 1,
+            CommandTimeout,
+            "Runtime 首次启动没有捕获 API/代理环境快照。");
+
+        currentApiKey = refreshedApiKey;
+        currentBaseUrl = "https://api-refreshed.example.invalid/v1";
+        currentProxy = "http://proxy-refreshed.example.invalid:8080";
+        currentPython = Path.Combine(temporaryRoot, "Python313", "python.exe");
+        var resumeThreadId = fixture.Runtime.ThreadId;
+        fixture.Runtime.EnsureSessionAsync(
+                fixture.WorkingDirectory,
+                resumeThreadId,
+                fixture.Server)
+            .GetAwaiter()
+            .GetResult();
+
+        Equal(2, fixture.AppServerFactoryCallCount,
+            "API、代理或显式 Python 环境变化时必须重建受管 Runtime");
+        var latest = capturedEnvironments.Last();
+        Equal(refreshedApiKey, latest["OPENAI_API_KEY"],
+            "重建后的 Runtime 必须收到最新 Image API Key");
+        Equal(currentBaseUrl, latest["OPENAI_BASE_URL"],
+            "重建后的 Runtime 必须收到最新 Image API Base URL");
+        Equal(currentProxy, latest["HTTPS_PROXY"],
+            "重建后的 Runtime 必须收到最新代理地址");
+        Equal(currentPython, latest["GASSETFORGE_PYTHON_EXECUTABLE"],
+            "重建后的 Runtime 必须收到最新显式 Python 路径");
+        Equal(resumeThreadId, fixture.Runtime.ThreadId,
+            "API/代理环境刷新重启 Runtime 时必须恢复原 Codex thread");
+
+        fixture.Runtime.EnsureSessionAsync(
+                fixture.WorkingDirectory,
+                fixture.Runtime.ThreadId,
+                fixture.Server)
+            .GetAwaiter()
+            .GetResult();
+        Equal(2, fixture.AppServerFactoryCallCount,
+            "API/代理环境未变化时必须继续复用当前 Runtime");
+    }
+
     private static LifecycleFixture CreateFixture(
         string temporaryRoot,
         string testName,
         Func<int, IAgentSessionTransport> appServerFactory,
-        Func<int, IAgentSessionTransport> execFactory)
+        Func<int, IAgentSessionTransport> execFactory,
+        Func<string>? pathEnvironmentProvider = null,
+        Func<IReadOnlyDictionary<string, string?>>? environmentVariablesProvider = null)
     {
         var root = Path.Combine(temporaryRoot, testName, Guid.NewGuid().ToString("N"));
         var paths = new WorkspacePaths(Path.Combine(root, "app-data"));
@@ -249,7 +475,11 @@ internal static class AgentConnectionLifecycleSmokeTests
         var runtime = new CodexAgentRuntimeService(
             "codex-fixture",
             () => appServerFactory(fixture.IncrementAppServerFactoryCallCount()),
-            () => execFactory(fixture.IncrementExecFactoryCallCount()));
+            () => execFactory(fixture.IncrementExecFactoryCallCount()),
+            pathEnvironmentProvider,
+            environmentVariablesProvider);
+        fixture.Runtime = runtime;
+        fixture.WorkingDirectory = workingDirectory;
         fixture.ViewModel = new AgentConnectionViewModel(
             server,
             runtime,
@@ -361,6 +591,10 @@ internal static class AgentConnectionLifecycleSmokeTests
         private int _execFactoryCallCount;
 
         public AgentConnectionViewModel ViewModel { get; set; } = null!;
+
+        public CodexAgentRuntimeService Runtime { get; set; } = null!;
+
+        public string WorkingDirectory { get; set; } = string.Empty;
 
         public McpServerProcessService Server { get; } = server;
 

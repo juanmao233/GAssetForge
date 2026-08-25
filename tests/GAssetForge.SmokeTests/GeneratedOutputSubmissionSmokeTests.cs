@@ -31,6 +31,8 @@ internal static class GeneratedOutputSubmissionSmokeTests
         try
         {
             await SubmissionPreservesAuditableStagesAndCompletesIdempotentlyAsync(dataRoot);
+            await HarnessFallbackGeneratesExactRecommendedPathAndCompletesAsync(dataRoot);
+            await HarnessFallbackRefreshesTaskAfterConcurrentCompletionAsync(dataRoot);
         }
         finally
         {
@@ -39,6 +41,184 @@ internal static class GeneratedOutputSubmissionSmokeTests
                 Directory.Delete(dataRoot, recursive: true);
             }
         }
+    }
+
+    private static async Task HarnessFallbackGeneratesExactRecommendedPathAndCompletesAsync(
+        string dataRoot)
+    {
+        var root = Path.Combine(dataRoot, "harness-fallback-tool");
+        var store = new JsonGenerationTaskStore(Path.Combine(root, "Generation"));
+        var options = new ServerOptions(
+            root,
+            McpTransport.Stdio,
+            IPAddress.Loopback,
+            43120,
+            "codex",
+            null,
+            null);
+        var contextResolver = new WorkspaceContextResolver(options);
+        var fixture = await CreateTaskFixtureAsync(root, store);
+        var fallback = new RecordingFallbackService(request =>
+        {
+            True(request.PromptText.Contains("Final target canvas: 512x512", StringComparison.Ordinal),
+                "Harness fallback prompt 必须保留冻结目标画布");
+            True(request.PromptText.Contains("Required constraints", StringComparison.Ordinal),
+                "Harness fallback prompt 必须包含冻结 required rules");
+            True(request.PromptText.Contains("#FF00FF", StringComparison.Ordinal),
+                "Harness fallback prompt 必须包含第一道纯色底合同");
+            True(request.PromptFilePath.EndsWith(".imagegen-cli.txt", StringComparison.OrdinalIgnoreCase),
+                "Harness fallback 应在项目 prompts 分类中写入独立冻结提示文件");
+            True(Path.IsPathFullyQualified(request.RecommendedSourcePath),
+                "Harness fallback 只能接收软件计算的绝对 recommendedSourcePath");
+            WriteModelFixture(request.RecommendedSourcePath, SubjectColor);
+            return new ImageGenerationCliFallbackResult(
+                request.RecommendedSourcePath,
+                "fixture-python",
+                "fixture-image_gen.py",
+                "fixture generated exact PNG",
+                AlreadyExisted: false);
+        });
+        var provider = new GenerationToolProvider(
+            store,
+            contextResolver,
+            options,
+            store.StoreFilePath,
+            fallback);
+        var catalog = provider.CreateCatalog();
+        var claim = await catalog.CallAsync(
+            "claim_generation_task",
+            JsonSerializer.SerializeToElement(new
+            {
+                taskId = fixture.Task.Id,
+                agentId = AgentId
+            }),
+            CancellationToken.None);
+        False(IsToolError(claim), "Harness fallback 回归任务应先成功认领");
+
+        var result = await catalog.CallAsync(
+            "run_image_delivery_fallback",
+            JsonSerializer.SerializeToElement(new
+            {
+                taskId = fixture.Task.Id,
+                agentId = AgentId
+            }),
+            CancellationToken.None);
+        False(IsToolError(result), "Harness fallback 工具应生成、验证、后处理并完成任务");
+        Equal(1, fallback.Requests.Count,
+            "一次任务只应触发一次受控 Harness fallback 调用");
+
+        var structured = JsonSerializer.SerializeToElement(result, ProtocolJson.Options)
+            .GetProperty("structuredContent");
+        Equal("completed",
+            structured.GetProperty("submission").GetProperty("task").GetProperty("status").GetString(),
+            "run_image_delivery_fallback 必须自动完成单图任务登记");
+        var persisted = await store.GetAsync(fixture.Task.Id)
+            ?? throw new InvalidOperationException("Harness fallback 任务未持久化。");
+        Equal(GenerationTaskStatus.Completed, persisted.Status,
+            "Harness fallback 成功返回后任务真相源必须为 Completed");
+        var target = Path.Combine(
+            fixture.AssetRoot,
+            fixture.Delivery.TargetPaths[0].Replace('/', Path.DirectorySeparatorChar));
+        True(File.Exists(target), "Harness fallback 必须产出冻结最终 target");
+
+        var diagnostics = Path.Combine(
+            fixture.AssetRoot,
+            fixture.Delivery.Workspace!.DiagnosticsPath.Replace('/', Path.DirectorySeparatorChar));
+        AssertMeasuredStage(ReadJournal(diagnostics), "image.cli_fallback");
+
+        var idempotent = await catalog.CallAsync(
+            "run_image_delivery_fallback",
+            JsonSerializer.SerializeToElement(new
+            {
+                taskId = fixture.Task.Id,
+                agentId = AgentId
+            }),
+            CancellationToken.None);
+        False(IsToolError(idempotent), "Completed fallback 任务重复调用应幂等成功");
+        Equal(1, fallback.Requests.Count,
+            "Completed 任务不得再次消耗 Image API 或调用 fallback service");
+    }
+
+    private static async Task HarnessFallbackRefreshesTaskAfterConcurrentCompletionAsync(
+        string dataRoot)
+    {
+        var root = Path.Combine(dataRoot, "harness-fallback-concurrent-completion");
+        var store = new JsonGenerationTaskStore(Path.Combine(root, "Generation"));
+        var options = new ServerOptions(
+            root,
+            McpTransport.Stdio,
+            IPAddress.Loopback,
+            43120,
+            "codex",
+            null,
+            null);
+        var contextResolver = new WorkspaceContextResolver(options);
+        var fixture = await CreateTaskFixtureAsync(root, store);
+        var submissionService = new GeneratedOutputSubmissionService(
+            contextResolver,
+            new GeneratedAssetPostProcessor(contextResolver));
+        var fallback = new RecordingFallbackService(request =>
+        {
+            WriteModelFixture(request.RecommendedSourcePath, SubjectColor);
+            var current = store.GetAsync(fixture.Task.Id).GetAwaiter().GetResult()
+                ?? throw new InvalidOperationException("并发完成回归任务不存在。");
+            _ = submissionService.SubmitAsync(
+                    current,
+                    fixture.Delivery,
+                    AgentId,
+                    0,
+                    request.RecommendedSourcePath,
+                    CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+            _ = store.CompleteAsync(
+                    fixture.Task.Id,
+                    AgentId,
+                    fixture.Delivery.TargetPaths,
+                    CancellationToken.None)
+                .GetAwaiter()
+                .GetResult();
+            return new ImageGenerationCliFallbackResult(
+                request.RecommendedSourcePath,
+                "fixture-python",
+                "fixture-image_gen.py",
+                "another invocation completed this task",
+                AlreadyExisted: false);
+        });
+        var catalog = new GenerationToolProvider(
+                store,
+                contextResolver,
+                options,
+                store.StoreFilePath,
+                fallback)
+            .CreateCatalog();
+        var claim = await catalog.CallAsync(
+            "claim_generation_task",
+            JsonSerializer.SerializeToElement(new
+            {
+                taskId = fixture.Task.Id,
+                agentId = AgentId
+            }),
+            CancellationToken.None);
+        False(IsToolError(claim), "并发完成回归任务应先成功认领");
+
+        var result = await catalog.CallAsync(
+            "run_image_delivery_fallback",
+            JsonSerializer.SerializeToElement(new
+            {
+                taskId = fixture.Task.Id,
+                agentId = AgentId
+            }),
+            CancellationToken.None);
+
+        False(IsToolError(result),
+            "fallback 返回后任务若已由同一认领者并发完成，应重新读取状态并幂等成功");
+        var structured = JsonSerializer.SerializeToElement(result, ProtocolJson.Options)
+            .GetProperty("structuredContent");
+        Equal(true, structured.GetProperty("submission").GetProperty("idempotent").GetBoolean(),
+            "并发完成后的外层 fallback 应报告 idempotent=true，不得用陈旧 Claimed 快照再次续租");
+        Equal(1, fallback.Requests.Count,
+            "状态刷新只能复用本次真实生成结果，不得再次调用图片 API");
     }
 
     private static async Task SubmissionPreservesAuditableStagesAndCompletesIdempotentlyAsync(
@@ -387,6 +567,11 @@ internal static class GeneratedOutputSubmissionSmokeTests
     private static string ComputeSha256(string path) => Convert.ToHexString(
         SHA256.HashData(File.ReadAllBytes(path)));
 
+    private static bool IsToolError(object result) =>
+        JsonSerializer.SerializeToElement(result, ProtocolJson.Options)
+            .GetProperty("isError")
+            .GetBoolean();
+
     private static Task<DirectToolInvocationResult> InvokeAsync(
         string dataRoot,
         string toolName,
@@ -424,6 +609,8 @@ internal static class GeneratedOutputSubmissionSmokeTests
         }
     }
 
+    private static void False(bool condition, string message) => True(!condition, message);
+
     private static void Equal<T>(T expected, T actual, string message)
     {
         if (!EqualityComparer<T>.Default.Equals(expected, actual))
@@ -436,4 +623,20 @@ internal static class GeneratedOutputSubmissionSmokeTests
         GenerationTask Task,
         GenerationDeliveryPlan Delivery,
         string AssetRoot);
+
+    private sealed class RecordingFallbackService(
+        Func<ImageGenerationCliFallbackRequest, ImageGenerationCliFallbackResult> handler)
+        : IImageGenerationCliFallbackService
+    {
+        internal List<ImageGenerationCliFallbackRequest> Requests { get; } = [];
+
+        public Task<ImageGenerationCliFallbackResult> GenerateAsync(
+            ImageGenerationCliFallbackRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Requests.Add(request);
+            return Task.FromResult(handler(request));
+        }
+    }
 }

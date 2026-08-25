@@ -5,6 +5,26 @@ development track; versioning policy will be finalized before the first public r
 
 ## Unreleased
 
+## 1.0.3t1 - 2026-08-25
+
+### Fixed
+
+- Treat a successful Codex `imageGeneration` item with `savedPath=null` as an explicit local-delivery
+  gap, then let the GAssetForge Harness run the bundled official `image_gen.py` against the frozen
+  task contract and exact project-local model output path.
+- Refresh the managed Codex Runtime environment before every Turn and rebuild the Runtime while
+  preserving its thread when PATH, Python, Image API, proxy, certificate, or Codex Home settings
+  change.
+- Discover Python from an explicit `GASSETFORGE_PYTHON_EXECUTABLE`, current LocalAppData installs,
+  the latest User/Machine PATH, or `py -3`, with semantic Python version ordering and UTF-8 process
+  I/O.
+- Serialize concurrent fallback requests per frozen output path, quarantine corrupt or partially
+  written PNG files for diagnosis, and make completed-task retries idempotent.
+- Extend the managed Codex MCP tool timeout beyond the bounded Image API generation window and stop
+  waiting on stdout/stderr pipes when a terminated child process leaves inherited handles open.
+- Report image-generation `savedPath` state separately from the potentially large visible result and
+  keep API keys, proxy credentials, and authenticated base URLs out of diagnostics.
+
 ## 1.0.2t1 - 2026-08-24
 
 ### Fixed

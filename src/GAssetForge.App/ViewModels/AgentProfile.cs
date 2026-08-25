@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using GAssetForge.App.Services;
 using GAssetForge.Core;
 
 namespace GAssetForge.App.ViewModels;
@@ -47,7 +48,8 @@ public sealed class AgentProfile
             true,
             endpoint =>
                 $"[mcp_servers.{ProductIdentity.McpServerName}]{Environment.NewLine}" +
-                $"url = \"{endpoint.AbsoluteUri}\""),
+                $"url = \"{endpoint.AbsoluteUri}\"{Environment.NewLine}" +
+                $"tool_timeout_sec = {GenerationMcpToolPolicy.ToolTimeoutSeconds}"),
         new AgentProfile(
             "opencode",
             "OpenCode",

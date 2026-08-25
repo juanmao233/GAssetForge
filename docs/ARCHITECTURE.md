@@ -167,8 +167,10 @@ Shell，Shell 使用 `GenerationAgentPromptBuilder` 构造 prompt，并通过受
 
 ```text
 claim_generation_task
-  → 使用 preferredSkill 调用真实 ImageGen，得到本地 sourcePath
-  → submit_generation_output(taskId, agentId, outputIndex=0, sourcePath)
+  → 使用 preferredSkill 调用真实内置 ImageGen
+  → savedPath 有值：submit_generation_output(taskId, agentId, outputIndex=0, sourcePath)
+  → savedPath=null：run_image_delivery_fallback(taskId, agentId)
+       → Harness 调官方 image_gen.py 直写 recommendedSourcePath 并自动 submit
   → 软件自动完成任务登记
 ```
 

@@ -26,10 +26,13 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
     private readonly object _configurationLock = new();
     private readonly Func<IAgentSessionTransport> _appServerFactory;
     private readonly Func<IAgentSessionTransport> _execFactory;
+    private readonly Func<string> _pathEnvironmentProvider;
+    private readonly Func<IReadOnlyDictionary<string, string?>> _environmentVariablesProvider;
     private string _codexExecutablePath;
     private IAgentSessionTransport? _transport;
     private string? _sessionWorkingDirectory;
     private Uri? _sessionMcpEndpoint;
+    private string? _sessionEnvironmentFingerprint;
     private string? _sessionSecret;
     private TaskCompletionSource<bool>? _mcpReadyCompletion;
     private bool _disposed;
@@ -45,12 +48,18 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
     internal CodexAgentRuntimeService(
         string codexExecutablePath,
         Func<IAgentSessionTransport> appServerFactory,
-        Func<IAgentSessionTransport> execFactory)
+        Func<IAgentSessionTransport> execFactory,
+        Func<string>? pathEnvironmentProvider = null,
+        Func<IReadOnlyDictionary<string, string?>>? environmentVariablesProvider = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(codexExecutablePath);
         _codexExecutablePath = codexExecutablePath;
         _appServerFactory = appServerFactory ?? throw new ArgumentNullException(nameof(appServerFactory));
         _execFactory = execFactory ?? throw new ArgumentNullException(nameof(execFactory));
+        _pathEnvironmentProvider = pathEnvironmentProvider ??
+                                   ProcessEnvironmentSnapshot.BuildFreshPathEnvironment;
+        _environmentVariablesProvider = environmentVariablesProvider ??
+                                        ProcessEnvironmentSnapshot.BuildFreshAgentEnvironmentVariables;
     }
 
     public CodexAgentTransportMode TransportMode { get; private set; }
@@ -152,7 +161,21 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
         try
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
-            if (CanReuseSession(normalizedWorkingDirectory, mcpServer.Endpoint))
+            var environmentVariables = new Dictionary<string, string?>(
+                _environmentVariablesProvider(),
+                StringComparer.OrdinalIgnoreCase);
+            var freshPath = _pathEnvironmentProvider();
+            if (!string.IsNullOrWhiteSpace(freshPath))
+            {
+                environmentVariables["PATH"] = freshPath;
+            }
+
+            var environmentFingerprint =
+                ProcessEnvironmentSnapshot.ComputeEnvironmentFingerprint(environmentVariables);
+            if (CanReuseSession(
+                    normalizedWorkingDirectory,
+                    mcpServer.Endpoint,
+                    environmentFingerprint))
             {
                 if (TransportMode == CodexAgentTransportMode.AppServer &&
                     AuthenticationState == CodexAgentAuthenticationState.Required)
@@ -175,14 +198,6 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
             }
 
             await StopTransportAsync(CancellationToken.None).ConfigureAwait(false);
-            var environmentVariables = new Dictionary<string, string?>(
-                StringComparer.OrdinalIgnoreCase);
-            var freshPath = ProcessEnvironmentSnapshot.BuildFreshPathEnvironment();
-            if (!string.IsNullOrWhiteSpace(freshPath))
-            {
-                environmentVariables["PATH"] = freshPath;
-            }
-
             var options = new AgentSessionStartOptions
             {
                 ExecutablePath = CodexExecutablePath,
@@ -269,6 +284,7 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
 
             _sessionWorkingDirectory = normalizedWorkingDirectory;
             _sessionMcpEndpoint = mcpServer.Endpoint;
+            _sessionEnvironmentFingerprint = environmentFingerprint;
         }
         finally
         {
@@ -342,10 +358,17 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
         }
     }
 
-    private bool CanReuseSession(string workingDirectory, Uri endpoint) =>
+    private bool CanReuseSession(
+        string workingDirectory,
+        Uri endpoint,
+        string environmentFingerprint) =>
         _transport is { IsRunning: true } &&
         string.Equals(_sessionWorkingDirectory, workingDirectory, StringComparison.OrdinalIgnoreCase) &&
-        Equals(_sessionMcpEndpoint, endpoint);
+        Equals(_sessionMcpEndpoint, endpoint) &&
+        string.Equals(
+            _sessionEnvironmentFingerprint,
+            environmentFingerprint,
+            StringComparison.Ordinal);
 
     private async Task EnsureRequestedThreadAsync(
         string? resumeThreadId,
@@ -476,6 +499,7 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
         AuthenticationState = CodexAgentAuthenticationState.Unknown;
         _sessionWorkingDirectory = null;
         _sessionMcpEndpoint = null;
+        _sessionEnvironmentFingerprint = null;
         _sessionSecret = null;
     }
 

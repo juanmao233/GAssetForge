@@ -45,6 +45,7 @@ Codex：
 ```toml
 [mcp_servers.gasset_forge]
 url = "http://127.0.0.1:43120/mcp"
+tool_timeout_sec = 900
 ```
 
 OpenCode：
@@ -141,18 +142,19 @@ HTTP 默认端口为 `43120`，`--expected-agent` 支持 `codex` 与 `opencode`�
 - `get_generation_task`
 - `claim_generation_task`
 - `submit_generation_output`
+- `run_image_delivery_fallback`
 - `process_generation_output`
 - `complete_generation_task`
 - `fail_generation_task`
 
 受管 Codex worker 只开放 `server_info`、`get_generation_task`、`claim_generation_task`、
-`submit_generation_output`、`process_generation_output`、`complete_generation_task` 和 `fail_generation_task`；
+`submit_generation_output`、`run_image_delivery_fallback`、`process_generation_output`、`complete_generation_task` 和 `fail_generation_task`；
 任务创建、列表与任意上下文读取不会暴露给这条自动 Turn。一次性 `--invoke-tool` 人工桥接使用相同 worker
 白名单。
 
 桌面“素材生成”页把数量展开为多个 `output.count=1` 的 Pending 任务，并冻结 `parameters.style`、
 `parameters.delivery` 与项目内 `delivery.workspace`。Agent 对每个 task 只执行
-`claim_generation_task → 真实 ImageGen → submit_generation_output`；任务间并发由 Agent Host 默认调度，
+`claim_generation_task → 真实内置 ImageGen → savedPath 有值时 submit_generation_output / savedPath 为空时 run_image_delivery_fallback`；任务间并发由 Agent Host 默认调度，
 不再读取页面并行数。模型返回的 `sourcePath` 可以位于 Codex 临时目录，服务会原样归档到当前项目
 `Assets/Generated/GAssetForge/Runs/<batchId>/30-model-output`，再写入 `35-normalized-input`、
 `40-background-removed` 和冻结的最终 `targetPaths`，并自动完成任务登记。
