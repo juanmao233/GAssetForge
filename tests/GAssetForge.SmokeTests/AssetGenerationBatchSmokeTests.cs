@@ -70,6 +70,8 @@ internal static class AssetGenerationBatchSmokeTests
                 "离线发布应明确保持在本地队列而不请求 Agent 调度");
             True(tasks.All(task => task.Status == GenerationTaskStatus.Pending),
                 "仅发布队列不得改写已持久化任务的 Pending 状态");
+            True(tasks.All(task => task.DispatchIntent is { Requested: false, IsRetry: false }),
+                "仅发布本地队列的任务不得在重启后被自动派发");
             Equal(firstEvent.TaskIds[0], tasks[0].Id, "BatchPublished 第一任务顺序");
             Equal(firstEvent.TaskIds[1], tasks[1].Id, "BatchPublished 第二任务顺序");
             Equal(firstEvent.TaskIds[2], tasks[2].Id, "BatchPublished 第三任务顺序");
@@ -77,6 +79,148 @@ internal static class AssetGenerationBatchSmokeTests
                 "新批次必须一张图片一个 GenerationTask");
             True(tasks.All(task => task.Constraints.Output.MaxParallelism == 1),
                 "单图任务仅保留 maxParallelism=1 的旧合同兼容值");
+            True(tasks.All(task => task.RetryLineage is { AttemptNumber: 1, MaxAttempts: 4 }),
+                "默认自动重做 3 次应冻结为初次加三次、共 4 次生成尝试");
+            var retryingPresentation = new PublishedGenerationTaskViewModel(
+                tasks[0] with
+                {
+                    Status = GenerationTaskStatus.Failed,
+                    FailureMessage = "output_geometry_validation_failed: aspect_ratio_mismatch",
+                    FailureRetryable = true
+                },
+                "自动重做展示");
+            True(retryingPresentation.HasAutomaticRetryRemaining,
+                "可恢复失败且仍有次数时应呈现为自动重做中");
+            False(retryingPresentation.CanRetry,
+                "自动重做尚未耗尽时不应同时开放人工重新生成按钮");
+            True(retryingPresentation.StatusText.Contains("自动重做中", StringComparison.Ordinal),
+                "可恢复失败不应立即显示为最终失败");
+            var blockedPresentation = new PublishedGenerationTaskViewModel(
+                retryingPresentation.Task with
+                {
+                    AutomaticRetryBlockedReason = "Run manifest 暂时不可写"
+                },
+                "人工接管展示");
+            True(blockedPresentation.IsAutomaticRetryBlocked,
+                "自动准备失败应与仍在自动重做中的状态分离");
+            False(blockedPresentation.HasAutomaticRetryRemaining,
+                "自动准备被阻断后不得继续显示为自动重做中");
+            True(blockedPresentation.CanRetry,
+                "自动准备被阻断后必须开放人工重新生成入口");
+            True(blockedPresentation.StatusText.Contains("人工接管", StringComparison.Ordinal),
+                "阻断状态应明确提示用户可以人工接管");
+
+            var automaticParent = (store.CreateBatchAsync(new CreateGenerationBatchRequest
+            {
+                BatchId = Guid.NewGuid().ToString("N"),
+                DisplayName = "自动重做协调 smoke",
+                DispatchRequested = true,
+                Items =
+                [
+                    new CreateGenerationBatchItemRequest
+                    {
+                        ItemId = Guid.NewGuid().ToString("N"),
+                        DisplayName = "384x448 长方形错误",
+                        MaxAttempts = 4,
+                        Constraints = tasks[0].Constraints
+                    }
+                ]
+            }).GetAwaiter().GetResult()).Single();
+            store.ClaimAsync(automaticParent.Id, "auto-retry-smoke-agent").GetAwaiter().GetResult();
+            var automaticFailed = store.FailAsync(
+                    automaticParent.Id,
+                    "auto-retry-smoke-agent",
+                    new GenerationTaskFailure
+                    {
+                        Message =
+                            "output_geometry_validation_failed: tilemap_geometry_aspect_ratio_mismatch; actualWidth=384; actualHeight=448",
+                        Code = "output_geometry_validation_failed",
+                        SubCode = "tilemap_geometry_aspect_ratio_mismatch",
+                        Stage = "output.geometry_validation",
+                        Retryable = true
+                    })
+                .GetAwaiter()
+                .GetResult();
+            True(MaterialGenerationConstraintComposer.TryReadDelivery(
+                    automaticParent.Constraints,
+                    out var automaticParentDelivery) &&
+                 automaticParentDelivery?.Workspace is not null,
+                "自动重做父任务缺少原始 Run。");
+            using (var retryGeneration = new AssetGenerationViewModel(
+                       paths,
+                       store,
+                       shell.ArtStyleLibrary,
+                       shell.TilemapWorkspace,
+                       shell.ProjectBrowser,
+                       shell.AgentConnection,
+                       new DesktopAssetGenerationOutputPicker(),
+                       shell.BackgroundRemoval,
+                       autoRetryEnabled: true,
+                       autoRetryCount: 3))
+            {
+                GenerationBatchPublishedEventArgs? automaticPublished = null;
+                retryGeneration.BatchPublished += (_, args) => automaticPublished = args;
+                True(retryGeneration.GetRecoverableAutomaticRetrySourceBatchIdsAsync()
+                        .GetAwaiter()
+                        .GetResult()
+                        .Contains(automaticFailed.BatchId!, StringComparer.Ordinal),
+                    "重启恢复应识别尚未创建 child 的可恢复失败批次");
+                var automaticResult = retryGeneration
+                    .TryCreateAutomaticRetryBatchAsync(automaticFailed.BatchId!)
+                    .GetAwaiter()
+                    .GetResult();
+                True(automaticResult.Scheduled, "可恢复失败应由桌面端自动创建下一次尝试");
+                True(automaticPublished is { IsRetry: true, DispatchRequested: true },
+                    "自动重做批次应立即请求新的 Agent Turn");
+                var persistedParent = store.GetAsync(automaticFailed.Id).GetAwaiter().GetResult()
+                    ?? throw new InvalidOperationException("自动重做父任务丢失。");
+                True(!string.IsNullOrWhiteSpace(persistedParent.SupersededByTaskId),
+                    "创建 child 时必须原子回写父任务 SupersededByTaskId");
+                var automaticChild = store.GetAsync(persistedParent.SupersededByTaskId!)
+                    .GetAwaiter()
+                    .GetResult()
+                    ?? throw new InvalidOperationException("自动重做 child 丢失。");
+                Equal(2, automaticChild.RetryLineage?.AttemptNumber,
+                    "首次自动重做应成为第 2/4 次尝试");
+                True(automaticChild.DispatchIntent is { Requested: true, IsRetry: true },
+                    "自动重做 child 必须持久化可恢复的重试调度意图");
+                True(automaticChild.Constraints.Rules.Any(rule =>
+                        rule.Key == "generation.retry.attempt-2" &&
+                        rule.Instruction.Contains("384", StringComparison.Ordinal) &&
+                        rule.Instruction.Contains("448", StringComparison.Ordinal) &&
+                        rule.Instruction.Contains("外接包围盒", StringComparison.Ordinal)),
+                    "自动重做提示必须注入上一轮尺寸诊断和定向比例修正");
+                True(MaterialGenerationConstraintComposer.TryReadDelivery(
+                        automaticChild.Constraints,
+                        out var automaticDelivery) &&
+                     automaticDelivery is not null &&
+                     automaticDelivery.Workspace is not null &&
+                     !string.Equals(
+                         automaticDelivery.Workspace.RunId,
+                         automaticParentDelivery!.Workspace!.RunId,
+                         StringComparison.Ordinal),
+                    "自动重做必须使用新 Run 和新中间路径，不得覆盖上一轮审计产物");
+                var recoverableDispatches = retryGeneration
+                    .GetRecoverablePendingDispatchesAsync()
+                    .GetAwaiter()
+                    .GetResult();
+                var recoveredChildDispatch = recoverableDispatches.Single(dispatch =>
+                    string.Equals(dispatch.BatchId, automaticChild.BatchId, StringComparison.Ordinal));
+                Equal(automaticChild.Id, recoveredChildDispatch.TaskIds.Single(),
+                    "重启恢复应重新派发同一个持久化 child，而不是创建新任务");
+                True(recoveredChildDispatch.IsRetry,
+                    "恢复后的自动 child 必须保留重试调度标记");
+
+                var manifestPath = Path.Combine(
+                    automaticDelivery!.AssetRoot,
+                    automaticDelivery.Workspace!.ManifestPath.Replace('/', Path.DirectorySeparatorChar));
+                File.Delete(manifestPath);
+                retryGeneration.RepairPersistedDispatchWorkspaceAsync(automaticChild.BatchId!)
+                    .GetAwaiter()
+                    .GetResult();
+                True(File.Exists(manifestPath),
+                    "持久化 child 缺失 manifest 时必须能从冻结任务合同重建");
+            }
 
             generation.ReportDispatchQueued(firstEvent.BatchId, "smoke 调度队列");
             Equal(35d, generation.DispatchProgress, "批次入队进度");
@@ -146,6 +290,36 @@ internal static class AssetGenerationBatchSmokeTests
                      firstDelivery.AssetRoot,
                      firstDelivery.Workspace.ManifestPath.Replace('/', Path.DirectorySeparatorChar))),
                 "软件应在任务发布前创建项目内运行工作区与 manifest");
+            var firstWorkspace = firstDelivery.Workspace
+                ?? throw new InvalidOperationException("批量 smoke 缺少项目内运行工作区。");
+            True(generation.AutoRetryEnabled, "素材生成默认应启用自动重做");
+            Equal(3, generation.AutoRetryCount, "素材生成默认最多重做 3 次");
+
+            var modelOutputFullPath = ResolveAssetPath(
+                firstDelivery.AssetRoot,
+                firstWorkspace.ModelOutputPaths.Single());
+            var normalizedOutputFullPath = ResolveAssetPath(
+                firstDelivery.AssetRoot,
+                firstDelivery.StagingPaths.Single());
+            var processedOutputFullPath = ResolveAssetPath(
+                firstDelivery.AssetRoot,
+                firstWorkspace.ProcessedPaths.Single());
+            File.WriteAllBytes(modelOutputFullPath, [0x50, 0x46]);
+            File.WriteAllBytes(normalizedOutputFullPath, [0x50, 0x46]);
+            File.WriteAllBytes(processedOutputFullPath, [0x50, 0x46]);
+            generation.RefreshTaskCommand.Execute(null);
+            WaitUntil(
+                () => generation.GeneratedAssets.Count == 3,
+                TimeSpan.FromSeconds(8),
+                "模型原图、归一化图和背景处理图落盘后未即时出现在生成产物区");
+            True(
+                new[] { "模型原图", "画布归一化", "背景处理" }.SequenceEqual(
+                    generation.GeneratedAssets.Select(asset => asset.StageText)),
+                "中间产物应按稳定工序顺序显示");
+            True(generation.GeneratedAssets.All(asset =>
+                    asset.VisualState == GeneratedAssetVisualState.Processing &&
+                    asset.AvailabilityText.Contains("后续步骤", StringComparison.Ordinal)),
+                "任务进行中的中间产物应使用处理中状态并说明后续步骤仍在执行");
 
             store.ClaimAsync(tasks[0].Id, "batch-smoke-agent").GetAwaiter().GetResult();
             var partialOutputRelativePath = firstDelivery.TargetPaths[0];
@@ -169,9 +343,11 @@ internal static class AssetGenerationBatchSmokeTests
                     string.Equals(asset.FullPath, partialOutputFullPath, StringComparison.OrdinalIgnoreCase)),
                 TimeSpan.FromSeconds(8),
                 "任务完成回写前已经落盘的预分配产物未出现在生成产物区");
-            Equal(1, generation.GeneratedAssets.Count,
-                "进行中任务只应显示已经实际落盘的预分配产物");
-            Equal("已落盘 · 等待任务完成登记", generation.GeneratedAssets.Single().AvailabilityText,
+            Equal(4, generation.GeneratedAssets.Count,
+                "进行中任务应同时保留三类中间产物和已经落盘的最终产物");
+            var firstFinalAsset = generation.GeneratedAssets.Single(asset =>
+                asset.Stage == GeneratedAssetStage.Final);
+            Equal("最终文件已落盘 · 等待任务完成登记与校验", firstFinalAsset.AvailabilityText,
                 "进行中产物不得在 complete_generation_task 成功前伪报已完成");
             Equal(1, generation.GeneratedImageCount, "第一张目标落盘后图片级进度应为 1");
             Equal(3, generation.RequestedImageCount, "图片级进度分母应取整批预分配目标总数");
@@ -241,6 +417,12 @@ internal static class AssetGenerationBatchSmokeTests
                 () => generation.PublishedTasks.Any(item => item.CanRetry),
                 TimeSpan.FromSeconds(8),
                 "部分失败后未暴露单行重试");
+            var failedAsset = generation.GeneratedAssets.Single(asset =>
+                string.Equals(asset.FullPath, thirdOutputFullPath, StringComparison.OrdinalIgnoreCase));
+            Equal(GeneratedAssetVisualState.FinalFailure, failedAsset.VisualState,
+                "自动重做尚未创建后继任务时，当前失败叶子应明确显示最终失败状态");
+            True(failedAsset.AvailabilityText.Contains("可重新生成", StringComparison.Ordinal),
+                "失败产物卡片应说明该项可重新生成");
             Equal(GenerationBatchDispatchStage.Failed, generation.CurrentDispatchStage,
                 "存在失败任务时批次应进入失败终态");
             Equal(100d, generation.DispatchProgress, "失败批次调度步骤应完整收束到 100%");
@@ -392,6 +574,10 @@ internal static class AssetGenerationBatchSmokeTests
                     ?? throw new InvalidOperationException("素材生成页缺少复制当前批次任务指令按钮。");
                 var createManualRetryButton = view.FindName("CreateManualRetryBatchButton") as System.Windows.Controls.Button
                     ?? throw new InvalidOperationException("素材生成页缺少创建手动重试批次按钮。");
+                var autoRetryToggle = view.FindName("AutoRetryEnabledCheckBox") as System.Windows.Controls.CheckBox
+                    ?? throw new InvalidOperationException("素材生成页缺少自动重做开关。");
+                var autoRetryCount = view.FindName("AutoRetryCountComboBox") as System.Windows.Controls.ComboBox
+                    ?? throw new InvalidOperationException("素材生成页缺少自动重做次数设置。");
                 createManualRetryButton.GetBindingExpression(
                     System.Windows.Controls.Button.CommandProperty)?.UpdateTarget();
                 True(promptPreview.IsReadOnly && promptPreview.AcceptsReturn,
@@ -412,6 +598,26 @@ internal static class AssetGenerationBatchSmokeTests
                         createManualRetryButton,
                         System.Windows.Controls.Button.CommandProperty)?.Path?.Path,
                     "创建手动重试批次按钮命令绑定路径");
+                Equal(
+                    nameof(AssetGenerationViewModel.AutoRetryEnabled),
+                    System.Windows.Data.BindingOperations.GetBinding(
+                        autoRetryToggle,
+                        System.Windows.Controls.Primitives.ToggleButton.IsCheckedProperty)?.Path?.Path,
+                    "自动重做开关绑定路径");
+                Equal(
+                    nameof(AssetGenerationViewModel.AutoRetryCount),
+                    System.Windows.Data.BindingOperations.GetBinding(
+                        autoRetryCount,
+                        System.Windows.Controls.Primitives.Selector.SelectedItemProperty)?.Path?.Path,
+                    "自动重做次数绑定路径");
+
+                generation.AutoRetryEnabled = false;
+                generation.AutoRetryCount = 5;
+                var persistedSettings = new UserSettingsService(paths).Load();
+                False(persistedSettings.AssetGenerationAutoRetryEnabled,
+                    "自动重做开关应即时持久化");
+                Equal(5, persistedSettings.AssetGenerationAutoRetryCount,
+                    "自动重做次数应即时持久化");
             }
             finally
             {
@@ -446,6 +652,11 @@ internal static class AssetGenerationBatchSmokeTests
 
         throw new InvalidOperationException(message);
     }
+
+    private static string ResolveAssetPath(string assetRoot, string relativePath) =>
+        Path.GetFullPath(Path.Combine(
+            assetRoot,
+            relativePath.Replace('/', Path.DirectorySeparatorChar)));
 
     private static void True(bool condition, string message)
     {

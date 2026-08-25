@@ -133,7 +133,7 @@ internal static class CodexManualFallbackPromptSmokeTests
                 "批次提示缺少单图源文件提交步骤");
             var failIndex = RequiredIndex(
                 executionSegment,
-                "5. 只有内置 imagegen、run_image_delivery_fallback 或 submit_generation_output 返回真实错误时才调用 fail_generation_task",
+                "5. 只有内置 imagegen、run_image_delivery_fallback 或 submit_generation_output 真正以 MCP tool error 失败时才调用 fail_generation_task",
                 "批次提示缺少失败回报步骤");
             True(
                 claimIndex < imagegenIndex &&

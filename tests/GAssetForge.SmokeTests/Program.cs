@@ -60,6 +60,8 @@ internal static class Program
 
             TilemapZeroRotationUsesCartesianScreenAxes();
             Console.WriteLine("PASS  Tilemap 0° 使用水平/垂直屏幕坐标基准，45° 再整体顺时针旋转");
+            TilemapGeometryDiagnosticsSmokeTests.Run(_temporaryRoot);
+            Console.WriteLine("PASS  Tilemap 几何校验区分长方形、旋转方形与真实菱形并输出结构化诊断");
             ProductIdentityCompatibilitySmokeTests.Run();
             Console.WriteLine("PASS  GAssetForge 新标识与旧数据、项目、MCP 和调度身份兼容");
             ReleaseVersionConsistencySmokeTests.RunAsync(_temporaryRoot).GetAwaiter().GetResult();
@@ -294,7 +296,7 @@ internal static class Program
             diamondAngle: 90d,
             rotationAngle: 0d,
             tilemapRotationConvention: TilemapRotationConvention.LegacyDiamondAxisAligned);
-        Throws<InvalidDataException>(
+        Throws<TilemapGeometryValidationException>(
             () => GeneratedAssetValidator.Validate(misorientedFixturePath, zeroConstraints),
             "Tilemap 90°/0° 校验必须拒绝内接的 45° 钻石形产物");
 
@@ -4883,7 +4885,8 @@ internal static class Program
         double? diamondAngle = null,
         double rotationAngle = 0d,
         bool forceFullyTransparent = false,
-        TilemapRotationConvention tilemapRotationConvention = TilemapRotationConvention.AxisAAligned)
+        TilemapRotationConvention tilemapRotationConvention = TilemapRotationConvention.AxisAAligned,
+        Func<int, int, bool>? foregroundPredicate = null)
     {
         if (width <= 0 || height <= 0)
         {
@@ -4908,16 +4911,19 @@ internal static class Program
                 rawPixels[offset++] = (byte)(28 + (x + y) % 120);
                 if (includeAlpha)
                 {
-                    var outsideRequiredRegion = forceFullyTransparent || (diamondAngle is not null
-                        ? IsOutsideTilemapDiamond(
-                            x,
-                            y,
-                            width,
-                            height,
-                            diamondAngle.Value,
-                            rotationAngle,
-                            tilemapRotationConvention)
-                        : x == 0 || y == 0 || x == width - 1 || y == height - 1);
+                    var outsideRequiredRegion = forceFullyTransparent ||
+                        (foregroundPredicate is not null
+                            ? !foregroundPredicate(x, y)
+                            : diamondAngle is not null
+                                ? IsOutsideTilemapDiamond(
+                                    x,
+                                    y,
+                                    width,
+                                    height,
+                                    diamondAngle.Value,
+                                    rotationAngle,
+                                    tilemapRotationConvention)
+                                : x == 0 || y == 0 || x == width - 1 || y == height - 1);
                     rawPixels[offset++] = outsideRequiredRegion
                         ? (byte)0
                         : (byte)220;

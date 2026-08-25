@@ -8,11 +8,13 @@ public static class GenerationInputValidator
     public const int MaximumOutputCount = 16;
     public const int MaximumBatchItemCount = MaximumBatchOutputCount;
     public const int MaximumBatchOutputCount = 256;
+    public const int MaximumAttempts = 11;
 
     private const int MaximumPromptLength = 65_536;
     private const int MaximumNegativePromptLength = 32_768;
     private const int MaximumParametersUtf8Bytes = 262_144;
     private const int MaximumRelativePathLength = 1_024;
+    private const int MaximumAutomaticRetryBlockedReasonLength = 4_096;
 
     private static readonly char[] InvalidAssetPathCharacters = ['\0', ':', '*', '?', '"', '<', '>', '|'];
 
@@ -30,6 +32,8 @@ public static class GenerationInputValidator
         {
             throw new ArgumentException("约束包不能为空。", nameof(request));
         }
+
+        ValidateMaxAttempts(request.MaxAttempts, nameof(request.MaxAttempts));
 
         ValidateConstraintPackage(request.Constraints);
     }
@@ -73,6 +77,7 @@ public static class GenerationInputValidator
             }
 
             ValidateText(item.DisplayName, nameof(item.DisplayName), 1, 256);
+            ValidateMaxAttempts(item.MaxAttempts, nameof(item.MaxAttempts));
             if (item.Constraints is null)
             {
                 throw new ArgumentException($"生成批次项目 {item.ItemId} 缺少约束包。", nameof(request));
@@ -84,6 +89,62 @@ public static class GenerationInputValidator
             {
                 throw new ArgumentException(
                     $"单个生成批次最多请求 {MaximumBatchOutputCount} 个产物。",
+                    nameof(request));
+            }
+        }
+    }
+
+    public static void ValidateCreateRetryBatchRequest(CreateGenerationRetryBatchRequest request)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        ValidateCanonicalGuid(request.BatchId, nameof(request.BatchId), "重试批次 ID");
+        ValidateText(request.DisplayName, nameof(request.DisplayName), 1, 256);
+        if (request.RequestedBy is not null)
+        {
+            ValidateText(request.RequestedBy, nameof(request.RequestedBy), 1, 128);
+        }
+
+        if (request.Items is null || request.Items.Length is < 1 or > MaximumBatchItemCount)
+        {
+            throw new ArgumentException(
+                $"单个重试批次必须包含 1 到 {MaximumBatchItemCount} 行。",
+                nameof(request));
+        }
+
+        var parentIds = new HashSet<string>(StringComparer.Ordinal);
+        var itemIds = new HashSet<string>(StringComparer.Ordinal);
+        var totalOutputCount = 0;
+        foreach (var item in request.Items)
+        {
+            if (item is null)
+            {
+                throw new ArgumentException("重试批次项目集合不能包含空项。", nameof(request));
+            }
+
+            var parentTaskId = NormalizeTaskId(item.ParentTaskId);
+            if (!parentIds.Add(parentTaskId))
+            {
+                throw new ArgumentException($"重试批次父任务重复：{parentTaskId}。", nameof(request));
+            }
+
+            ValidateCanonicalGuid(item.ItemId, nameof(item.ItemId), "重试批次项目 ID");
+            if (!itemIds.Add(item.ItemId))
+            {
+                throw new ArgumentException($"重试批次项目 ID 重复：{item.ItemId}。", nameof(request));
+            }
+
+            ValidateText(item.DisplayName, nameof(item.DisplayName), 1, 256);
+            if (item.Constraints is null)
+            {
+                throw new ArgumentException($"重试批次项目 {item.ItemId} 缺少约束包。", nameof(request));
+            }
+
+            ValidateConstraintPackage(item.Constraints);
+            totalOutputCount = checked(totalOutputCount + item.Constraints.Output.Count);
+            if (totalOutputCount > MaximumBatchOutputCount)
+            {
+                throw new ArgumentException(
+                    $"单个重试批次最多请求 {MaximumBatchOutputCount} 个产物。",
                     nameof(request));
             }
         }
@@ -182,6 +243,18 @@ public static class GenerationInputValidator
     {
         ValidateText(failureMessage, nameof(failureMessage), 1, 8_192);
         return failureMessage;
+    }
+
+    public static string ValidateFailureCode(string failureCode)
+    {
+        ValidateFailureToken(failureCode, nameof(failureCode));
+        return failureCode;
+    }
+
+    public static string ValidateFailureStage(string failureStage)
+    {
+        ValidateFailureToken(failureStage, nameof(failureStage));
+        return failureStage;
     }
 
     public static string NormalizeTaskId(string taskId)
@@ -287,6 +360,8 @@ public static class GenerationInputValidator
             }
 
             ValidateState(task);
+            ValidateDispatchMetadata(task);
+            ValidateRetryMetadata(task);
         }
         catch (InvalidDataException)
         {
@@ -295,6 +370,107 @@ public static class GenerationInputValidator
         catch (Exception exception) when (exception is ArgumentException or JsonException)
         {
             throw new InvalidDataException($"生成任务 {task.Id} 的持久化数据无效。", exception);
+        }
+    }
+
+    private static void ValidateRetryMetadata(GenerationTask task)
+    {
+        if (task.RetryLineage is { } lineage)
+        {
+            if (lineage.SchemaVersion != GenerationTaskRetryLineage.CurrentSchemaVersion)
+            {
+                throw new InvalidDataException(
+                    $"生成任务 {task.Id} 的重试谱系版本无效：{lineage.SchemaVersion}。");
+            }
+
+            var rootTaskId = NormalizeTaskId(lineage.RootTaskId);
+            if (!string.Equals(rootTaskId, lineage.RootTaskId, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException($"生成任务 {task.Id} 的重试根任务 ID 未规范化。");
+            }
+
+            ValidateMaxAttempts(lineage.MaxAttempts, nameof(lineage.MaxAttempts));
+            if (lineage.AttemptNumber < 1 || lineage.AttemptNumber > lineage.MaxAttempts)
+            {
+                throw new InvalidDataException($"生成任务 {task.Id} 的重试次数无效。");
+            }
+
+            if (lineage.AttemptNumber == 1)
+            {
+                if (lineage.PreviousTaskId is not null ||
+                    !string.Equals(lineage.RootTaskId, task.Id, StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException($"生成任务 {task.Id} 的首次尝试谱系无效。");
+                }
+            }
+            else
+            {
+                if (lineage.PreviousTaskId is null ||
+                    !string.Equals(
+                        NormalizeTaskId(lineage.PreviousTaskId),
+                        lineage.PreviousTaskId,
+                        StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException($"生成任务 {task.Id} 的上一尝试 ID 无效。");
+                }
+            }
+        }
+
+        if (task.SupersededByTaskId is { } supersededByTaskId)
+        {
+            if (task.Status != GenerationTaskStatus.Failed || task.RetryLineage is null)
+            {
+                throw new InvalidDataException(
+                    $"只有带重试谱系的失败任务 {task.Id} 才能登记后继任务。");
+            }
+
+            if (!string.Equals(
+                    NormalizeTaskId(supersededByTaskId),
+                    supersededByTaskId,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidDataException($"生成任务 {task.Id} 的后继任务 ID 未规范化。");
+            }
+        }
+    }
+
+    private static void ValidateDispatchMetadata(GenerationTask task)
+    {
+        if (task.DispatchIntent is { } intent &&
+            intent.SchemaVersion != GenerationTaskDispatchIntent.CurrentSchemaVersion)
+        {
+            throw new InvalidDataException(
+                $"生成任务 {task.Id} 的调度意图版本无效：{intent.SchemaVersion}。");
+        }
+
+        if (task.AutomaticRetryBlockedReason is not { } blockedReason)
+        {
+            return;
+        }
+
+        ValidateText(
+            blockedReason,
+            nameof(task.AutomaticRetryBlockedReason),
+            1,
+            MaximumAutomaticRetryBlockedReasonLength);
+        if (task.Status != GenerationTaskStatus.Failed ||
+            task.FailureRetryable != true ||
+            task.RetryLineage is not { } lineage ||
+            lineage.AttemptNumber >= lineage.MaxAttempts ||
+            task.SupersededByTaskId is not null)
+        {
+            throw new InvalidDataException(
+                $"只有仍有额度且尚未被接替的可恢复失败任务 {task.Id} 才能记录自动重做阻断原因。");
+        }
+    }
+
+    private static void ValidateMaxAttempts(int value, string parameterName)
+    {
+        if (value is < 1 or > MaximumAttempts)
+        {
+            throw new ArgumentOutOfRangeException(
+                parameterName,
+                $"生成尝试总次数必须位于 1 到 {MaximumAttempts} 之间。");
         }
     }
 
@@ -463,6 +639,35 @@ public static class GenerationInputValidator
             ValidateFailureMessage(task.FailureMessage);
         }
 
+        if (task.FailureCode is not null)
+        {
+            ValidateFailureCode(task.FailureCode);
+        }
+
+        if (task.FailureStage is not null)
+        {
+            ValidateFailureStage(task.FailureStage);
+        }
+
+        if (task.FailureSubCode is not null)
+        {
+            ValidateFailureCode(task.FailureSubCode);
+        }
+
+        var hasStructuredFailure = task.FailureCode is not null ||
+                                   task.FailureSubCode is not null ||
+                                   task.FailureStage is not null ||
+                                   task.FailureRetryable is not null;
+        if (hasStructuredFailure &&
+            (task.Status != GenerationTaskStatus.Failed ||
+             task.FailureCode is null ||
+             task.FailureStage is null ||
+             task.FailureRetryable is null))
+        {
+            throw new InvalidDataException(
+                $"生成任务 {task.Id} 的结构化失败信息必须完整且只能出现在 Failed 状态。");
+        }
+
         var terminalAt = task.CompletedAtUtc ?? task.FailedAtUtc;
         if (terminalAt is { } value && (value < task.ClaimedAtUtc || task.UpdatedAtUtc < value))
         {
@@ -545,6 +750,16 @@ public static class GenerationInputValidator
             value.Any(character => character is '\0' || char.IsControl(character) && character is not '\r' and not '\n' and not '\t'))
         {
             throw new ArgumentException($"{parameterName} 长度、首尾空白或控制字符无效。", parameterName);
+        }
+    }
+
+    private static void ValidateFailureToken(string value, string parameterName)
+    {
+        ValidateText(value, parameterName, 1, 128);
+        if (value.Any(character =>
+                !char.IsLetterOrDigit(character) && character is not '.' and not '_' and not '-'))
+        {
+            throw new ArgumentException($"{parameterName} 包含不允许的字符。", parameterName);
         }
     }
 }

@@ -160,6 +160,11 @@ internal sealed class GeneratedOutputSubmissionService(
                     .ConfigureAwait(false);
                 measurement.Complete(processing.Message, processing.RelativeTargetPath);
             }
+            catch (TilemapGeometryValidationException exception)
+            {
+                measurement.Fail(exception, exception.ErrorCode);
+                throw;
+            }
             catch (Exception exception)
             {
                 measurement.Fail(exception);

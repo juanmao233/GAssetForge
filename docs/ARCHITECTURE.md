@@ -162,8 +162,10 @@ Shell，Shell 使用 `GenerationAgentPromptBuilder` 构造 prompt，并通过受
 分发失败只记录 dispatch 错误，任务继续保持 `Pending`，因此 Runtime 故障不会吞掉本地待办。
 
 批量表格单行允许 1–16 张、最多 128 行、整批最多 256 张；发布时每个数量变体都创建一个独立单图任务，
-而不是让一条任务内部管理多张图片和自定义并行槽位。某一图片失败不阻塞同批其它任务；重试会创建新的
-任务/批次并保留旧失败记录。新任务的 Agent 执行链固定为：
+而不是让一条任务内部管理多张图片和自定义并行槽位。某一图片失败不阻塞同批其它任务。桌面端默认开启
+自动重做并允许初次生成后再尝试 3 次，即每条谱系最多 4 次尝试；用户可以关闭，或把重做次数设置为
+0–10。该上限在首次任务创建时冻结为 `RetryLineage.MaxAttempts`，不会被后续设置变化改写。新任务的 Agent
+执行链固定为：
 
 ```text
 claim_generation_task
@@ -171,7 +173,8 @@ claim_generation_task
   → savedPath 有值：submit_generation_output(taskId, agentId, outputIndex=0, sourcePath)
   → savedPath=null：run_image_delivery_fallback(taskId, agentId)
        → Harness 调官方 image_gen.py 直写 recommendedSourcePath 并自动 submit
-  → 软件自动完成任务登记
+  → 校验通过：软件原子提交最终文件并自动完成任务登记
+  → 可恢复几何未通过：保留中间文件并返回 warning outcome，桌面端创建下一次尝试
 ```
 
 Agent 不再自行创建目录、扫描目标、搬运文件、调整尺寸、补底色、抠图、修改 Alpha，或重复调用旧
@@ -198,17 +201,51 @@ Assets/Generated/GAssetForge/Runs/<batchId>/
 `<输出目录>/Tilemap/<batchId>/Final/*.png`，并由任务冻结的 `delivery.targetPaths` 决定，避免回落到 Codex
 默认 `generated_images` 或用户后来切换的项目。
 
+“生成产物”并不等待整个批次结束才刷新。轮询会同时检查 `30-model-output`、`35-normalized-input`、
+`40-background-removed` 和正式 `targetPaths`；任一文件真实落盘后就立即创建对应的“模型原图 / 画布归一化 /
+背景处理 / 最终产物”卡片。卡片按处理中、成功、可重做警告、人工介入失败使用不同视觉状态，并显示尝试
+编号与失败摘要。只有正式 `targetPaths` 计入完成进度，中间文件只用于过程可见性和诊断。
+
 `GenerationRunJournal` 以 append-only JSONL 记录 `runId`、`batchId`、`taskId`、`outputIndex`、阶段、状态、
 起止时间、`elapsedMilliseconds`、Agent、期望/观察路径和错误码。当前稳定阶段包括 `workspace.prepare`、
 `style.snapshot.project_copy`、`task.claim`、`model_output.import`、`model_output.normalize`、
-`output.process_and_commit`、`task.complete` 与 `task.fail`。同时，Workbench 会话日志记录调度阶段和 Agent
-工具活动；控制台命令 `generation timeline` 可直接查看当前阶段、当前耗时、最长阶段和图片落盘/验证数量。
+`output.process_and_commit`、`output.geometry_validation`、`task.complete` 与 `task.fail`。可恢复几何失败会写入
+`output.geometry_validation/retryable_warning`，并附带结构化几何诊断。同时，Workbench 会话日志记录调度
+阶段和 Agent 工具活动；控制台命令 `generation timeline` 可直接查看当前阶段、当前耗时、最长阶段和图片
+落盘/验证数量。
+
+可恢复失败以“尝试谱系”管理，而不是复用或重开旧 task ID。当前 Agent Turn 收束后，桌面端只选择
+`FailureRetryable=true`、尚未被接替且仍有额度的 `Failed` 尝试，原子创建新的 task、batch、Run、manifest、
+提示和唯一交付路径；父任务同时写入 `SupersededByTaskId`，子任务保存 `RootTaskId`、`PreviousTaskId`、
+`AttemptNumber` 与冻结的 `MaxAttempts`。同一父任务的并发重做请求是幂等的，不会产生两个后继任务。旧 Run
+和全部中间文件不被覆盖，后继提示会带入上一轮的具体几何诊断进行定向修正。没有 `RetryLineage` 的历史任务
+不会在升级后被意外自动重做；额度耗尽、关闭自动重做或非可恢复错误则保留产物并转为人工处理入口。
+
+每个新任务还冻结可选 `DispatchIntent`。只有明确记录 `Requested=true` 的 Pending 批次才允许在应用重启、
+项目切换或 Agent 再次 Ready 后恢复自动派发；旧任务和“仅发布本地队列/人工接力”任务不会被升级后意外拉起。
+恢复器复用原 task ID 与冻结交付路径，补齐缺失的 Run 分类目录、prompt 和 manifest，再按 batch ID 幂等入队；
+同一进程中的正常发布与恢复扫描即使并发，也只会启动一个 Agent Turn。若自动重做在 child 提交前因路径、权限
+或 Run 准备失败，父任务会持久化 `AutomaticRetryBlockedReason`，界面切换为“自动重做受阻，可人工接管”，
+不再占用人工重试入口。若 child 已经原子入库而 manifest/通知随后失败，child 仍保持可见并可由恢复器继续派发。
 
 完成校验使用任务创建时的 `delivery.assetRoot`，不读取用户后来切换的新 Project 根；Tilemap PNG 会真实
 解压 IDAT、校验精确尺寸，并要求瓦片有效轮廓外 Alpha 为 0。Core 同时冻结 A/B 两条边的绝对屏幕角度；
-90°/0° 被明确解释为画布轴对齐正方形，Agent 不得二次概括为 diamond/rhombus，校验器也会拒绝四个角部
-缺失的内接 45° 钻石形。任务认领使用 30 分钟租约，异常退出的 Agent 不会
+90°/0° 被明确解释为画布轴对齐正方形，Agent 不得二次概括为 diamond/rhombus，校验器也会拒绝实际呈
+上下尖角、中心最宽且四个角部缺失的内接 45° 钻石形。任务认领使用 30 分钟租约，异常退出的 Agent 不会
 让任务永久停留在 `Claimed`。这样桌面端持久化、Agent 编排、MCP 工具和具体图像供应商保持解耦。
+
+90°/0° 的前景主体几何校验使用统一外层错误码 `output_geometry_validation_failed`，并按实际原因写入子错误：
+
+- `tilemap_geometry_aspect_ratio_mismatch`：主体外接包围盒宽高比超出允许偏差。
+- `tilemap_geometry_rotation_mismatch`：主体边缘方向没有与画布水平/垂直轴对齐。
+- `tilemap_geometry_diamond_detected`：轮廓确实呈上下尖角、中心最宽的内接菱形。
+
+缺少角部覆盖本身不再等价于“检测到 45° 菱形”。诊断同时保存 `foregroundBoundingBox`、`actualWidth`、
+`actualHeight`、`actualAspectRatio`、`expectedAspectRatio`、`allowedDeviationPercent`、四角
+`cornerOccupancy`、`rotationAngleEstimate`、`diamondScore` 与实际校验文件路径。几何问题发生时，
+`submit_generation_output` 将本次尝试持久化为可恢复失败并正常返回
+`outcome=retryable_validation_failure`；这表示图片生成、导入和中间处理已完成，不是
+`image_delivery_fallback_failed`，Agent 不应再次调用 `fail_generation_task`。
 
 产物校验对 Tilemap 的参数、派生 metrics、轴向量和背景合同执行 fail-closed；瓦片有效轮廓内必须存在可见像素。
 PNG 解析同时限制文件、解压像素、chunk、IDAT 与非图像数据预算，避免畸形任务或压缩文件占满内存与 CPU。

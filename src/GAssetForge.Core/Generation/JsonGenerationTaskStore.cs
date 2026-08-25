@@ -96,7 +96,21 @@ public sealed class JsonGenerationTaskStore : IGenerationTaskStore
                 Status = GenerationTaskStatus.Pending,
                 Constraints = safeRequest.Constraints,
                 CreatedAtUtc = now,
-                UpdatedAtUtc = now
+                UpdatedAtUtc = now,
+                DispatchIntent = new GenerationTaskDispatchIntent
+                {
+                    Requested = safeRequest.DispatchRequested,
+                    IsRetry = safeRequest.IsRetryDispatch
+                }
+            };
+            task = task with
+            {
+                RetryLineage = new GenerationTaskRetryLineage
+                {
+                    RootTaskId = task.Id,
+                    AttemptNumber = 1,
+                    MaxAttempts = safeRequest.MaxAttempts
+                }
             };
 
             GenerationInputValidator.ValidatePersistedTask(task);
@@ -145,7 +159,21 @@ public sealed class JsonGenerationTaskStore : IGenerationTaskStore
                     Status = GenerationTaskStatus.Pending,
                     Constraints = item.Constraints,
                     CreatedAtUtc = now,
-                    UpdatedAtUtc = now
+                    UpdatedAtUtc = now,
+                    DispatchIntent = new GenerationTaskDispatchIntent
+                    {
+                        Requested = safeRequest.DispatchRequested,
+                        IsRetry = safeRequest.IsRetryDispatch
+                    }
+                };
+                task = task with
+                {
+                    RetryLineage = new GenerationTaskRetryLineage
+                    {
+                        RootTaskId = task.Id,
+                        AttemptNumber = 1,
+                        MaxAttempts = item.MaxAttempts
+                    }
                 };
 
                 GenerationInputValidator.ValidatePersistedTask(task);
@@ -155,6 +183,215 @@ public sealed class JsonGenerationTaskStore : IGenerationTaskStore
             document.Tasks.AddRange(tasks);
             await SaveDocumentAsync(document with { UpdatedAtUtc = now }, token).ConfigureAwait(false);
             return tasks.Select(GenerationJson.Clone).ToArray();
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<CreateGenerationRetryBatchResult> CreateRetryBatchAsync(
+        CreateGenerationRetryBatchRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        var safeRequest = GenerationJson.Clone(request);
+        GenerationInputValidator.ValidateCreateRetryBatchRequest(safeRequest);
+
+        return await WithExclusiveLockAsync(async token =>
+        {
+            var document = await LoadDocumentAndRecoverExpiredClaimsAsync(token).ConfigureAwait(false);
+            var parents = safeRequest.Items
+                .Select(item => RequireTask(document, item.ParentTaskId))
+                .ToArray();
+            var existingChildIds = parents
+                .Select(parent => parent.SupersededByTaskId)
+                .Where(childId => childId is not null)
+                .ToArray();
+            if (existingChildIds.Length > 0)
+            {
+                if (existingChildIds.Length != parents.Length)
+                {
+                    throw new InvalidOperationException(
+                        "重试父任务中只有部分已被后继任务接替；请刷新任务状态后重新组织重试批次。");
+                }
+
+                var existingChildren = existingChildIds
+                    .Select(childId => RequireTask(document, childId!))
+                    .OrderBy(task => task.BatchItemIndex)
+                    .ThenBy(task => task.Id, StringComparer.Ordinal)
+                    .Select(GenerationJson.Clone)
+                    .ToArray();
+                return new CreateGenerationRetryBatchResult(false, existingChildren);
+            }
+
+            if (document.Tasks.Any(task =>
+                    string.Equals(task.BatchId, safeRequest.BatchId, StringComparison.Ordinal)))
+            {
+                throw new InvalidOperationException($"生成重试批次已经存在：{safeRequest.BatchId}。");
+            }
+
+            if (document.Tasks.Count > MaximumTaskCount - safeRequest.Items.Length)
+            {
+                throw new InvalidOperationException($"生成任务数量将超过上限 {MaximumTaskCount}。");
+            }
+
+            foreach (var parent in parents)
+            {
+                if (parent.Status != GenerationTaskStatus.Failed)
+                {
+                    throw new InvalidOperationException(
+                        $"任务 {parent.Id} 当前状态为 {parent.Status}，不能创建重试后继任务。");
+                }
+
+                if (parent.RetryLineage is not { } lineage)
+                {
+                    throw new InvalidOperationException(
+                        $"历史任务 {parent.Id} 没有冻结重试策略，不能被自动重试。");
+                }
+
+                if (lineage.AttemptNumber >= lineage.MaxAttempts)
+                {
+                    throw new InvalidOperationException(
+                        $"任务 {parent.Id} 已用尽 {lineage.MaxAttempts} 次生成尝试。");
+                }
+
+                if (!string.IsNullOrWhiteSpace(parent.AutomaticRetryBlockedReason) &&
+                    !safeRequest.ManualOverride)
+                {
+                    throw new InvalidOperationException(
+                        $"任务 {parent.Id} 的自动重做已阻断，需要人工接管后才能创建后继任务。");
+                }
+
+                if (parent.FailureRetryable != true && !safeRequest.ManualOverride)
+                {
+                    throw new InvalidOperationException(
+                        $"任务 {parent.Id} 的失败需要人工介入，不能自动创建重试任务。");
+                }
+            }
+
+            var now = GetUtcNow(parents.Max(parent => parent.UpdatedAtUtc));
+            var children = new GenerationTask[safeRequest.Items.Length];
+            for (var index = 0; index < safeRequest.Items.Length; index++)
+            {
+                var item = safeRequest.Items[index];
+                var parent = parents[index];
+                var parentLineage = parent.RetryLineage!;
+                var child = new GenerationTask
+                {
+                    Id = Guid.NewGuid().ToString("N"),
+                    Revision = 1,
+                    DisplayName = item.DisplayName,
+                    RequestedBy = safeRequest.RequestedBy,
+                    BatchId = safeRequest.BatchId,
+                    BatchItemId = item.ItemId,
+                    BatchItemIndex = index,
+                    Status = GenerationTaskStatus.Pending,
+                    Constraints = item.Constraints,
+                    CreatedAtUtc = now,
+                    UpdatedAtUtc = now,
+                    DispatchIntent = new GenerationTaskDispatchIntent
+                    {
+                        Requested = safeRequest.DispatchRequested,
+                        IsRetry = true
+                    },
+                    RetryLineage = new GenerationTaskRetryLineage
+                    {
+                        RootTaskId = parentLineage.RootTaskId,
+                        PreviousTaskId = parent.Id,
+                        AttemptNumber = parentLineage.AttemptNumber + 1,
+                        MaxAttempts = parentLineage.MaxAttempts
+                    }
+                };
+                GenerationInputValidator.ValidatePersistedTask(child);
+                children[index] = child;
+            }
+
+            for (var index = 0; index < parents.Length; index++)
+            {
+                var parent = parents[index];
+                var superseded = parent with
+                {
+                    Revision = parent.Revision + 1,
+                    UpdatedAtUtc = now,
+                    SupersededByTaskId = children[index].Id,
+                    AutomaticRetryBlockedReason = null
+                };
+                GenerationInputValidator.ValidatePersistedTask(superseded);
+                ReplaceTask(document, superseded);
+            }
+
+            document.Tasks.AddRange(children);
+            await SaveDocumentAsync(document with { UpdatedAtUtc = now }, token).ConfigureAwait(false);
+            return new CreateGenerationRetryBatchResult(
+                true,
+                children.Select(GenerationJson.Clone).ToArray());
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<GenerationTask>> BlockAutomaticRetryAsync(
+        IReadOnlyList<string> taskIds,
+        string reason,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(taskIds);
+        var normalizedTaskIds = taskIds
+            .Select(GenerationInputValidator.NormalizeTaskId)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (normalizedTaskIds.Length == 0)
+        {
+            throw new ArgumentException("至少需要一个自动重做阻断任务。", nameof(taskIds));
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+        var normalizedReason = reason.Trim();
+        GenerationInputValidator.ValidateFailureMessage(normalizedReason);
+        if (normalizedReason.Length > 4_096)
+        {
+            throw new ArgumentOutOfRangeException(nameof(reason), "自动重做阻断原因不能超过 4096 个字符。");
+        }
+
+        return await WithExclusiveLockAsync(async token =>
+        {
+            var document = await LoadDocumentAndRecoverExpiredClaimsAsync(token).ConfigureAwait(false);
+            var tasks = normalizedTaskIds.Select(taskId => RequireTask(document, taskId)).ToArray();
+            var now = GetUtcNow(tasks.Max(task => task.UpdatedAtUtc));
+            var blocked = new GenerationTask[tasks.Length];
+            var changed = false;
+            for (var index = 0; index < tasks.Length; index++)
+            {
+                var task = tasks[index];
+                if (task.Status != GenerationTaskStatus.Failed ||
+                    task.FailureRetryable != true ||
+                    task.RetryLineage is not { } lineage ||
+                    lineage.AttemptNumber >= lineage.MaxAttempts ||
+                    task.SupersededByTaskId is not null)
+                {
+                    throw new InvalidOperationException(
+                        $"任务 {task.Id} 不是仍有额度且尚未被接替的可恢复失败，不能阻断自动重做。");
+                }
+
+                if (string.Equals(task.AutomaticRetryBlockedReason, normalizedReason, StringComparison.Ordinal))
+                {
+                    blocked[index] = GenerationJson.Clone(task);
+                    continue;
+                }
+
+                var updated = task with
+                {
+                    Revision = task.Revision + 1,
+                    UpdatedAtUtc = now,
+                    AutomaticRetryBlockedReason = normalizedReason
+                };
+                GenerationInputValidator.ValidatePersistedTask(updated);
+                ReplaceTask(document, updated);
+                blocked[index] = GenerationJson.Clone(updated);
+                changed = true;
+            }
+
+            if (changed)
+            {
+                await SaveDocumentAsync(document with { UpdatedAtUtc = now }, token).ConfigureAwait(false);
+            }
+
+            return (IReadOnlyList<GenerationTask>)blocked;
         }, cancellationToken).ConfigureAwait(false);
     }
 
@@ -381,9 +618,27 @@ public sealed class JsonGenerationTaskStore : IGenerationTaskStore
         string failureMessage,
         CancellationToken cancellationToken = default)
     {
+        var classified = GenerationFailureClassifier.Classify(failureMessage);
+        return await FailAsync(taskId, agentId, classified, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<GenerationTask> FailAsync(
+        string taskId,
+        string agentId,
+        GenerationTaskFailure failure,
+        CancellationToken cancellationToken = default)
+    {
         var normalizedTaskId = GenerationInputValidator.NormalizeTaskId(taskId);
         GenerationInputValidator.ValidateAgentId(agentId);
-        GenerationInputValidator.ValidateFailureMessage(failureMessage);
+        ArgumentNullException.ThrowIfNull(failure);
+        var safeFailure = GenerationJson.Clone(failure);
+        GenerationInputValidator.ValidateFailureMessage(safeFailure.Message);
+        GenerationInputValidator.ValidateFailureCode(safeFailure.Code);
+        if (safeFailure.SubCode is not null)
+        {
+            GenerationInputValidator.ValidateFailureCode(safeFailure.SubCode);
+        }
+        GenerationInputValidator.ValidateFailureStage(safeFailure.Stage);
 
         return await WithExclusiveLockAsync(async token =>
         {
@@ -392,7 +647,11 @@ public sealed class JsonGenerationTaskStore : IGenerationTaskStore
 
             if (task.Status == GenerationTaskStatus.Failed &&
                 string.Equals(task.ClaimedBy, agentId, StringComparison.Ordinal) &&
-                string.Equals(task.FailureMessage, failureMessage, StringComparison.Ordinal))
+                string.Equals(task.FailureMessage, safeFailure.Message, StringComparison.Ordinal) &&
+                string.Equals(task.FailureCode, safeFailure.Code, StringComparison.Ordinal) &&
+                string.Equals(task.FailureSubCode, safeFailure.SubCode, StringComparison.Ordinal) &&
+                string.Equals(task.FailureStage, safeFailure.Stage, StringComparison.Ordinal) &&
+                task.FailureRetryable == safeFailure.Retryable)
             {
                 return GenerationJson.Clone(task);
             }
@@ -405,7 +664,11 @@ public sealed class JsonGenerationTaskStore : IGenerationTaskStore
                 Status = GenerationTaskStatus.Failed,
                 UpdatedAtUtc = now,
                 FailedAtUtc = now,
-                FailureMessage = failureMessage
+                FailureMessage = safeFailure.Message,
+                FailureCode = safeFailure.Code,
+                FailureSubCode = safeFailure.SubCode,
+                FailureStage = safeFailure.Stage,
+                FailureRetryable = safeFailure.Retryable
             };
 
             GenerationInputValidator.ValidatePersistedTask(failed);
@@ -635,6 +898,39 @@ public sealed class JsonGenerationTaskStore : IGenerationTaskStore
             if (task.UpdatedAtUtc > newestTaskUpdate)
             {
                 newestTaskUpdate = task.UpdatedAtUtc;
+            }
+        }
+
+        var tasksById = document.Tasks.ToDictionary(task => task.Id, StringComparer.Ordinal);
+        foreach (var task in document.Tasks.Where(task => task.RetryLineage is not null))
+        {
+            var lineage = task.RetryLineage!;
+            if (!tasksById.ContainsKey(lineage.RootTaskId))
+            {
+                throw new InvalidDataException(
+                    $"生成任务 {task.Id} 的重试根任务不存在：{lineage.RootTaskId}。");
+            }
+
+            if (lineage.PreviousTaskId is { } previousTaskId)
+            {
+                if (!tasksById.TryGetValue(previousTaskId, out var previous) ||
+                    !string.Equals(previous.SupersededByTaskId, task.Id, StringComparison.Ordinal) ||
+                    previous.RetryLineage is not { } previousLineage ||
+                    previousLineage.AttemptNumber + 1 != lineage.AttemptNumber ||
+                    previousLineage.MaxAttempts != lineage.MaxAttempts ||
+                    !string.Equals(previousLineage.RootTaskId, lineage.RootTaskId, StringComparison.Ordinal))
+                {
+                    throw new InvalidDataException(
+                        $"生成任务 {task.Id} 与上一重试任务 {previousTaskId} 的谱系不一致。");
+                }
+            }
+
+            if (task.SupersededByTaskId is { } childTaskId &&
+                (!tasksById.TryGetValue(childTaskId, out var child) ||
+                 child.RetryLineage?.PreviousTaskId != task.Id))
+            {
+                throw new InvalidDataException(
+                    $"生成任务 {task.Id} 的后继任务不存在或谱系不一致：{childTaskId}。");
             }
         }
 

@@ -246,8 +246,7 @@ internal sealed class GeneratedAssetPostProcessor(WorkspaceContextResolver conte
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            GeneratedAssetValidator.Validate(temporaryPath, task.Constraints);
-            cancellationToken.ThrowIfCancellationRequested();
+            var validationPath = temporaryPath;
             if (delivery.Workspace is { ProcessedPaths.Length: > 0 } workspace)
             {
                 if (workspace.ProcessedPaths.Length != task.Constraints.Output.Count)
@@ -269,12 +268,21 @@ internal sealed class GeneratedAssetPostProcessor(WorkspaceContextResolver conte
 
                 Directory.CreateDirectory(Path.GetDirectoryName(processed.FullPath)!);
                 _ = CommitValidatedTemporary(temporaryPath, processed.FullPath, task.Constraints);
-                GeneratedAssetValidator.Validate(processed.FullPath, task.Constraints);
                 processedRelativePath = processed.RelativePath;
+                validationPath = processed.FullPath;
+            }
+
+            // The processed attempt is an auditable intermediate, not proof that validation passed.
+            // Persist it before validation so a rejected geometry/alpha result remains visible to the
+            // user and can be used to direct the next model attempt.
+            GeneratedAssetValidator.Validate(validationPath, task.Constraints);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (processedRelativePath is not null)
+            {
                 finalTemporaryPath = Path.Combine(
                     targetDirectory,
                     $".pfcommit-{Guid.NewGuid():N}.tmp.png");
-                File.Copy(processed.FullPath, finalTemporaryPath, overwrite: false);
+                File.Copy(validationPath, finalTemporaryPath, overwrite: false);
                 GeneratedAssetValidator.Validate(finalTemporaryPath, task.Constraints);
             }
 

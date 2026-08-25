@@ -31,6 +31,7 @@ internal static class GeneratedOutputSubmissionSmokeTests
         try
         {
             await SubmissionPreservesAuditableStagesAndCompletesIdempotentlyAsync(dataRoot);
+            await GeometryFailureReturnsWarningAndPreservesEveryIntermediateAsync(dataRoot);
             await HarnessFallbackGeneratesExactRecommendedPathAndCompletesAsync(dataRoot);
             await HarnessFallbackRefreshesTaskAfterConcurrentCompletionAsync(dataRoot);
         }
@@ -41,6 +42,97 @@ internal static class GeneratedOutputSubmissionSmokeTests
                 Directory.Delete(dataRoot, recursive: true);
             }
         }
+    }
+
+    private static async Task GeometryFailureReturnsWarningAndPreservesEveryIntermediateAsync(
+        string dataRoot)
+    {
+        var root = Path.Combine(dataRoot, "geometry-warning");
+        var store = new JsonGenerationTaskStore(Path.Combine(root, "Generation"));
+        var options = new ServerOptions(
+            root,
+            McpTransport.Stdio,
+            IPAddress.Loopback,
+            43120,
+            "codex",
+            null,
+            null);
+        var fixture = await CreateTaskFixtureAsync(
+            root,
+            store,
+            maxAttempts: 4,
+            diamondAngle: 90d,
+            rotationAngle: 0d);
+        var sourcePath = Path.Combine(root, "ModelReturns", "axis-aligned-384x448.png");
+        WriteGeometryMismatchFixture(sourcePath);
+        var catalog = new GenerationToolProvider(
+                store,
+                new WorkspaceContextResolver(options),
+                options,
+                store.StoreFilePath)
+            .CreateCatalog();
+        var claim = await catalog.CallAsync(
+            "claim_generation_task",
+            JsonSerializer.SerializeToElement(new { taskId = fixture.Task.Id, agentId = AgentId }),
+            CancellationToken.None);
+        False(IsToolError(claim), "几何 warning 回归任务应先成功认领");
+
+        var result = await catalog.CallAsync(
+            "submit_generation_output",
+            JsonSerializer.SerializeToElement(new
+            {
+                taskId = fixture.Task.Id,
+                agentId = AgentId,
+                outputIndex = 0,
+                sourcePath
+            }),
+            CancellationToken.None);
+        False(IsToolError(result),
+            "图片已落盘但几何未通过时应正常返回 warning，而不是抛 MCP tool error");
+        var structured = JsonSerializer.SerializeToElement(result, ProtocolJson.Options)
+            .GetProperty("structuredContent");
+        Equal("retryable_validation_failure", structured.GetProperty("outcome").GetString(),
+            "几何未通过应返回可自动重做 outcome");
+        Equal("output_geometry_validation_failed",
+            structured.GetProperty("failure").GetProperty("code").GetString(),
+            "外层失败码不得再误报图片交付失败");
+        Equal("tilemap_geometry_aspect_ratio_mismatch",
+            structured.GetProperty("failure").GetProperty("subCode").GetString(),
+            "384×448 轴对齐矩形应归类为主体宽高比错误");
+        Equal(3, structured.GetProperty("failure").GetProperty("remainingAttempts").GetInt32(),
+            "默认四次总尝试的首次失败后应剩余三次");
+
+        var persisted = await store.GetAsync(fixture.Task.Id)
+            ?? throw new InvalidOperationException("几何 warning 任务未持久化。");
+        Equal(GenerationTaskStatus.Failed, persisted.Status,
+            "单次 attempt 应持久化失败以便原子创建后继任务");
+        Equal("output_geometry_validation_failed", persisted.FailureCode,
+            "任务应保留外层几何校验失败码");
+        Equal("tilemap_geometry_aspect_ratio_mismatch", persisted.FailureSubCode,
+            "任务应保留具体宽高比子错误");
+        Equal(true, persisted.FailureRetryable, "几何质量问题应标记为可重做");
+
+        var modelPath = ResolveArtifactPath(fixture.AssetRoot, fixture.Delivery.Workspace!.ModelOutputPaths[0]);
+        var normalizedPath = ResolveArtifactPath(fixture.AssetRoot, fixture.Delivery.StagingPaths[0]);
+        var processedPath = ResolveArtifactPath(fixture.AssetRoot, fixture.Delivery.Workspace.ProcessedPaths[0]);
+        var targetPath = ResolveArtifactPath(fixture.AssetRoot, fixture.Delivery.TargetPaths[0]);
+        True(File.Exists(modelPath), "几何失败前的模型原图必须保留");
+        True(File.Exists(normalizedPath), "几何失败前的归一化图必须保留");
+        True(File.Exists(processedPath), "未通过几何校验的背景处理图必须先落盘并保留");
+        False(File.Exists(targetPath), "未通过几何校验的图片不得进入最终 target");
+
+        var diagnosticsPath = ResolveArtifactPath(
+            fixture.AssetRoot,
+            fixture.Delivery.Workspace.DiagnosticsPath);
+        var warning = ReadJournal(diagnosticsPath).LastOrDefault(item =>
+            string.Equals(item.Stage, "output.geometry_validation", StringComparison.Ordinal) &&
+            string.Equals(item.Status, "retryable_warning", StringComparison.Ordinal))
+            ?? throw new InvalidOperationException("几何失败缺少结构化 warning journal。");
+        Equal(processedPath, warning.ObservedPath, "结构化诊断必须记录实际校验文件路径");
+        Equal(384, warning.GeometryDiagnostics?.ActualWidth, "结构化诊断实际宽度");
+        Equal(448, warning.GeometryDiagnostics?.ActualHeight, "结构化诊断实际高度");
+        True(warning.GeometryDiagnostics?.DiamondScore is < 0.5d,
+            "轴对齐长方形不应被误判为高菱形评分");
     }
 
     private static async Task HarnessFallbackGeneratesExactRecommendedPathAndCompletesAsync(
@@ -380,7 +472,10 @@ internal static class GeneratedOutputSubmissionSmokeTests
 
     private static async Task<TaskFixture> CreateTaskFixtureAsync(
         string dataRoot,
-        JsonGenerationTaskStore store)
+        JsonGenerationTaskStore store,
+        int maxAttempts = 1,
+        double? diamondAngle = null,
+        double? rotationAngle = null)
     {
         var assetRoot = Path.Combine(dataRoot, "Assets");
         Directory.CreateDirectory(assetRoot);
@@ -402,6 +497,8 @@ internal static class GeneratedOutputSubmissionSmokeTests
             ArtHeight = OutputSize,
             OutputCount = 1,
             ContentPrompt = "中央单一游戏瓦片物体，纯洋红背景",
+            DiamondAngle = diamondAngle ?? TilemapGenerationConstraintInput.DefaultDiamondAngle,
+            RotationAngle = rotationAngle ?? 0d,
             BackgroundRemoval = new GenerationBackgroundRemovalSpec
             {
                 Preset = "magenta",
@@ -443,6 +540,7 @@ internal static class GeneratedOutputSubmissionSmokeTests
                 {
                     ItemId = itemId,
                     DisplayName = "1254 raw 软件接管提交",
+                    MaxAttempts = maxAttempts,
                     Constraints = constraints
                 }
             ]
@@ -472,6 +570,27 @@ internal static class GeneratedOutputSubmissionSmokeTests
 
         image.Save(path, new PngEncoder { ColorType = PngColorType.RgbWithAlpha });
     }
+
+    private static void WriteGeometryMismatchFixture(string path)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)
+            ?? throw new InvalidOperationException("无法解析几何回归图片目录。"));
+        using var image = new Image<Rgba32>(OutputSize, OutputSize, KeyColor);
+        for (var y = 32; y < 480; y++)
+        {
+            for (var x = 64; x < 448; x++)
+            {
+                image[x, y] = SubjectColor;
+            }
+        }
+
+        image.Save(path, new PngEncoder { ColorType = PngColorType.RgbWithAlpha });
+    }
+
+    private static string ResolveArtifactPath(string assetRoot, string relativePath) =>
+        Path.GetFullPath(Path.Combine(
+            assetRoot,
+            relativePath.Replace('/', Path.DirectorySeparatorChar)));
 
     private static void AssertNormalizedImage(string path)
     {

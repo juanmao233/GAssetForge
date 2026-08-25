@@ -279,11 +279,12 @@ Assets\StyleLibrary\art-style-library.v1.json  风格组、提示词与当前选
 发布素材任务只代表把冻结约束与项目内 Run 交给已连接的 Agent Runtime；仓库不会因此宣称图片已经生成。
 只有 Agent 实际调用可用的图像生成模型，并由 `submit_generation_output` 把真实模型文件导入项目、完成确定性
 处理和 MCP 产物校验后，单图任务才会进入 `Completed`。
-“生成产物”窗口同时会扫描当前批次冻结的 `delivery.targetPaths`：即使任务仍为 `Pending`、`Claimed` 或
-`Failed`，已经真实落盘的预分配文件也会显示为“已落盘 · 等待任务完成登记”，并触发当前 Project 面板刷新。
-这种显示只用于发现部分最终产物和追踪归属，不代表文件已经通过校验，也不会把任务伪报为 `Completed`；
-Run 内的 `30-model-output`、`35-normalized-input` 与 `40-background-removed` 中间文件不显示、不计入最终进度，
-但会持续保留供审计。中断后续作时，Agent 只需重新读取并认领明确 task ID；已完成任务由
+“生成产物”窗口会按任务冻结合同扫描 `modelOutputPaths`、`stagingPaths`、`processedPaths` 与
+`targetPaths`。模型原图、画布归一化图、背景处理图和最终图中任一文件真实落盘后都会立即显示，并按处理中、
+成功、自动重做警告和最终失败使用不同边框颜色。中间文件只用于步骤检查和追踪归属，不计入最终图片进度，
+也不会把任务伪报为 `Completed`。可恢复问题默认自动重做，初次生成后最多重做 3 次；开关与次数可在素材生成
+页调整并持久化，所有失败尝试的已落盘中间文件继续保留供审计。中断后续作时，Agent 只需重新读取并认领
+明确 task ID；已完成任务由
 `submit_generation_output` 幂等保留，未完成任务重新调用真实 ImageGen 后提交 sourcePath。只有旧任务才需要人工
 检查 staging 与调用 process/complete；无法完成时必须调用 `fail_generation_task`，不能把任务遗留在 `Claimed`
 后直接报告完成。

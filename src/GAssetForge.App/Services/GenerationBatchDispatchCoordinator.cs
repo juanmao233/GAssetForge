@@ -86,6 +86,8 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
     private readonly IImageDeliveryPreflight? _imageDeliveryPreflight;
     private readonly TimeSpan _claimHeartbeatInterval;
     private readonly Func<TimeSpan, CancellationToken, Task> _heartbeatDelay;
+    private readonly object _scheduledBatchLock = new();
+    private readonly HashSet<string> _scheduledBatchIds = new(StringComparer.Ordinal);
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Task _worker;
     private int _disposed;
@@ -131,8 +133,36 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
             throw new ArgumentException("自动调度至少需要一个有效任务 ID。", nameof(taskIds));
         }
 
-        return _requests.Writer.TryWrite(
-            new GenerationBatchDispatchRequest(batchId.Trim(), normalizedTaskIds, isRetry));
+        var normalizedBatchId = batchId.Trim();
+        lock (_scheduledBatchLock)
+        {
+            if (!_scheduledBatchIds.Add(normalizedBatchId))
+            {
+                return true;
+            }
+
+            if (_requests.Writer.TryWrite(
+                    new GenerationBatchDispatchRequest(normalizedBatchId, normalizedTaskIds, isRetry)))
+            {
+                return true;
+            }
+
+            _scheduledBatchIds.Remove(normalizedBatchId);
+            return false;
+        }
+    }
+
+    public void ReleaseBatch(string batchId)
+    {
+        if (string.IsNullOrWhiteSpace(batchId))
+        {
+            return;
+        }
+
+        lock (_scheduledBatchLock)
+        {
+            _scheduledBatchIds.Remove(batchId.Trim());
+        }
     }
 
     private async Task ProcessRequestsAsync()

@@ -16,6 +16,9 @@ internal static class GeneratedAssetValidator
     private const int MaximumChunkCount = 4_096;
     private const int MaximumIdatChunkCount = 2_048;
     private const string TilemapGridPlane = "XY";
+    private const double AxisAlignedSquareAspectRatioDeviationPercent = 5d;
+    private const double AxisAlignedSquareRotationToleranceDegrees = 3d;
+    private const double DiamondDetectionScoreThreshold = 0.90d;
 
     private static ReadOnlySpan<byte> PngSignature =>
         [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
@@ -337,11 +340,9 @@ internal static class GeneratedAssetValidator
         var decodedRow = new byte[header.RowBytes];
         var sawFullyTransparentPixel = false;
         var sawNonTransparentTilemapPixel = false;
-        var requiredCornerCoverage = geometry?.RequiresAxisAlignedSquareCornerCoverage == true
-            ? new bool[4]
+        var foregroundGeometry = geometry?.RequiresAxisAlignedSquareGeometryValidation == true
+            ? new TilemapForegroundGeometryAnalyzer(header.Width, header.Height)
             : null;
-        var cornerAnchorWidth = Math.Max(1, header.Width / 8);
-        var cornerAnchorHeight = Math.Max(1, header.Height / 8);
         long enforcedOutsidePixelCount = 0;
         long decodedByteCount = 0;
         var decodedReadBudget = checked(header.ExpectedDecodedBytes + 1L);
@@ -381,24 +382,17 @@ internal static class GeneratedAssetValidator
                 {
                     var alphaIsZero = IsAlphaZero(decodedRow, x, header);
                     sawFullyTransparentPixel |= alphaIsZero;
+                    if (!alphaIsZero)
+                    {
+                        foregroundGeometry?.Add(x, y);
+                    }
+
                     if (geometry is not null)
                     {
                         var outlineDistance = geometry.GetOutlineDistance(x, y);
                         if (outlineDistance <= 1d && !alphaIsZero)
                         {
                             sawNonTransparentTilemapPixel = true;
-                            if (requiredCornerCoverage is not null)
-                            {
-                                requiredCornerCoverage[0] |=
-                                    x < cornerAnchorWidth && y < cornerAnchorHeight;
-                                requiredCornerCoverage[1] |=
-                                    x >= header.Width - cornerAnchorWidth && y < cornerAnchorHeight;
-                                requiredCornerCoverage[2] |=
-                                    x < cornerAnchorWidth && y >= header.Height - cornerAnchorHeight;
-                                requiredCornerCoverage[3] |=
-                                    x >= header.Width - cornerAnchorWidth &&
-                                    y >= header.Height - cornerAnchorHeight;
-                            }
                         }
 
                         if (geometry.IsEnforcedOutside(outlineDistance))
@@ -443,11 +437,12 @@ internal static class GeneratedAssetValidator
                 $"Tilemap PNG 在瓦片有效轮廓内全透明，缺少可交付的有效内容（{fullPath}）。");
         }
 
-        if (requiredCornerCoverage is not null && requiredCornerCoverage.Any(covered => !covered))
+        if (foregroundGeometry is not null)
         {
-            throw new InvalidDataException(
-                "Tilemap 90° 控制角且旋转 0° 时必须生成画布轴对齐正方形；" +
-                $"检测到方形角部缺少内容，产物可能被错误旋转成 45° 钻石形（{fullPath}）。");
+            ValidateAxisAlignedSquareForeground(
+                fullPath,
+                foregroundGeometry,
+                header.Width / (double)header.Height);
         }
 
         if (constraints.Output.TransparentBackground &&
@@ -456,6 +451,43 @@ internal static class GeneratedAssetValidator
         {
             throw new InvalidDataException(
                 $"PNG 声明透明背景，但解码后没有任何 Alpha=0 像素（{fullPath}）。");
+        }
+    }
+
+    private static void ValidateAxisAlignedSquareForeground(
+        string fullPath,
+        TilemapForegroundGeometryAnalyzer foregroundGeometry,
+        double expectedAspectRatio)
+    {
+        var diagnostics = foregroundGeometry.Analyze(
+            expectedAspectRatio,
+            AxisAlignedSquareAspectRatioDeviationPercent,
+            fullPath);
+        var aspectRatioDeviationPercent =
+            Math.Abs(diagnostics.ActualAspectRatio / diagnostics.ExpectedAspectRatio - 1d) * 100d;
+
+        if (diagnostics.DiamondScore >= DiamondDetectionScoreThreshold)
+        {
+            throw new TilemapGeometryValidationException(
+                TilemapGeometryErrorCodes.DiamondDetected,
+                "Tilemap 图片已生成并完成本地导入，但前景轮廓呈上下尖角、中心最宽的菱形，不符合 90°/0° 轴对齐正方形要求。",
+                diagnostics);
+        }
+
+        if (aspectRatioDeviationPercent > diagnostics.AllowedDeviationPercent)
+        {
+            throw new TilemapGeometryValidationException(
+                TilemapGeometryErrorCodes.AspectRatioMismatch,
+                "Tilemap 图片已生成并完成本地导入，但前景瓦片主体的外接包围盒宽高比不符合冻结画幅。",
+                diagnostics);
+        }
+
+        if (diagnostics.RotationAngleEstimate > AxisAlignedSquareRotationToleranceDegrees)
+        {
+            throw new TilemapGeometryValidationException(
+                TilemapGeometryErrorCodes.RotationMismatch,
+                "Tilemap 图片已生成并完成本地导入，但前景瓦片主体的边缘方向未与画布水平/垂直轴对齐。",
+                diagnostics);
         }
     }
 
@@ -1064,7 +1096,7 @@ internal static class GeneratedAssetValidator
         double SpanX,
         double SpanY,
         double BoundaryMargin,
-        bool RequiresAxisAlignedSquareCornerCoverage)
+        bool RequiresAxisAlignedSquareGeometryValidation)
     {
         public double GetOutlineDistance(int x, int y)
         {

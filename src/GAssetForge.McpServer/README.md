@@ -159,14 +159,25 @@ HTTP 默认端口为 `43120`，`--expected-agent` 支持 `codex` 与 `opencode`�
 `Assets/Generated/GAssetForge/Runs/<batchId>/30-model-output`，再写入 `35-normalized-input`、
 `40-background-removed` 和冻结的最终 `targetPaths`，并自动完成任务登记。
 
+若图片已生成、导入和完成中间处理，但 90°/0° Tilemap 前景主体几何未通过，
+`submit_generation_output` 不抛 MCP tool error，而是正常返回
+`outcome=retryable_validation_failure`。外层错误码固定为 `output_geometry_validation_failed`，子码区分
+`tilemap_geometry_aspect_ratio_mismatch`、`tilemap_geometry_rotation_mismatch` 和
+`tilemap_geometry_diamond_detected`，并返回包围盒、宽高比、角部占用、旋转估计、diamond score 与校验路径。
+Agent 应记录 warning 并继续其它任务，不得再次调用 `fail_generation_task` 或包装成图片交付失败。桌面端默认
+在初次生成后最多自动重做 3 次；每次创建新 task、新 batch、新 Run 和新路径，旧中间产物继续保留。
+桌面端还会持久化是否请求应用内调度：Agent 重新 Ready 或应用重启后，仅恢复明确请求调度的 Pending 批次，
+复用原 task/path 并补齐缺失的 prompt/manifest；同一 batch 不会重复启动 Turn。自动重做准备失败会转为可见的
+人工接管状态，而不是无限显示“自动重做中”。
+
 Agent 不得为新任务自行建目录、搬运、缩放、补底、抠图、修改 Alpha 或重复调用 process/complete。只有没有
 `delivery.workspace` 的历史任务继续使用旧 `stagingPaths → process_generation_output → complete_generation_task`
 兼容流程；最终 target 才计入产物进度。
 
 服务会拒绝不存在、越界、经过符号链接/目录联接、路径不匹配的文件；PNG 还会校验签名、精确尺寸、真实
 Alpha、CRC、连续 IDAT，并真实解压每行过滤器与像素数据。Tilemap 合同按 Core 构建器范围 fail-closed，
-本地处理后的最终图片在瓦片有效轮廓外必须为 Alpha 0，内部必须含非全透明有效内容；90°/0° 还会拒绝四角
-缺失、实际呈内接 45° 钻石形的错误产物。校验另设 544 MiB 文件、
+本地处理后的最终图片在瓦片有效轮廓外必须为 Alpha 0，内部必须含非全透明有效内容；90°/0° 还会分别校验
+主体宽高比、边缘旋转和真实的内接菱形轮廓，角部缺失本身不会直接被归类为 45° 钻石形。校验另设 544 MiB 文件、
 513 MiB 解压像素、4096 chunks、2048 IDAT 和 16 MiB 非图像数据预算，避免恶意资源消耗。
 任务认领默认使用 30 分钟租约。List、Get、Claim、Process、Complete 或 Fail 访问任务时会把超时的
 `Claimed` 原子回收为 `Pending` 并推进 revision；旧认领者必须重新认领后才能继续处理或提交终态，避免

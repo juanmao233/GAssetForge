@@ -70,8 +70,8 @@
         </Style>
 
         <Style x:Key="GenerationAssetListItemStyle" TargetType="{x:Type ListBoxItem}">
-            <Setter Property="Width" Value="146" />
-            <Setter Property="Height" Value="142" />
+            <Setter Property="Width" Value="172" />
+            <Setter Property="Height" Value="210" />
             <Setter Property="Margin" Value="0,0,9,9" />
             <Setter Property="Padding" Value="0" />
             <Setter Property="HorizontalContentAlignment" Value="Stretch" />
@@ -113,6 +113,20 @@
                     </ControlTemplate>
                 </Setter.Value>
             </Setter>
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding VisualState}" Value="Processing">
+                    <Setter Property="BorderBrush" Value="{DynamicResource App.AccentBrush}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding VisualState}" Value="Success">
+                    <Setter Property="BorderBrush" Value="{DynamicResource App.SuccessBrush}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding VisualState}" Value="RetryableWarning">
+                    <Setter Property="BorderBrush" Value="{DynamicResource App.WarningBrush}" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding VisualState}" Value="FinalFailure">
+                    <Setter Property="BorderBrush" Value="{DynamicResource App.DangerBrush}" />
+                </DataTrigger>
+            </Style.Triggers>
         </Style>
 
         <Style x:Key="GenerationDataGridStyle" TargetType="{x:Type DataGrid}">
@@ -865,7 +879,50 @@
                                            Text="连接正常后可直接在应用内生成，无需进入 CLI；未连接时仍可仅发布到本地队列。" />
                             </StackPanel>
 
-                            <StackPanel Grid.Row="3"
+                            <Border Grid.Row="3"
+                                    Margin="0,12,0,0"
+                                    Padding="10,8"
+                                    Background="{DynamicResource App.InputBackgroundBrush}"
+                                    BorderBrush="{DynamicResource App.BorderBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="5">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="12" />
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="8" />
+                                        <ColumnDefinition Width="72" />
+                                        <ColumnDefinition Width="12" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <CheckBox x:Name="AutoRetryEnabledCheckBox"
+                                              Grid.Column="0"
+                                              VerticalAlignment="Center"
+                                              Content="自动重做可恢复问题"
+                                              IsChecked="{Binding AutoRetryEnabled, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                    <TextBlock Grid.Column="2"
+                                               VerticalAlignment="Center"
+                                               Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                               FontSize="10"
+                                               Text="最多重做" />
+                                    <ComboBox x:Name="AutoRetryCountComboBox"
+                                              Grid.Column="4"
+                                              Height="28"
+                                              ItemsSource="{Binding AutoRetryCountOptions}"
+                                              IsEnabled="{Binding AutoRetryEnabled}"
+                                              SelectedItem="{Binding AutoRetryCount, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                    <TextBlock Grid.Column="6"
+                                               VerticalAlignment="Center"
+                                               Foreground="{DynamicResource App.TextMutedBrush}"
+                                               FontSize="9"
+                                               Text="{Binding AutoRetrySummaryText}"
+                                               TextTrimming="CharacterEllipsis"
+                                               ToolTip="{Binding AutoRetrySummaryText}" />
+                                </Grid>
+                            </Border>
+
+                            <StackPanel Grid.Row="4"
                                         Margin="0,12,0,0"
                                         HorizontalAlignment="Right"
                                         Orientation="Horizontal">
@@ -925,7 +982,7 @@
                                                Text="当前生成批次" />
                                     <TextBlock Margin="0,3,0,0"
                                                Style="{StaticResource GenerationMutedTextStyle}"
-                                               Text="每行独立跟踪；失败行会以新批次和新交付路径重试。" />
+                                               Text="每行独立跟踪；可恢复问题按设置自动重做，耗尽后可单项重新生成。" />
                                 </StackPanel>
                             </DockPanel>
 
@@ -1232,7 +1289,7 @@
                                                                             Padding="8,2"
                                                                             Command="{Binding DataContext.RetryFailedTaskCommand, RelativeSource={RelativeSource AncestorType={x:Type UserControl}}}"
                                                                             CommandParameter="{Binding}"
-                                                                            Content="重试失败项"
+                                                                            Content="重新生成该项"
                                                                             FontSize="9">
                                                                         <Button.Style>
                                                                             <Style TargetType="{x:Type Button}"
@@ -1422,6 +1479,9 @@
                                             <Grid>
                                                 <Grid.RowDefinitions>
                                                     <RowDefinition Height="94" />
+                                                    <RowDefinition Height="Auto" />
+                                                    <RowDefinition Height="Auto" />
+                                                    <RowDefinition Height="Auto" />
                                                     <RowDefinition Height="*" />
                                                 </Grid.RowDefinitions>
                                                 <Border Margin="5,5,5,0"
@@ -1440,20 +1500,53 @@
                                                                ToolTip="{Binding FullPath}" />
                                                     </Grid>
                                                 </Border>
-                                                <StackPanel Grid.Row="1" Margin="8,6,8,5">
-                                                    <TextBlock Foreground="{DynamicResource App.TextPrimaryBrush}"
-                                                               FontSize="10"
-                                                               FontWeight="SemiBold"
-                                                               Text="{Binding Name}"
-                                                               TextTrimming="CharacterEllipsis"
-                                                               ToolTip="{Binding FullPath}" />
-                                                    <TextBlock Margin="0,2,0,0"
-                                                               Foreground="{DynamicResource App.TextMutedBrush}"
+                                                <Border Grid.Row="1"
+                                                        Margin="8,6,8,0"
+                                                        Padding="6,2"
+                                                        HorizontalAlignment="Left"
+                                                        Background="{DynamicResource App.InputBackgroundBrush}"
+                                                        BorderBrush="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ListBoxItem}}}"
+                                                        BorderThickness="1"
+                                                        CornerRadius="8">
+                                                    <TextBlock Foreground="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ListBoxItem}}}"
                                                                FontSize="8"
-                                                               Text="{Binding AvailabilityText}"
-                                                               TextTrimming="CharacterEllipsis"
-                                                               ToolTip="{Binding RelativePath}" />
-                                                </StackPanel>
+                                                               FontWeight="SemiBold"
+                                                               Text="{Binding StageBadgeText}"
+                                                               ToolTip="{Binding TaskId}" />
+                                                </Border>
+                                                <TextBlock Grid.Row="2"
+                                                           Margin="8,5,8,0"
+                                                           Foreground="{DynamicResource App.TextPrimaryBrush}"
+                                                           FontSize="10"
+                                                           FontWeight="SemiBold"
+                                                           Text="{Binding Name}"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           ToolTip="{Binding FullPath}" />
+                                                <TextBlock Grid.Row="3"
+                                                           Margin="8,3,8,0"
+                                                           Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                                           FontSize="8"
+                                                           Text="{Binding AvailabilityText}"
+                                                           TextWrapping="Wrap"
+                                                           ToolTip="{Binding RelativePath}" />
+                                                <TextBlock Grid.Row="4"
+                                                           Margin="8,3,8,5"
+                                                           Foreground="{Binding BorderBrush, RelativeSource={RelativeSource AncestorType={x:Type ListBoxItem}}}"
+                                                           FontSize="8"
+                                                           Text="{Binding FailureMessage}"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           ToolTip="{Binding FailureMessage}">
+                                                    <TextBlock.Style>
+                                                        <Style TargetType="{x:Type TextBlock}">
+                                                            <Setter Property="Visibility" Value="Visible" />
+                                                            <Style.Triggers>
+                                                                <DataTrigger Binding="{Binding HasFailureMessage}" Value="False">
+                                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                                </DataTrigger>
+                                                            </Style.Triggers>
+                                                        </Style>
+                                                    </TextBlock.Style>
+                                                </TextBlock>
                                             </Grid>
                                         </DataTemplate>
                                     </ListBox.ItemTemplate>
@@ -1482,7 +1575,7 @@
                                                 HorizontalAlignment="Center"
                                                 Foreground="{DynamicResource App.TextSecondaryBrush}"
                                                 FontSize="10"
-                                                Text="Agent 输出文件落盘后会显示在这里；完成登记前会标记为待回写" />
+                                                Text="模型原图、归一化图、背景处理图或最终图任一落盘后都会立即显示在这里" />
                                 </StackPanel>
                             </Grid>
 

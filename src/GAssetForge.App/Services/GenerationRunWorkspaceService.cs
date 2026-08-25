@@ -61,24 +61,9 @@ public sealed class GenerationRunWorkspaceService
 
     public PreparedGenerationRunWorkspace Prepare(string batchId, string assetRoot)
     {
-        if (!Guid.TryParseExact(batchId, "N", out _))
-        {
-            throw new ArgumentException("生成批次 ID 必须是 32 位 GUID。", nameof(batchId));
-        }
-
-        if (string.IsNullOrWhiteSpace(assetRoot) || !Path.IsPathFullyQualified(assetRoot))
-        {
-            throw new ArgumentException("生成运行工作区必须绑定绝对 Assets 路径。", nameof(assetRoot));
-        }
-
-        var normalizedAssetRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(assetRoot));
-        if (!Directory.Exists(normalizedAssetRoot))
-        {
-            throw new DirectoryNotFoundException($"当前项目 Assets 目录不存在：{normalizedAssetRoot}");
-        }
-
-        var rootRelativePath = $"{RunContainerRelativePath}/{batchId.ToLowerInvariant()}";
-        var rootFullPath = ResolveAssetPath(normalizedAssetRoot, rootRelativePath);
+        var prepared = CreateWorkspaceDescriptor(batchId, assetRoot);
+        var normalizedAssetRoot = prepared.AssetRoot;
+        var rootFullPath = prepared.RootFullPath;
         if (Directory.Exists(rootFullPath) || File.Exists(rootFullPath))
         {
             throw new IOException($"生成运行工作区已存在：{rootFullPath}");
@@ -92,15 +77,6 @@ public sealed class GenerationRunWorkspaceService
                 Directory.CreateDirectory(Path.Combine(rootFullPath, directory));
             }
 
-            var prepared = new PreparedGenerationRunWorkspace(
-                batchId.ToLowerInvariant(),
-                normalizedAssetRoot,
-                rootRelativePath,
-                rootFullPath,
-                $"{rootRelativePath}/00-manifest/run.v1.json",
-                $"{rootRelativePath}/20-prompts",
-                $"{rootRelativePath}/90-diagnostics/stages.v1.jsonl",
-                Path.Combine(rootFullPath, "10-style-reference"));
             GenerationRunJournal.Append(
                 CreateJournalDelivery(prepared),
                 new GenerationRunStageEvent
@@ -118,6 +94,38 @@ public sealed class GenerationRunWorkspaceService
             TryDeleteOwnedRun(preparedRoot: rootFullPath, normalizedAssetRoot);
             throw;
         }
+    }
+
+    public PreparedGenerationRunWorkspace OpenOrRepair(string batchId, string assetRoot)
+    {
+        var prepared = CreateWorkspaceDescriptor(batchId, assetRoot);
+        if (File.Exists(prepared.RootFullPath))
+        {
+            throw new IOException($"生成运行工作区路径被文件占用：{prepared.RootFullPath}");
+        }
+
+        Directory.CreateDirectory(prepared.RootFullPath);
+        if ((File.GetAttributes(prepared.RootFullPath) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidDataException($"生成运行工作区不能是符号链接或目录联接：{prepared.RootFullPath}");
+        }
+
+        foreach (var directory in RequiredDirectories)
+        {
+            var path = Path.Combine(prepared.RootFullPath, directory);
+            if (File.Exists(path))
+            {
+                throw new IOException($"生成运行分类目录被文件占用：{path}");
+            }
+
+            Directory.CreateDirectory(path);
+            if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+            {
+                throw new InvalidDataException($"生成运行分类目录不能是符号链接或目录联接：{path}");
+            }
+        }
+
+        return prepared;
     }
 
     public GenerationRunWorkspacePlan CreateOutputPlan(
@@ -337,6 +345,40 @@ public sealed class GenerationRunWorkspaceService
                 ProcessedPaths = [ $"{run.RootRelativePath}/40-background-removed/.journal.png" ]
             }
         };
+
+    private static PreparedGenerationRunWorkspace CreateWorkspaceDescriptor(
+        string batchId,
+        string assetRoot)
+    {
+        if (!Guid.TryParseExact(batchId, "N", out _))
+        {
+            throw new ArgumentException("生成批次 ID 必须是 32 位 GUID。", nameof(batchId));
+        }
+
+        if (string.IsNullOrWhiteSpace(assetRoot) || !Path.IsPathFullyQualified(assetRoot))
+        {
+            throw new ArgumentException("生成运行工作区必须绑定绝对 Assets 路径。", nameof(assetRoot));
+        }
+
+        var normalizedAssetRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(assetRoot));
+        if (!Directory.Exists(normalizedAssetRoot))
+        {
+            throw new DirectoryNotFoundException($"当前项目 Assets 目录不存在：{normalizedAssetRoot}");
+        }
+
+        var normalizedBatchId = batchId.ToLowerInvariant();
+        var rootRelativePath = $"{RunContainerRelativePath}/{normalizedBatchId}";
+        var rootFullPath = ResolveAssetPath(normalizedAssetRoot, rootRelativePath);
+        return new PreparedGenerationRunWorkspace(
+            normalizedBatchId,
+            normalizedAssetRoot,
+            rootRelativePath,
+            rootFullPath,
+            $"{rootRelativePath}/00-manifest/run.v1.json",
+            $"{rootRelativePath}/20-prompts",
+            $"{rootRelativePath}/90-diagnostics/stages.v1.jsonl",
+            Path.Combine(rootFullPath, "10-style-reference"));
+    }
 
     private static string ResolveAssetPath(string assetRoot, string relativePath)
     {

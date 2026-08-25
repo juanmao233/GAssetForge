@@ -68,6 +68,43 @@ public sealed record GenerationRunStageEvent
     public string? ErrorCode { get; init; }
 
     public string? Message { get; init; }
+
+    public GenerationGeometryDiagnostics? GeometryDiagnostics { get; init; }
+}
+
+public sealed record GenerationGeometryBoundingBox(
+    int X,
+    int Y,
+    int Width,
+    int Height);
+
+public sealed record GenerationGeometryCornerOccupancy(
+    double TopLeftPercent,
+    double TopRightPercent,
+    double BottomLeftPercent,
+    double BottomRightPercent);
+
+public sealed record GenerationGeometryDiagnostics
+{
+    public GenerationGeometryBoundingBox ForegroundBoundingBox { get; init; } = new(0, 0, 0, 0);
+
+    public int ActualWidth { get; init; }
+
+    public int ActualHeight { get; init; }
+
+    public double ActualAspectRatio { get; init; }
+
+    public double ExpectedAspectRatio { get; init; }
+
+    public double AllowedDeviationPercent { get; init; }
+
+    public GenerationGeometryCornerOccupancy CornerOccupancy { get; init; } = new(0d, 0d, 0d, 0d);
+
+    public double RotationAngleEstimate { get; init; }
+
+    public double DiamondScore { get; init; }
+
+    public string ValidatedImagePath { get; init; } = string.Empty;
 }
 
 /// <summary>

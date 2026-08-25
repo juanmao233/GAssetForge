@@ -43,6 +43,8 @@ public sealed class UserSettingsModel
     public string AssetGenerationContentPrompt { get; set; } = "单个游戏场景瓦片";
     public string AssetGenerationNegativePrompt { get; set; } = string.Empty;
     public int AssetGenerationMaxParallelism { get; set; } = 2;
+    public bool AssetGenerationAutoRetryEnabled { get; set; } = true;
+    public int AssetGenerationAutoRetryCount { get; set; } = 3;
     public string? AssetGenerationOutputPath { get; set; }
     public List<AssetGenerationDraftRowSettings> AssetGenerationRows { get; set; } = [];
     public string BackgroundRemovalPresetKey { get; set; } = "magenta";
@@ -105,6 +107,10 @@ public sealed class UserSettingsService
             }
 
             settings.AssetGenerationRows ??= [];
+            settings.AssetGenerationAutoRetryCount = Math.Clamp(
+                settings.AssetGenerationAutoRetryCount,
+                0,
+                10);
             return settings;
         }
         catch

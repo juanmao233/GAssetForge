@@ -112,6 +112,7 @@ public sealed class PublishedGenerationTaskViewModel : ObservableObject
     public PublishedGenerationTaskViewModel(GenerationTask task, string description)
     {
         _task = task ?? throw new ArgumentNullException(nameof(task));
+        _isSuperseded = !string.IsNullOrWhiteSpace(task.SupersededByTaskId);
         Description = description ?? string.Empty;
     }
 
@@ -150,6 +151,8 @@ public sealed class PublishedGenerationTaskViewModel : ObservableObject
         {
             if (SetProperty(ref _isSuperseded, value))
             {
+                OnPropertyChanged(nameof(HasAutomaticRetryRemaining));
+                OnPropertyChanged(nameof(IsAutomaticRetryBlocked));
                 OnPropertyChanged(nameof(CanRetry));
                 OnPropertyChanged(nameof(StatusText));
                 OnPropertyChanged(nameof(DetailText));
@@ -157,21 +160,39 @@ public sealed class PublishedGenerationTaskViewModel : ObservableObject
         }
     }
 
-    public bool CanRetry => _task.Status == GenerationTaskStatus.Failed && !IsSuperseded;
+    public bool IsAutomaticRetryBlocked =>
+        _task.Status == GenerationTaskStatus.Failed &&
+        !IsSuperseded &&
+        !string.IsNullOrWhiteSpace(_task.AutomaticRetryBlockedReason);
 
-    public string StatusText => IsSuperseded ? "已创建重试任务" : _task.Status switch
+    public bool HasAutomaticRetryRemaining =>
+        _task.Status == GenerationTaskStatus.Failed &&
+        !IsSuperseded &&
+        !IsAutomaticRetryBlocked &&
+        _task.FailureRetryable == true &&
+        _task.RetryLineage is { } lineage &&
+        lineage.AttemptNumber < lineage.MaxAttempts;
+
+    public bool CanRetry =>
+        _task.Status == GenerationTaskStatus.Failed &&
+        !IsSuperseded &&
+        !HasAutomaticRetryRemaining;
+
+    public string StatusText => IsSuperseded ? "未通过 · 已自动重做" : _task.Status switch
     {
         GenerationTaskStatus.Pending => GeneratedOutputCount > 0
             ? $"等待认领 · {GeneratedOutputCount}/{RequestedCount} 已落盘"
             : "等待认领",
         GenerationTaskStatus.Claimed => $"{_task.ClaimedBy} 制作中 · {GeneratedOutputCount}/{RequestedCount}",
         GenerationTaskStatus.Completed => $"已完成 {CompletedOutputCount}/{RequestedCount}",
-        GenerationTaskStatus.Failed => "生成失败",
+        GenerationTaskStatus.Failed when IsAutomaticRetryBlocked => "自动重做受阻 · 可人工接管",
+        GenerationTaskStatus.Failed when HasAutomaticRetryRemaining => "未通过 · 自动重做中",
+        GenerationTaskStatus.Failed => "生成失败 · 需要处理",
         _ => _task.Status.ToString()
     };
 
     public string DetailText => IsSuperseded
-        ? $"原任务 {_task.Id[..8]} 保留失败记录，新的重试任务已单独发布"
+        ? $"原任务 {_task.Id[..8]} 保留失败记录，新的重做任务已单独发布"
         : _task.Status switch
     {
         GenerationTaskStatus.Pending => $"任务 {_task.Id[..8]} 已进入队列",
@@ -180,6 +201,11 @@ public sealed class PublishedGenerationTaskViewModel : ObservableObject
             (string.IsNullOrWhiteSpace(NextOutputPath) ? string.Empty : $" · 下一目标 {NextOutputPath}"),
         GenerationTaskStatus.Completed =>
             $"任务 {_task.Id[..8]} · 完成于 {_task.CompletedAtUtc?.ToLocalTime():HH:mm:ss}",
+        GenerationTaskStatus.Failed when IsAutomaticRetryBlocked =>
+            $"任务 {_task.Id[..8]} · 自动重做已停止：{_task.AutomaticRetryBlockedReason} · " +
+            $"原始问题：{_task.FailureMessage}",
+        GenerationTaskStatus.Failed when HasAutomaticRetryRemaining =>
+            $"任务 {_task.Id[..8]} · 第 {_task.RetryLineage!.AttemptNumber}/{_task.RetryLineage.MaxAttempts} 次未通过，正在创建下一次尝试 · {_task.FailureMessage}",
         GenerationTaskStatus.Failed =>
             $"任务 {_task.Id[..8]} · {_task.FailureMessage ?? "Agent 未提供失败原因"}",
         _ => string.Empty
@@ -233,12 +259,18 @@ public sealed class PublishedGenerationTaskViewModel : ObservableObject
         }
 
         _task = task;
+        if (!string.IsNullOrWhiteSpace(task.SupersededByTaskId))
+        {
+            IsSuperseded = true;
+        }
         OnPropertyChanged(nameof(RequestedCount));
         OnPropertyChanged(nameof(CompletedOutputCount));
         OnPropertyChanged(nameof(GeneratedOutputCount));
         OnPropertyChanged(nameof(OutputProgress));
         OnPropertyChanged(nameof(OutputProgressText));
         OnPropertyChanged(nameof(Status));
+        OnPropertyChanged(nameof(IsAutomaticRetryBlocked));
+        OnPropertyChanged(nameof(HasAutomaticRetryRemaining));
         OnPropertyChanged(nameof(CanRetry));
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(DetailText));

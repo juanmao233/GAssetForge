@@ -178,7 +178,9 @@ codex exec resume --json ... <threadId> -
   工作流约束快照。
 - 新任务固定 `output.count=1`、`outputIndex=0`。`maxParallelism=1` 只作为旧 Schema 兼容值保留，页面不再
   暴露或向 Agent 传递“并行图片数”；任务间并发和多 Agent 分配由当前 Agent Host 默认调度。
-- 单张失败不会阻塞其他任务；重试失败项时创建新任务和新批次，旧失败记录保留用于审计。
+- 单张失败不会阻塞其他任务。自动重做默认开启，默认值是初次生成后再尝试 3 次（共 4 次尝试）；页面可
+  关闭，也可把重做次数设置为 0–10。任务创建时会冻结总尝试数，之后修改页面设置不会改变已发布任务。
+- 可恢复失败会创建新任务、新批次、新 Run 和新交付路径，旧失败记录及中间产物保留用于审计，不覆盖上一轮。
 - 发布前由软件创建项目内 Run、最终分类目录、manifest、提示文件和固定交付路径；Agent 无需判断目录结构。
 
 批次落盘并更新 UI 后，Shell 根据任务 ID 构造 Agent prompt，并把发布请求交给 Codex Runtime。Turn 串行
@@ -283,8 +285,10 @@ task ID，不能省略 task ID 去领取其他待办。成功返回退出码 `0`
 的 `delivery.assetRoot + delivery.targetPaths`，不会回落到 Codex 默认 `generated_images`，也不会随之后的
 Project 切换漂移。
 
-“生成产物”窗口按最终 `targetPaths` 计算图片落盘进度；项目 Run 的模型原图、归一化图和剔色图属于诊断
-中间物，不计入正式图片数量。新任务中断后的续作规则是：
+“生成产物”窗口会持续扫描四个阶段，不等待整批完成：模型原图、画布归一化图、背景处理图或最终文件任一
+真实落盘后，就立即显示对应卡片并写入 Agent 反馈。卡片按处理中、成功、可重做警告和人工介入失败区分
+颜色，显示阶段、尝试编号和问题摘要。批次进度仍只按最终 `targetPaths` 计算；项目 Run 的模型原图、归一化
+图和剔色图属于诊断中间物，不计入正式图片数量。新任务中断后的续作规则是：
 
 1. 使用明确 task ID 调用 `get_generation_task` / `claim_generation_task`；租约回收后重新认领。
 2. 若任务已经 `Completed`，或 `submit_generation_output` 判断最终目标已有效，则幂等保留，不重新生成。
@@ -292,8 +296,9 @@ Project 切换漂移。
    `submit_generation_output(taskId, agentId, outputIndex=0, sourcePath)`；Agent 不扫描或修补 Run。
 4. 只有 `delivery.workspace` 缺失的历史任务，才检查 `stagingPaths` 并用旧
    `process_generation_output` / `complete_generation_task` 续作。
-5. 无法继续时调用 `fail_generation_task`，记录 ImageGen 或提交工具返回的准确错误。任何 `Claimed` 任务
-   都不能仅因 Turn 结束就被报告为完成。
+5. `submit_generation_output` 返回 `retryable_validation_failure` 时保留 warning 并继续其它任务，不再调用
+   `fail_generation_task`；只有工具真实失败或必须人工介入时才 fail。任何 `Claimed` 任务都不能仅因 Turn
+   结束就被报告为完成。
 
 失败任务已经归档的模型原图和中间结果仍保留在 Run 中，便于人工判断与后续新任务重试；任务状态和最终
 `targetPaths` 仍是正式完成判据。
@@ -433,15 +438,101 @@ GAssetForge.McpServer.exe
    自行读取冻结提示、画幅、规则与参考图，使用绝对 Python/`py -3` 和官方 `image_gen.py`，以 `--prompt-file`、
    `--size`、`--output-format png`、`--n 1`、`--no-augment`、`--out <recommendedSourcePath>` 确定性落盘；有参考图
    时使用 `edit` 并重复 `--image`。Agent 不再运行 Python、uv 或自行拼装命令。
-4. 软件归档源图、归一化冻结画布、补齐第一道纯色底、执行可选背景剔除、验证最终 Tilemap/PNG 合同、原子
-   写入 `delivery.targetPaths[0]`，并自动把任务登记为 `Completed`。
-5. 只有 ImageGen、Harness 兜底或提交工具真实失败时才调用 `fail_generation_task`，并保留准确错误；单项失败不阻塞同批
-   其它 task ID。
+4. 软件归档源图、归一化冻结画布、补齐第一道纯色底、执行可选背景剔除并验证最终 Tilemap/PNG 合同。校验
+   通过时原子写入 `delivery.targetPaths[0]`，并自动把任务登记为 `Completed`。
+5. 若图片已经生成和导入、但可恢复的 Tilemap 几何校验未通过，`submit_generation_output` 会把本次尝试记录
+   为 `Failed/retryable`，保留所有已落盘中间物，并以普通工具结果返回
+   `outcome=retryable_validation_failure`。Agent 只记录 warning 并继续同批其它 task，不得再次调用
+   `fail_generation_task`，也不得把它包装成 `image_delivery_fallback_failed`。
+6. 只有 ImageGen、Harness 兜底或提交工具真正返回 MCP tool error 时才调用 `fail_generation_task`，并保留
+   准确错误；单项失败不阻塞同批其它 task ID。
 
 Agent Host 可以并发调度多个单图任务，但协议不规定固定子 Agent 名称、槽位或页面并行数。新任务必须满足
 `output.count=1` 且 `outputIndex=0`；`submit_generation_output` 会拒绝旧多图合同。只有任务没有
 `delivery.workspace` 时，Agent 才按历史顺序使用 `stagingPaths → process_generation_output →
 complete_generation_task`。
+
+### 可恢复校验失败、错误码与重做谱系
+
+90°/0° 轴对齐正方形的几何问题统一使用外层错误码 `output_geometry_validation_failed`，具体原因放在
+`failure.subCode`：
+
+| 子错误码 | 含义 |
+| --- | --- |
+| `tilemap_geometry_aspect_ratio_mismatch` | 前景瓦片主体外接包围盒的宽高比超出冻结画幅允许偏差 |
+| `tilemap_geometry_rotation_mismatch` | 主体边缘方向没有与画布水平/垂直轴对齐 |
+| `tilemap_geometry_diamond_detected` | 前景轮廓确实呈上下尖角、中心最宽的内接菱形 |
+
+校验不会只因四个角部覆盖不足就直接判定为菱形；菱形分类还会综合边界轮廓、中心宽度、尖角位置、角部
+占用和旋转估计。结构化诊断包含：
+
+- `foregroundBoundingBox`（`x`、`y`、`width`、`height`）
+- `actualWidth`、`actualHeight`、`actualAspectRatio`
+- `expectedAspectRatio`、`allowedDeviationPercent`
+- `cornerOccupancy`（四个角部的占用百分比）
+- `rotationAngleEstimate`、`diamondScore`
+- `validatedImagePath`
+
+可恢复几何失败的工具结果摘录如下；它是成功的 JSON-RPC tool result，而不是 MCP error：
+
+```json
+{
+  "outcome": "retryable_validation_failure",
+  "warning": true,
+  "failure": {
+    "code": "output_geometry_validation_failed",
+    "subCode": "tilemap_geometry_aspect_ratio_mismatch",
+    "stage": "output.geometry_validation",
+    "retryable": true,
+    "remainingAttempts": 3,
+    "diagnostics": {
+      "foregroundBoundingBox": { "x": 64, "y": 32, "width": 384, "height": 448 },
+      "actualWidth": 384,
+      "actualHeight": 448,
+      "actualAspectRatio": 0.8571,
+      "expectedAspectRatio": 1.0,
+      "allowedDeviationPercent": 5.0,
+      "cornerOccupancy": {
+        "topLeftPercent": 99.0,
+        "topRightPercent": 99.0,
+        "bottomLeftPercent": 99.0,
+        "bottomRightPercent": 99.0
+      },
+      "rotationAngleEstimate": 0.0,
+      "diamondScore": 0.0,
+      "validatedImagePath": "D:\\Project\\Assets\\Generated\\...\\tile.transparent.png"
+    }
+  },
+  "artifacts": {
+    "modelOutputPaths": ["Generated/GAssetForge/Runs/.../30-model-output/.../tile.model.png"],
+    "normalizedPaths": ["Generated/GAssetForge/Runs/.../35-normalized-input/.../tile.normalized.png"],
+    "processedPaths": ["Generated/GAssetForge/Runs/.../40-background-removed/.../tile.transparent.png"],
+    "targetPaths": ["Generated/Tilemap/.../Final/tile.png"]
+  }
+}
+```
+
+这里的 `task.Status=Failed` 只表示该次尝试已经结束，不代表整条生成目标已放弃。Agent Turn 收束后，桌面端
+筛选 `FailureRetryable=true`、尚未被接替且仍有额度的尝试，通过原子的 `CreateRetryBatchAsync` 创建后继
+task；每个后继使用新的 batch ID、Run、manifest、模型路径和最终目标路径。父任务写入
+`SupersededByTaskId`，子任务保存 `RootTaskId`、`PreviousTaskId`、`AttemptNumber` 和冻结的 `MaxAttempts`。
+同一父任务的并发重做请求只会创建一个 child；后继提示会注入上一轮实际尺寸和对应修正要求。
+
+新任务把应用内派发选择冻结为 `dispatchIntent`。仅 `requested=true` 的 Pending 批次会在 GAssetForge 重启、
+项目切换或 Agent 恢复 Ready 后自动续派；恢复始终复用原 batch/task ID 和冻结路径，并可从任务合同补齐缺失的
+Run 目录、prompt 与 manifest。调度器按 batch ID 进程内去重，因此正常发布通知与恢复扫描不会启动两个 Turn。
+`requested=false` 的本地队列和人工接力任务只等待用户明确操作。
+
+如果自动重做在 child 入库前因权限、目录或 Run 准备问题失败，任务会持久化
+`automaticRetryBlockedReason`。此时仍保留原 `FailureRetryable` 和剩余次数用于诊断，但 UI 不再显示“自动重做
+中”，而是开放“重新生成该项”或手动批次入口。若 child 已经原子入库但后续 manifest/通知失败，则不回滚或
+覆盖 child；恢复器会继续显示、修复并派发同一个 Pending child。
+
+只有标记为可恢复的失败才进入自动重做。当前明确包括上述几何错误、Agent Turn 未认领/未完成，以及带
+timeout、socket、connection、HTTP 429/5xx 或 temporarily unavailable 证据的临时
+`image_delivery_fallback_failed`。认证或凭据缺失、路径权限、冻结合同损坏等需要人工介入的问题应使用
+`retryable=false`。没有重试谱系的历史任务不会因升级自动进入重做；额度耗尽后，界面保留本轮产物并提供
+“重新生成该项”入口。
 
 ### 背景剔除生成契约
 
@@ -578,10 +669,13 @@ Run timeline 是 append-only、best-effort JSONL。稳定阶段为：
 - `model_output.import`
 - `model_output.normalize`
 - `output.process_and_commit`
+- `output.geometry_validation`
 - `task.complete` / `task.fail`
 
 每个可计时阶段写入 `started` 与 `completed`/`failed` 事件，完成事件包含 `startedAtUtc`、`endedAtUtc` 和
-`elapsedMilliseconds`。日志写入失败不会反向让已验证的生成任务失败；任务状态与最终文件仍是权威真相源。
+`elapsedMilliseconds`。可恢复几何问题额外写入 `output.geometry_validation/retryable_warning` 和结构化诊断，
+随后 `task.fail` 的状态按剩余额度记录为 `retryable` 或 `manual_intervention`。日志写入失败不会反向让已验证
+的生成任务失败；任务状态、重试谱系与最终文件仍是权威真相源。
 
 指令日志页可执行：
 
@@ -607,7 +701,8 @@ generation timeline
   或棋盘格伪透明。
 - 启用背景剔除时，Agent 第一工序必须按冻结的 `colorHex` 生成均匀纯色底，画布边缘和有效轮廓外均保持该颜色，
   禁止渐变、纹理、背景投影或环境雾；本地处理后的最终 target 仍要求有效轮廓外真实 Alpha 0。
-- 90°/0° 方形允许少量安全边框，但四个角部必须存在瓦片内容；内接的 45° 钻石形会被拒绝。
+- 90°/0° 方形允许少量安全边框，并分别验证前景主体宽高比、边缘旋转和菱形轮廓。角部占用只是结构化
+  诊断的一部分，不会单独把轴对齐长方形误报为 45° 钻石形。
 - 内容提示、美术风格和负向提示可由任务补充。
 
 其他工作流仍使用可扩展的通用约束包，尚未因此获得已完成的专用图像生成实现。
@@ -643,6 +738,10 @@ Pending → Claimed → Completed
 - `submit_generation_output` 只接受认领者、单图 `outputIndex=0`、有效 workspace 和允许来源中的真实 PNG；
   原图导入采用哈希保护，归一化/剔色中间图和最终 target 均使用临时文件后原子移动。
 - 新提交成功后自动调用任务完成状态迁移；重复提交已完成任务时幂等返回既有 target，不覆盖不同模型原图。
+- 可恢复几何失败使用外层 `output_geometry_validation_failed` 和具体 `tilemap_geometry_*` 子码，正常返回
+  `retryable_validation_failure` warning，并保留模型、归一化和背景处理文件；不得包装成图片交付失败。
+- 重试谱系冻结初次与总尝试数；每次重做都创建新 task、新 Run 和新目标路径，并原子写入父子的
+  `SupersededByTaskId` / `PreviousTaskId` 关系，防止并发重复 child 或覆盖旧产物。
 - `process_generation_output` 与 `complete_generation_task` 继续保留旧任务的多图、staging 和中断兜底能力，
   但不是新任务的正常执行链。
 - PNG 校验覆盖签名、IHDR、精确宽高、真实 Alpha 色彩类型、CRC、连续 IDAT、IEND、尾随数据与完整像素解压。

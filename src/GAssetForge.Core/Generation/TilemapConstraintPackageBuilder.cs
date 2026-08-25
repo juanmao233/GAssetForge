@@ -242,6 +242,8 @@ public static class TilemapConstraintPackageBuilder
             IsSquareAngle(input.DiamondAngle) && IsZeroRotation(input.RotationAngle)
                 ? "当前有效轮廓为画布轴对齐正方形：上下边水平、左右边垂直。" +
                   "禁止额外旋转 45°，禁止生成角点朝上的钻石形（on-point diamond）。" +
+                  "画布为正方形并不等于主体合格：前景瓦片主体的外接包围盒也必须近似正方形，像素宽度与高度近似相等，" +
+                  "不得呈竖向或横向长方形；主体建议占据画布较短边的 80%～90%，居中且四条边完整。" +
                   "瓦片主体必须覆盖该方形有效区，仅允许少量纯色安全边框。"
                 : "必须严格按上述两条边方向形成有效轮廓，不得把控制角再次叠加为额外旋转。";
         return shapeDefinition +

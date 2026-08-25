@@ -54,6 +54,26 @@ internal static class JsonArguments
         return string.IsNullOrEmpty(text) ? null : text;
     }
 
+    public static bool? OptionalBoolean(JsonElement arguments, string name)
+    {
+        if (arguments.ValueKind != JsonValueKind.Object || !arguments.TryGetProperty(name, out var value))
+        {
+            return null;
+        }
+
+        if (value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+        {
+            return null;
+        }
+
+        if (value.ValueKind is not JsonValueKind.True and not JsonValueKind.False)
+        {
+            throw new JsonRpcException(JsonRpcErrorCodes.InvalidParams, $"参数 {name} 必须是布尔值。");
+        }
+
+        return value.GetBoolean();
+    }
+
     public static JsonElement OptionalObject(JsonElement arguments, string name)
     {
         if (arguments.ValueKind != JsonValueKind.Object || !arguments.TryGetProperty(name, out var value))

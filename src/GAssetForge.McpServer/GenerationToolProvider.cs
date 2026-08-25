@@ -166,7 +166,7 @@ internal sealed class GenerationToolProvider(
             ClaimTaskAsync),
         new(
             "submit_generation_output",
-            "为带 delivery.workspace 的单图任务提交真实图像模型返回文件。GAssetForge 会把 sourcePath 原图归档到当前项目，软件完成尺寸/纯色底归一化、背景剔除、约束验证、最终原子提交和任务完成登记；Agent 不需要创建目录、搬运、缩放、抠图或再次调用 complete。",
+            "为带 delivery.workspace 的单图任务提交真实图像模型返回文件。GAssetForge 会把 sourcePath 原图归档到当前项目，软件完成尺寸/纯色底归一化、背景剔除、约束验证、最终原子提交和任务完成登记；可恢复的几何校验不通过会作为 retryable_validation_failure 正常返回并保留中间产物，Agent 不要再调用 fail_generation_task。",
             McpToolCatalog.Schema("""
                 {
                   "type":"object",
@@ -183,7 +183,7 @@ internal sealed class GenerationToolProvider(
             SubmitOutputAsync),
         new(
             "run_image_delivery_fallback",
-            "仅当本次内置 ImageGen 返回可视结果但 savedPath 为空时，调用 GAssetForge Harness 的官方 image_gen.py 本地交付兜底。软件从已认领任务读取冻结提示、参考图、尺寸和 recommendedSourcePath，自行发现 Python、执行模型 CLI、验证 PNG、完成后处理并提交；Agent 不得传入任意命令、路径或提示词。",
+            "仅当本次内置 ImageGen 返回可视结果但 savedPath 为空时，调用 GAssetForge Harness 的官方 image_gen.py 本地交付兜底。软件从已认领任务读取冻结提示、参考图、尺寸和 recommendedSourcePath，自行发现 Python、执行模型 CLI、验证 PNG、完成后处理并提交；可恢复的几何校验不通过会作为 warning 正常返回并保留中间产物，Agent 不得再次包装为图片交付失败。",
             McpToolCatalog.Schema("""
                 {
                   "type":"object",
@@ -237,7 +237,11 @@ internal sealed class GenerationToolProvider(
                   "properties":{
                     "taskId":{"type":"string","minLength":1},
                     "agentId":{"type":"string","minLength":1,"maxLength":128},
-                    "failureMessage":{"type":"string","minLength":1}
+                    "failureMessage":{"type":"string","minLength":1},
+                    "failureCode":{"type":"string","minLength":1,"maxLength":128},
+                    "failureSubCode":{"type":"string","minLength":1,"maxLength":128},
+                    "failureStage":{"type":"string","minLength":1,"maxLength":128},
+                    "retryable":{"type":"boolean"}
                   },
                   "required":["taskId","agentId","failureMessage"],
                   "additionalProperties":false
@@ -1014,14 +1018,29 @@ internal sealed class GenerationToolProvider(
         EnsureClaimOwnershipForProcessing(existingTask, agentId);
         var task = await taskStore.RenewClaimAsync(existingTask.Id, agentId, cancellationToken)
             .ConfigureAwait(false);
-        var submission = await _submissionService.SubmitAsync(
-                task,
-                delivery,
-                agentId,
-                outputIndex,
-                sourcePath,
-                cancellationToken)
-            .ConfigureAwait(false);
+        GeneratedOutputSubmissionResult submission;
+        try
+        {
+            submission = await _submissionService.SubmitAsync(
+                    task,
+                    delivery,
+                    agentId,
+                    outputIndex,
+                    sourcePath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (TilemapGeometryValidationException exception)
+        {
+            return await RecordRetryableGeometryFailureAsync(
+                    task,
+                    delivery,
+                    agentId,
+                    outputIndex,
+                    exception,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
         GenerationTask completed;
         using (var measurement = GenerationRunJournal.Measure(
                    delivery,
@@ -1146,11 +1165,29 @@ internal sealed class GenerationToolProvider(
         var taskId = JsonArguments.RequiredString(arguments, "taskId");
         var agentId = JsonArguments.RequiredString(arguments, "agentId");
         var failureMessage = JsonArguments.RequiredString(arguments, "failureMessage");
+        var failureCode = JsonArguments.OptionalString(arguments, "failureCode");
+        var failureSubCode = JsonArguments.OptionalString(arguments, "failureSubCode");
+        var failureStage = JsonArguments.OptionalString(arguments, "failureStage");
+        var retryable = JsonArguments.OptionalBoolean(arguments, "retryable");
         var existingTask = await taskStore.GetAsync(taskId, cancellationToken).ConfigureAwait(false)
             ?? throw new KeyNotFoundException($"生成任务不存在：{taskId}");
         var delivery = ReadDeliveryOrThrow(existingTask.Constraints);
-        var task = await taskStore.FailAsync(taskId, agentId, failureMessage, cancellationToken)
-            .ConfigureAwait(false);
+        var task = failureCode is null && failureSubCode is null && failureStage is null && retryable is null
+            ? await taskStore.FailAsync(taskId, agentId, failureMessage, cancellationToken)
+                .ConfigureAwait(false)
+            : await taskStore.FailAsync(
+                    taskId,
+                    agentId,
+                    new GenerationTaskFailure
+                    {
+                        Message = failureMessage,
+                        Code = failureCode ?? "agent_reported_failure",
+                        SubCode = failureSubCode,
+                        Stage = failureStage ?? "agent.execution",
+                        Retryable = retryable == true
+                    },
+                    cancellationToken)
+                .ConfigureAwait(false);
         GenerationRunJournal.Append(
             delivery,
             new GenerationRunStageEvent
@@ -1161,11 +1198,118 @@ internal sealed class GenerationToolProvider(
                 Status = "failed",
                 EndedAtUtc = task.FailedAtUtc,
                 AgentId = agentId,
-                ErrorCode = "agent_reported_failure",
+                ErrorCode = task.FailureSubCode ?? task.FailureCode ?? "agent_reported_failure",
                 Message = failureMessage
             });
         return new { task };
     }
+
+    private async Task<object> RecordRetryableGeometryFailureAsync(
+        GenerationTask task,
+        GenerationDeliveryPlan delivery,
+        string agentId,
+        int outputIndex,
+        TilemapGeometryValidationException exception,
+        CancellationToken cancellationToken)
+    {
+        var message =
+            $"output_geometry_validation_failed: {exception.ErrorCode}; {exception.Message}";
+        var failed = await taskStore.FailAsync(
+                task.Id,
+                agentId,
+                new GenerationTaskFailure
+                {
+                    Message = message,
+                    Code = "output_geometry_validation_failed",
+                    SubCode = exception.ErrorCode,
+                    Stage = "output.geometry_validation",
+                    Retryable = true
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+        var remainingAttempts = failed.RetryLineage is { } lineage
+            ? Math.Max(0, lineage.MaxAttempts - lineage.AttemptNumber)
+            : 0;
+        GenerationRunJournal.Append(
+            delivery,
+            new GenerationRunStageEvent
+            {
+                BatchId = failed.BatchId,
+                TaskId = failed.Id,
+                OutputIndex = outputIndex,
+                Stage = "output.geometry_validation",
+                Status = "retryable_warning",
+                EndedAtUtc = failed.FailedAtUtc,
+                AgentId = agentId,
+                ObservedPath = exception.Diagnostics.ValidatedImagePath,
+                ErrorCode = exception.ErrorCode,
+                Message = exception.Message,
+                GeometryDiagnostics = ToJournalDiagnostics(exception.Diagnostics)
+            });
+        GenerationRunJournal.Append(
+            delivery,
+            new GenerationRunStageEvent
+            {
+                BatchId = failed.BatchId,
+                TaskId = failed.Id,
+                OutputIndex = outputIndex,
+                Stage = "task.fail",
+                Status = remainingAttempts > 0 ? "retryable" : "manual_intervention",
+                EndedAtUtc = failed.FailedAtUtc,
+                AgentId = agentId,
+                ObservedPath = exception.Diagnostics.ValidatedImagePath,
+                ErrorCode = "output_geometry_validation_failed",
+                Message = message
+            });
+        return new
+        {
+            task = failed,
+            outcome = "retryable_validation_failure",
+            warning = true,
+            message = "图片生成、本地导入和中间处理已完成，但瓦片几何未通过；产物已保留，桌面端将按重试策略创建新尝试。",
+            failure = new
+            {
+                code = "output_geometry_validation_failed",
+                subCode = exception.ErrorCode,
+                stage = "output.geometry_validation",
+                retryable = true,
+                remainingAttempts,
+                diagnostics = exception.Diagnostics
+            },
+            artifacts = new
+            {
+                modelOutputPaths = delivery.Workspace?.ModelOutputPaths ?? [],
+                normalizedPaths = delivery.StagingPaths,
+                processedPaths = delivery.Workspace?.ProcessedPaths ?? [],
+                targetPaths = delivery.TargetPaths,
+                validatedPath = exception.Diagnostics.ValidatedImagePath
+            }
+        };
+    }
+
+    private static GenerationGeometryDiagnostics ToJournalDiagnostics(
+        TilemapGeometryDiagnostics diagnostics) =>
+        new()
+        {
+            ForegroundBoundingBox = new GenerationGeometryBoundingBox(
+                diagnostics.ForegroundBoundingBox.X,
+                diagnostics.ForegroundBoundingBox.Y,
+                diagnostics.ForegroundBoundingBox.Width,
+                diagnostics.ForegroundBoundingBox.Height),
+            ActualWidth = diagnostics.ActualWidth,
+            ActualHeight = diagnostics.ActualHeight,
+            ActualAspectRatio = diagnostics.ActualAspectRatio,
+            ExpectedAspectRatio = diagnostics.ExpectedAspectRatio,
+            AllowedDeviationPercent = diagnostics.AllowedDeviationPercent,
+            CornerOccupancy = new GenerationGeometryCornerOccupancy(
+                diagnostics.CornerOccupancy.TopLeftPercent,
+                diagnostics.CornerOccupancy.TopRightPercent,
+                diagnostics.CornerOccupancy.BottomLeftPercent,
+                diagnostics.CornerOccupancy.BottomRightPercent),
+            RotationAngleEstimate = diagnostics.RotationAngleEstimate,
+            DiamondScore = diagnostics.DiamondScore,
+            ValidatedImagePath = diagnostics.ValidatedImagePath
+        };
 
     private static void EnsureOutputFormatsMatch(IEnumerable<string> relativePaths, string requestedFormat)
     {

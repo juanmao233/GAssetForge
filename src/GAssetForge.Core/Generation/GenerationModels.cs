@@ -116,6 +116,15 @@ public sealed record CreateGenerationTaskRequest
 
     public string? RequestedBy { get; init; }
 
+    /// <summary>
+    /// Total number of attempts including the initial attempt. A value of 1 disables automatic retry.
+    /// </summary>
+    public int MaxAttempts { get; init; } = 1;
+
+    public bool DispatchRequested { get; init; }
+
+    public bool IsRetryDispatch { get; init; }
+
     public GenerationConstraintPackage Constraints { get; init; } = new();
 }
 
@@ -124,6 +133,11 @@ public sealed record CreateGenerationBatchItemRequest
     public string ItemId { get; init; } = string.Empty;
 
     public string DisplayName { get; init; } = string.Empty;
+
+    /// <summary>
+    /// Total number of attempts including the initial attempt. A value of 1 disables automatic retry.
+    /// </summary>
+    public int MaxAttempts { get; init; } = 1;
 
     public GenerationConstraintPackage Constraints { get; init; } = new();
 }
@@ -136,7 +150,89 @@ public sealed record CreateGenerationBatchRequest
 
     public string? RequestedBy { get; init; }
 
+    public bool DispatchRequested { get; init; }
+
+    public bool IsRetryDispatch { get; init; }
+
     public CreateGenerationBatchItemRequest[] Items { get; init; } = [];
+}
+
+public sealed record CreateGenerationRetryBatchItemRequest
+{
+    public string ParentTaskId { get; init; } = string.Empty;
+
+    public string ItemId { get; init; } = string.Empty;
+
+    public string DisplayName { get; init; } = string.Empty;
+
+    public GenerationConstraintPackage Constraints { get; init; } = new();
+}
+
+public sealed record CreateGenerationRetryBatchRequest
+{
+    public string BatchId { get; init; } = string.Empty;
+
+    public string DisplayName { get; init; } = string.Empty;
+
+    public string? RequestedBy { get; init; }
+
+    /// <summary>
+    /// Reserved for an explicit user action. Automatic retry coordinators must leave this false.
+    /// </summary>
+    public bool ManualOverride { get; init; }
+
+    public bool DispatchRequested { get; init; } = true;
+
+    public CreateGenerationRetryBatchItemRequest[] Items { get; init; } = [];
+}
+
+public sealed record CreateGenerationRetryBatchResult(
+    bool Created,
+    IReadOnlyList<GenerationTask> Tasks);
+
+public sealed record GenerationTaskRetryLineage
+{
+    public const int CurrentSchemaVersion = 1;
+
+    public int SchemaVersion { get; init; } = CurrentSchemaVersion;
+
+    public string RootTaskId { get; init; } = string.Empty;
+
+    public string? PreviousTaskId { get; init; }
+
+    /// <summary>
+    /// One-based attempt number. The first model generation is attempt 1.
+    /// </summary>
+    public int AttemptNumber { get; init; } = 1;
+
+    /// <summary>
+    /// Total allowed attempts including the first generation.
+    /// </summary>
+    public int MaxAttempts { get; init; } = 1;
+}
+
+public sealed record GenerationTaskFailure
+{
+    public string Message { get; init; } = string.Empty;
+
+    public string Code { get; init; } = "generation_failed";
+
+    public string? SubCode { get; init; }
+
+    public string Stage { get; init; } = "generation";
+
+    public bool Retryable { get; init; }
+}
+
+public sealed record GenerationTaskDispatchIntent
+{
+    public const int CurrentSchemaVersion = 1;
+
+    public int SchemaVersion { get; init; } = CurrentSchemaVersion;
+
+    public bool Requested { get; init; }
+
+    public bool IsRetry { get; init; }
 }
 
 public sealed record GenerationTask
@@ -187,4 +283,35 @@ public sealed record GenerationTask
     public string[] RelativeAssetPaths { get; init; } = [];
 
     public string? FailureMessage { get; init; }
+
+    public string? FailureCode { get; init; }
+
+    public string? FailureSubCode { get; init; }
+
+    public string? FailureStage { get; init; }
+
+    public bool? FailureRetryable { get; init; }
+
+    /// <summary>
+    /// Frozen application dispatch intent. Null keeps legacy tasks opt-in only and prevents an
+    /// upgrade from unexpectedly starting an Agent Turn for an old Pending task.
+    /// </summary>
+    public GenerationTaskDispatchIntent? DispatchIntent { get; init; }
+
+    /// <summary>
+    /// Persistent reason that automatic retry preparation could not continue. While present, the
+    /// desktop exposes manual takeover instead of repeatedly consuming the same retry slot.
+    /// </summary>
+    public string? AutomaticRetryBlockedReason { get; init; }
+
+    /// <summary>
+    /// Frozen retry lineage for tasks created by retry-aware desktop versions. Null preserves the
+    /// behavior of historical tasks and prevents them from being retried automatically after upgrade.
+    /// </summary>
+    public GenerationTaskRetryLineage? RetryLineage { get; init; }
+
+    /// <summary>
+    /// Child task that superseded this failed attempt. Set atomically with creation of the child.
+    /// </summary>
+    public string? SupersededByTaskId { get; init; }
 }

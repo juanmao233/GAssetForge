@@ -10,6 +10,15 @@ public interface IGenerationTaskStore
         CreateGenerationBatchRequest request,
         CancellationToken cancellationToken = default);
 
+    Task<CreateGenerationRetryBatchResult> CreateRetryBatchAsync(
+        CreateGenerationRetryBatchRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<IReadOnlyList<GenerationTask>> BlockAutomaticRetryAsync(
+        IReadOnlyList<string> taskIds,
+        string reason,
+        CancellationToken cancellationToken = default);
+
     Task<IReadOnlyList<GenerationTask>> ListBatchAsync(
         string batchId,
         CancellationToken cancellationToken = default);
@@ -48,5 +57,11 @@ public interface IGenerationTaskStore
         string taskId,
         string agentId,
         string failureMessage,
+        CancellationToken cancellationToken = default);
+
+    Task<GenerationTask> FailAsync(
+        string taskId,
+        string agentId,
+        GenerationTaskFailure failure,
         CancellationToken cancellationToken = default);
 }

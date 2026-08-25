@@ -5,6 +5,41 @@ development track; versioning policy will be finalized before the first public r
 
 ## Unreleased
 
+## 1.0.4t1 - 2026-08-25
+
+### Added
+
+- Added configurable automatic recovery for retryable generation failures. Automatic retry is enabled
+  by default with three redo attempts after the initial generation, persists a frozen attempt lineage,
+  and creates a new task, batch, Run, prompt, and delivery path for every attempt without overwriting
+  prior artifacts.
+- Added live four-stage artifact visibility for model output, normalized input, background-removed
+  output, and final assets. Intermediate files now appear as soon as they land and use distinct
+  processing, success, retry-warning, and manual-intervention states without inflating final progress.
+- Added structured Tilemap foreground diagnostics covering the bounding box, actual and expected aspect
+  ratios, corner occupancy, estimated rotation, diamond score, and validated image path.
+
+### Changed
+
+- `submit_generation_output` now treats recoverable Tilemap geometry failures as a successful warning
+  result with `outcome=retryable_validation_failure`, preserves imported/intermediate files, and records
+  the attempt as retryable instead of returning an MCP tool error or misreporting image delivery failure.
+- Automatic retry now runs after the Agent Turn is reconciled, atomically supersedes each failed attempt,
+  injects its measured geometry into the next prompt, and stops at the frozen limit or when a failure
+  requires manual intervention.
+- Persisted dispatch intent now lets the desktop recover the same Pending batch after restart, project
+  switching, or Agent reconnection. Recovery repairs missing Run directories, prompts, and manifests,
+  while process-local batch deduplication prevents duplicate Agent Turns.
+- Automatic retry preparation failures now persist an explicit blocked reason and expose manual takeover
+  instead of leaving the task indefinitely labelled as "automatic retry in progress".
+
+### Fixed
+
+- Split axis-aligned Tilemap validation into `tilemap_geometry_aspect_ratio_mismatch`,
+  `tilemap_geometry_rotation_mismatch`, and `tilemap_geometry_diamond_detected` under the outer
+  `output_geometry_validation_failed` code, so a tall axis-aligned rectangle is no longer classified as
+  a rotated diamond solely because its corners are not fully occupied.
+
 ## 1.0.3t1 - 2026-08-25
 
 ### Fixed

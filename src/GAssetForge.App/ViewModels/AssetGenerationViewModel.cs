@@ -19,16 +19,50 @@ public sealed record AssetGenerationStepOption(
     string DisplayName,
     string Description);
 
+public enum GeneratedAssetStage
+{
+    ModelOutput,
+    NormalizedInput,
+    BackgroundRemoved,
+    Final
+}
+
+public enum GeneratedAssetVisualState
+{
+    Processing,
+    Success,
+    RetryableWarning,
+    FinalFailure
+}
+
 public sealed class GeneratedAssetViewModel
 {
     private readonly GenerationTaskStatus _taskStatus;
+    private readonly bool _canRetry;
+    private readonly bool _isSuperseded;
+    private readonly bool _hasAutomaticRetryRemaining;
 
     public GeneratedAssetViewModel(
         string assetRoot,
         string relativePath,
-        GenerationTaskStatus taskStatus)
+        GeneratedAssetStage stage,
+        GenerationTaskStatus taskStatus,
+        bool canRetry,
+        bool isSuperseded,
+        bool hasAutomaticRetryRemaining,
+        string? failureMessage,
+        string taskId,
+        GenerationTaskRetryLineage? retryLineage)
     {
         _taskStatus = taskStatus;
+        _canRetry = canRetry;
+        _isSuperseded = isSuperseded;
+        _hasAutomaticRetryRemaining = hasAutomaticRetryRemaining;
+        Stage = stage;
+        FailureMessage = NormalizeFailureMessage(failureMessage);
+        TaskId = taskId;
+        AttemptNumber = retryLineage?.AttemptNumber ?? 1;
+        MaxAttempts = retryLineage?.MaxAttempts ?? 1;
         RelativePath = relativePath.Replace('\\', '/');
         FullPath = Path.GetFullPath(Path.Combine(assetRoot, RelativePath.Replace('/', Path.DirectorySeparatorChar)));
     }
@@ -39,17 +73,96 @@ public sealed class GeneratedAssetViewModel
 
     public string FullPath { get; }
 
-    public string AvailabilityText => !File.Exists(FullPath)
-        ? "文件缺失"
-        : _taskStatus == GenerationTaskStatus.Completed
-            ? "已生成"
-            : "已落盘 · 等待任务完成登记";
+    public GeneratedAssetStage Stage { get; }
+
+    public string StageText => Stage switch
+    {
+        GeneratedAssetStage.ModelOutput => "模型原图",
+        GeneratedAssetStage.NormalizedInput => "画布归一化",
+        GeneratedAssetStage.BackgroundRemoved => "背景处理",
+        GeneratedAssetStage.Final => "最终产物",
+        _ => "生成产物"
+    };
+
+    public string TaskId { get; }
+
+    public int AttemptNumber { get; }
+
+    public int MaxAttempts { get; }
+
+    public string StageBadgeText => MaxAttempts > 1
+        ? $"{StageText} · 尝试 {AttemptNumber}/{MaxAttempts}"
+        : StageText;
+
+    public GeneratedAssetVisualState VisualState => _taskStatus switch
+    {
+        GenerationTaskStatus.Completed => GeneratedAssetVisualState.Success,
+        GenerationTaskStatus.Failed when _isSuperseded || _hasAutomaticRetryRemaining =>
+            GeneratedAssetVisualState.RetryableWarning,
+        GenerationTaskStatus.Failed => GeneratedAssetVisualState.FinalFailure,
+        _ => GeneratedAssetVisualState.Processing
+    };
+
+    public string FailureMessage { get; }
+
+    public bool HasFailureMessage => FailureMessage.Length > 0;
+
+    public string AvailabilityText
+    {
+        get
+        {
+            if (!File.Exists(FullPath))
+            {
+                return "文件缺失";
+            }
+
+            return _taskStatus switch
+            {
+                GenerationTaskStatus.Completed when Stage == GeneratedAssetStage.Final =>
+                    "已生成",
+                GenerationTaskStatus.Completed =>
+                    $"{StageText}已保留 · 任务已完成",
+                GenerationTaskStatus.Failed when _isSuperseded =>
+                    $"{StageText}已保留 · 本次尝试未通过，已自动重做",
+                GenerationTaskStatus.Failed when _hasAutomaticRetryRemaining =>
+                    $"{StageText}已保留 · 本次未通过，正在自动重做",
+                GenerationTaskStatus.Failed when _canRetry =>
+                    $"{StageText}已保留 · 重做已停止，可重新生成该项",
+                GenerationTaskStatus.Failed =>
+                    $"{StageText}已保留 · 最终失败，需要人工介入",
+                _ when Stage == GeneratedAssetStage.Final =>
+                    "最终文件已落盘 · 等待任务完成登记与校验",
+                _ => $"{StageText}已落盘 · 后续步骤处理中"
+            };
+        }
+    }
+
+    public string DiagnosticText => HasFailureMessage
+        ? $"生成问题：{FailureMessage}"
+        : AvailabilityText;
+
+    private static string NormalizeFailureMessage(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var normalized = string.Join(
+            " ",
+            value.Split(
+                new[] { '\r', '\n' },
+                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        return normalized.Length <= 240 ? normalized : $"{normalized[..237]}...";
+    }
 }
 
 public sealed class AssetGenerationSettingsChangedEventArgs(
     string stepKey,
     string negativePrompt,
     int maxParallelism,
+    bool autoRetryEnabled,
+    int autoRetryCount,
     IReadOnlyList<AssetGenerationDraftRowSnapshot> rows) : EventArgs
 {
     public string StepKey { get; } = stepKey;
@@ -57,6 +170,10 @@ public sealed class AssetGenerationSettingsChangedEventArgs(
     public string NegativePrompt { get; } = negativePrompt;
 
     public int MaxParallelism { get; } = maxParallelism;
+
+    public bool AutoRetryEnabled { get; } = autoRetryEnabled;
+
+    public int AutoRetryCount { get; } = autoRetryCount;
 
     public IReadOnlyList<AssetGenerationDraftRowSnapshot> Rows { get; } = rows;
 
@@ -80,11 +197,32 @@ public sealed class GenerationBatchPublishedEventArgs(
     public bool DispatchRequested { get; } = dispatchRequested;
 }
 
+internal sealed record AutomaticGenerationRetryResult(
+    bool HadEligibleFailures,
+    bool Scheduled,
+    string? RetryBatchId,
+    int TaskCount,
+    string Message)
+{
+    public static AutomaticGenerationRetryResult None(string message) =>
+        new(false, false, null, 0, message);
+
+    public static AutomaticGenerationRetryResult Blocked(string message) =>
+        new(true, false, null, 0, message);
+}
+
+internal sealed record RecoverableGenerationDispatch(
+    string BatchId,
+    IReadOnlyList<string> TaskIds,
+    bool IsRetry);
+
 public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
 {
     public const int MaximumDraftRowCount = GenerationInputValidator.MaximumBatchItemCount;
     public const int MaximumBatchOutputCount = GenerationInputValidator.MaximumBatchOutputCount;
     private const int MaximumAgentFeedbackEntries = 60;
+    private const int MaximumAutoRetryCount = 10;
+    private const int TerminalArtifactPollCount = 10;
 
     private static readonly IReadOnlyList<AssetGenerationStepOption> SupportedSteps =
     [
@@ -93,6 +231,9 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             "Tilemap 制作",
             "使用当前 Tilemap 网格、画布尺寸、控制角与旋转参数生成单个透明瓦片。")
     ];
+
+    private static readonly IReadOnlyList<int> SupportedAutoRetryCounts =
+        Enumerable.Range(0, MaximumAutoRetryCount + 1).ToArray();
 
     private readonly WorkspacePaths _paths;
     private readonly IGenerationTaskStore _taskStore;
@@ -119,6 +260,8 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
     private AssetGenerationStepOption _selectedGenerationStep;
     private string _negativePrompt;
     private int _maxParallelism;
+    private bool _autoRetryEnabled;
+    private int _autoRetryCount;
     private AssetGenerationDraftRowViewModel? _selectedDraftRow;
     private string _constraintPreview = string.Empty;
     private string _statusText = "确认风格、批量条目和输出目录后可直接开始生成；未连接时也可仅发布本地队列";
@@ -152,11 +295,14 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
     private bool _isPolling;
     private bool _refreshRequested;
     private bool _disposed;
+    private int _remainingTerminalArtifactPolls;
     private bool _suppressSettingsNotification = true;
     private readonly Dictionary<string, int> _lastAppliedTaskRevisions = new(StringComparer.Ordinal);
     private readonly HashSet<string> _trackedBatchIds = new(StringComparer.Ordinal);
     private readonly HashSet<string> _observedOutputPaths = new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _observedArtifactPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<GenerationBatchDispatchStage, TimeSpan> _dispatchStageDurations = [];
+    private readonly SemaphoreSlim _automaticRetryGate = new(1, 1);
 
     public AssetGenerationViewModel(
         WorkspacePaths paths,
@@ -173,6 +319,8 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         string? outputDirectory = null,
         IEnumerable<AssetGenerationDraftRowSettings>? draftRows = null,
         int maxParallelism = 2,
+        bool autoRetryEnabled = true,
+        int autoRetryCount = 3,
         TimeProvider? timeProvider = null)
     {
         _paths = paths ?? throw new ArgumentNullException(nameof(paths));
@@ -191,6 +339,8 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             string.Equals(step.Key, selectedStepKey, StringComparison.OrdinalIgnoreCase)) ?? SupportedSteps[0];
         _negativePrompt = negativePrompt?.Trim() ?? string.Empty;
         _maxParallelism = NormalizeParallelism(maxParallelism);
+        _autoRetryEnabled = autoRetryEnabled;
+        _autoRetryCount = NormalizeAutoRetryCount(autoRetryCount);
         _timeProvider = timeProvider ?? TimeProvider.System;
         InitializeDraftRows(draftRows, contentPrompt, outputDirectory);
 
@@ -386,6 +536,56 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             NotifySettingsChanged();
         }
     }
+
+    public IReadOnlyList<int> AutoRetryCountOptions => SupportedAutoRetryCounts;
+
+    public bool AutoRetryEnabled
+    {
+        get => _autoRetryEnabled;
+        set
+        {
+            if (!SetProperty(ref _autoRetryEnabled, value))
+            {
+                return;
+            }
+
+            OnPropertyChanged(nameof(AutoRetrySummaryText));
+            OnPropertyChanged(nameof(MaxGenerationAttempts));
+            NotifySettingsChanged();
+        }
+    }
+
+    /// <summary>
+    /// Maximum number of redo attempts after the initial generation. A value of three means at most
+    /// four total attempts. The dispatch coordinator consumes this setting; the view model persists
+    /// and presents it without mutating task lineage itself.
+    /// </summary>
+    public int AutoRetryCount
+    {
+        get => _autoRetryCount;
+        set
+        {
+            var normalized = NormalizeAutoRetryCount(value);
+            if (!SetProperty(ref _autoRetryCount, normalized))
+            {
+                return;
+            }
+
+            OnPropertyChanged(nameof(AutoRetrySummaryText));
+            OnPropertyChanged(nameof(MaxGenerationAttempts));
+            NotifySettingsChanged();
+        }
+    }
+
+    public string AutoRetrySummaryText => !AutoRetryEnabled
+        ? "自动重做已关闭；问题产物会保留并等待人工处理。"
+        : AutoRetryCount == 0
+            ? "自动重做已开启，但最多重做次数为 0；失败后仅提示。"
+            : $"可恢复问题默认自动重做，初次生成后最多再尝试 {AutoRetryCount} 次；每次中间产物都会保留。";
+
+    public int MaxGenerationAttempts => AutoRetryEnabled
+        ? AutoRetryCount + 1
+        : 1;
 
     public string OutputDirectory
     {
@@ -676,7 +876,8 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             return !IsBusy &&
                    !IsDispatching &&
                    currentTasks.Length > 0 &&
-                   currentTasks.All(task => task.Status == GenerationTaskStatus.Failed);
+                   currentTasks.All(task => task.Status == GenerationTaskStatus.Failed) &&
+                   currentTasks.All(task => !task.HasAutomaticRetryRemaining);
         }
     }
 
@@ -716,6 +917,11 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             }
 
             var currentTasks = GetCurrentBatchActiveTasks();
+            if (currentTasks.Any(task => task.HasAutomaticRetryRemaining))
+            {
+                return "当前失败项仍有自动重做额度；软件会先创建新的任务与交付路径，无需人工复制旧 taskId。";
+            }
+
             if (currentTasks.Length > 0 && currentTasks.All(task => task.Status == GenerationTaskStatus.Failed))
             {
                 return "当前批次没有可认领的 Pending 任务；旧 Failed taskId 不会被复制，请先创建手动重试批次。";
@@ -903,6 +1109,451 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
 
     internal Task RefreshAfterDispatchAsync() => RefreshCurrentTaskAsync();
 
+    internal async Task<IReadOnlyList<RecoverableGenerationDispatch>>
+        GetRecoverablePendingDispatchesAsync()
+    {
+        var tasks = await _taskStore.ListAsync().ConfigureAwait(true);
+        return tasks
+            .Where(task =>
+                task.Status == GenerationTaskStatus.Pending &&
+                task.DispatchIntent?.Requested == true &&
+                !string.IsNullOrWhiteSpace(task.BatchId) &&
+                IsTaskForCurrentProject(task))
+            .GroupBy(task => task.BatchId!, StringComparer.Ordinal)
+            .OrderBy(group => group.Min(task => task.CreatedAtUtc))
+            .ThenBy(group => group.Key, StringComparer.Ordinal)
+            .Select(group => new RecoverableGenerationDispatch(
+                group.Key,
+                group.OrderBy(task => task.BatchItemIndex ?? int.MaxValue)
+                    .ThenBy(task => task.CreatedAtUtc)
+                    .ThenBy(task => task.Id, StringComparer.Ordinal)
+                    .Select(task => task.Id)
+                    .ToArray(),
+                group.Any(task => task.DispatchIntent?.IsRetry == true)))
+            .ToArray();
+    }
+
+    internal async Task<IReadOnlyList<string>> GetRecoverableAutomaticRetrySourceBatchIdsAsync()
+    {
+        var tasks = await _taskStore.ListAsync().ConfigureAwait(true);
+        return tasks
+            .Where(task =>
+                task.Status == GenerationTaskStatus.Failed &&
+                task.DispatchIntent?.Requested == true &&
+                task.FailureRetryable == true &&
+                string.IsNullOrWhiteSpace(task.AutomaticRetryBlockedReason) &&
+                string.IsNullOrWhiteSpace(task.SupersededByTaskId) &&
+                task.RetryLineage is { } lineage &&
+                lineage.AttemptNumber < lineage.MaxAttempts &&
+                !string.IsNullOrWhiteSpace(task.BatchId) &&
+                IsTaskForCurrentProject(task))
+            .OrderBy(task => task.CreatedAtUtc)
+            .ThenBy(task => task.BatchItemIndex ?? int.MaxValue)
+            .ThenBy(task => task.Id, StringComparer.Ordinal)
+            .Select(task => task.BatchId!)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    internal async Task RepairPersistedDispatchWorkspaceAsync(string batchId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(batchId);
+        var tasks = (await _taskStore.ListBatchAsync(batchId).ConfigureAwait(true))
+            .Where(IsTaskForCurrentProject)
+            .OrderBy(task => task.BatchItemIndex ?? int.MaxValue)
+            .ThenBy(task => task.CreatedAtUtc)
+            .ThenBy(task => task.Id, StringComparer.Ordinal)
+            .ToArray();
+        if (tasks.Length == 0)
+        {
+            throw new InvalidDataException($"恢复调度时找不到当前项目批次：{batchId}");
+        }
+
+        var deliveries = tasks.Select(task =>
+        {
+            if (!MaterialGenerationConstraintComposer.TryReadDelivery(task.Constraints, out var delivery) ||
+                delivery?.Workspace is null)
+            {
+                throw new InvalidDataException($"恢复任务 {ShortId(task.Id)} 缺少 project-local workspace。");
+            }
+
+            return delivery;
+        }).ToArray();
+        var assetRoot = deliveries[0].AssetRoot;
+        if (deliveries.Any(delivery => !AssetRootService.PathEquals(assetRoot, delivery.AssetRoot)))
+        {
+            throw new InvalidDataException("恢复批次跨越了不同项目 Assets 根目录。");
+        }
+
+        var run = _runWorkspaceService.OpenOrRepair(batchId, assetRoot);
+        var manifestFullPath = Path.GetFullPath(Path.Combine(
+            assetRoot,
+            run.ManifestRelativePath.Replace('/', Path.DirectorySeparatorChar)));
+        var manifestExists = File.Exists(manifestFullPath) && new FileInfo(manifestFullPath).Length > 0;
+        var manifestItems = new List<GenerationRunManifestItem>(tasks.Length);
+        for (var index = 0; index < tasks.Length; index++)
+        {
+            var task = tasks[index];
+            var delivery = deliveries[index];
+            var workspace = delivery.Workspace!;
+            if (!string.Equals(workspace.RunId, run.BatchId, StringComparison.Ordinal) ||
+                !string.Equals(workspace.RootPath, run.RootRelativePath, StringComparison.Ordinal) ||
+                !string.Equals(workspace.ManifestPath, run.ManifestRelativePath, StringComparison.Ordinal) ||
+                workspace.ModelOutputPaths is not { Length: 1 } modelPaths ||
+                workspace.ProcessedPaths is not { Length: 1 } processedPaths ||
+                delivery.StagingPaths is not { Length: 1 } stagingPaths ||
+                delivery.TargetPaths is not { Length: 1 } targetPaths)
+            {
+                throw new InvalidDataException(
+                    $"恢复任务 {ShortId(task.Id)} 的冻结 Run 路径与批次 {ShortId(batchId)} 不一致。");
+            }
+
+            var promptFullPath = Path.GetFullPath(Path.Combine(
+                assetRoot,
+                workspace.PromptPath.Replace('/', Path.DirectorySeparatorChar)));
+            if (!File.Exists(promptFullPath) || new FileInfo(promptFullPath).Length == 0)
+            {
+                await _runWorkspaceService.WritePromptAsync(run, workspace, task.Constraints)
+                    .ConfigureAwait(true);
+            }
+            var description = PublishedTasks.FirstOrDefault(item =>
+                    string.Equals(item.TaskId, task.Id, StringComparison.Ordinal))?.Description ??
+                task.DisplayName;
+            manifestItems.Add(new GenerationRunManifestItem(
+                task.BatchItemId ?? task.Id,
+                task.Id,
+                description,
+                task.BatchItemIndex ?? index,
+                task.RetryLineage is { AttemptNumber: > 1 } lineage
+                    ? lineage.AttemptNumber - 1
+                    : index,
+                tasks.Length,
+                modelPaths[0],
+                stagingPaths[0],
+                processedPaths[0],
+                targetPaths[0]));
+        }
+
+        if (!manifestExists)
+        {
+            await _runWorkspaceService.WriteManifestAsync(
+                    run,
+                    new GenerationRunManifest(
+                        1,
+                        run.BatchId,
+                        run.BatchId,
+                        assetRoot,
+                        tasks[0].Constraints.WorkflowId,
+                        tasks.Min(task => task.CreatedAtUtc),
+                        "recovered-dispatch",
+                        "从持久化任务合同重建",
+                        manifestItems))
+                .ConfigureAwait(true);
+        }
+    }
+
+    internal async Task<AutomaticGenerationRetryResult> TryCreateAutomaticRetryBatchAsync(
+        string sourceBatchId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(sourceBatchId);
+        await _automaticRetryGate.WaitAsync().ConfigureAwait(true);
+        PreparedGenerationRunWorkspace? runWorkspace = null;
+        GenerationTask[] retryableParents = [];
+        IReadOnlyList<GenerationTask> committedRetryTasks = [];
+        string? retryBatchId = null;
+        var retryStoreCommitted = false;
+        try
+        {
+            var sourceTasks = await _taskStore.ListBatchAsync(sourceBatchId).ConfigureAwait(true);
+            retryableParents = sourceTasks
+                .Where(task =>
+                    task.Status == GenerationTaskStatus.Failed &&
+                    string.IsNullOrWhiteSpace(task.SupersededByTaskId) &&
+                    string.IsNullOrWhiteSpace(task.AutomaticRetryBlockedReason) &&
+                    task.DispatchIntent?.Requested == true &&
+                    task.FailureRetryable == true &&
+                    task.RetryLineage is { } lineage &&
+                    lineage.AttemptNumber < lineage.MaxAttempts)
+                .OrderBy(task => task.BatchItemIndex)
+                .ThenBy(task => task.Id, StringComparer.Ordinal)
+                .ToArray();
+            if (retryableParents.Length == 0)
+            {
+                return AutomaticGenerationRetryResult.None("当前批次没有可自动重做的失败项。");
+            }
+
+            var deliveries = retryableParents
+                .Select(task =>
+                    MaterialGenerationConstraintComposer.TryReadDelivery(task.Constraints, out var delivery)
+                        ? delivery
+                        : null)
+                .ToArray();
+            if (deliveries.Any(delivery => delivery is null))
+            {
+                return await BlockAutomaticRetryAsync(
+                        retryableParents,
+                        "可恢复失败项缺少冻结 delivery 计划，需要人工检查任务数据。")
+                    .ConfigureAwait(true);
+            }
+
+            var firstDelivery = deliveries[0]!;
+            if (deliveries.Skip(1).Any(delivery =>
+                    !AssetRootService.PathEquals(firstDelivery.AssetRoot, delivery!.AssetRoot)))
+            {
+                return await BlockAutomaticRetryAsync(
+                        retryableParents,
+                        "自动重做批次跨越了不同项目 Assets 根目录，需要人工拆分。")
+                    .ConfigureAwait(true);
+            }
+
+            retryBatchId = Guid.NewGuid().ToString("N");
+            runWorkspace = _runWorkspaceService.Prepare(retryBatchId, firstDelivery.AssetRoot);
+            await _runWorkspaceService.MirrorExistingRunReferencesAsync(runWorkspace, firstDelivery)
+                .ConfigureAwait(true);
+            var retryItems = new List<CreateGenerationRetryBatchItemRequest>(retryableParents.Length);
+            var itemDescriptions = new Dictionary<string, string>(StringComparer.Ordinal);
+            var manifestDrafts = new List<GenerationRunManifestDraft>(retryableParents.Length);
+            for (var index = 0; index < retryableParents.Length; index++)
+            {
+                var parent = retryableParents[index];
+                var previousDelivery = deliveries[index]!;
+                if (parent.Constraints.Output.Count != 1)
+                {
+                    throw new InvalidDataException(
+                        $"自动重做只支持一图一任务，任务 {ShortId(parent.Id)} 的 output.count 无效。");
+                }
+
+                var attemptNumber = parent.RetryLineage!.AttemptNumber + 1;
+                var itemId = Guid.NewGuid().ToString("N");
+                var suggestedBaseName =
+                    $"tilemap_{retryBatchId[..8]}_attempt_{attemptNumber:D2}_r{index + 1:D2}";
+                var finalOutputDirectory = ResolveRetryOutputDirectory(
+                    previousDelivery.OutputDirectory,
+                    retryBatchId);
+                var targetPath = $"{finalOutputDirectory}/{suggestedBaseName}.png";
+                var targetFullPath = Path.GetFullPath(Path.Combine(
+                    previousDelivery.AssetRoot,
+                    targetPath.Replace('/', Path.DirectorySeparatorChar)));
+                if (!AssetRootService.IsWithinRoot(previousDelivery.AssetRoot, targetFullPath))
+                {
+                    throw new InvalidDataException($"自动重做目标越出了原任务 Assets 根目录：{targetPath}");
+                }
+
+                if (File.Exists(targetFullPath) || Directory.Exists(targetFullPath))
+                {
+                    throw new IOException($"自动重做目标已经存在：{targetFullPath}");
+                }
+
+                Directory.CreateDirectory(Path.GetDirectoryName(targetFullPath)!);
+                var workspacePlan = _runWorkspaceService.CreateOutputPlan(
+                    runWorkspace,
+                    itemId,
+                    suggestedBaseName);
+                var normalizedPath = _runWorkspaceService.CreateNormalizedPath(
+                    runWorkspace,
+                    itemId,
+                    suggestedBaseName);
+                var retryConstraints = BuildAutomaticRetryConstraints(parent, attemptNumber);
+                retryConstraints = MaterialGenerationConstraintComposer.ReplaceDelivery(
+                    retryConstraints,
+                    new GenerationDeliveryPlan
+                    {
+                        AssetRoot = previousDelivery.AssetRoot,
+                        OutputDirectory = finalOutputDirectory,
+                        TargetPaths = [targetPath],
+                        StagingPaths = [normalizedPath],
+                        SuggestedBaseName = suggestedBaseName,
+                        Workspace = workspacePlan
+                    });
+                await _runWorkspaceService.WritePromptAsync(runWorkspace, workspacePlan, retryConstraints)
+                    .ConfigureAwait(true);
+                var description = PublishedTasks.FirstOrDefault(item =>
+                        string.Equals(item.TaskId, parent.Id, StringComparison.Ordinal))?.Description ??
+                    parent.DisplayName;
+                itemDescriptions[itemId] = description;
+                retryItems.Add(new CreateGenerationRetryBatchItemRequest
+                {
+                    ParentTaskId = parent.Id,
+                    ItemId = itemId,
+                    DisplayName = $"{parent.DisplayName} · 自动重做 {attemptNumber}/{parent.RetryLineage.MaxAttempts}",
+                    Constraints = retryConstraints
+                });
+                manifestDrafts.Add(new GenerationRunManifestDraft(
+                    itemId,
+                    description,
+                    index,
+                    attemptNumber - 1,
+                    parent.RetryLineage.MaxAttempts,
+                    workspacePlan.ModelOutputPaths[0],
+                    normalizedPath,
+                    workspacePlan.ProcessedPaths[0],
+                    targetPath));
+            }
+
+            var result = await _taskStore.CreateRetryBatchAsync(new CreateGenerationRetryBatchRequest
+            {
+                BatchId = retryBatchId,
+                DisplayName = $"自动重做 · {retryableParents.Length} 项",
+                RequestedBy = "GAssetForge Desktop · Automatic Retry",
+                DispatchRequested = true,
+                Items = retryItems.ToArray()
+            }).ConfigureAwait(true);
+            if (!result.Created)
+            {
+                _runWorkspaceService.DeleteIfUnpublished(runWorkspace);
+                runWorkspace = null;
+                foreach (var batchId in result.Tasks
+                             .Select(task => task.BatchId)
+                             .Where(batchId => !string.IsNullOrWhiteSpace(batchId)))
+                {
+                    _trackedBatchIds.Add(batchId!);
+                }
+
+                _currentBatchId = result.Tasks.FirstOrDefault()?.BatchId;
+
+                await RefreshCurrentTaskAsync().ConfigureAwait(true);
+                if (result.Tasks.FirstOrDefault()?.BatchId is { Length: > 0 } existingBatchId)
+                {
+                    RaiseBatchPublished(
+                        existingBatchId,
+                        result.Tasks,
+                        isRetry: true,
+                        dispatchRequested: true);
+                }
+
+                return new AutomaticGenerationRetryResult(
+                    true,
+                    true,
+                    result.Tasks.FirstOrDefault()?.BatchId,
+                    result.Tasks.Count,
+                    "重试后继任务已经由另一条调度路径创建，已复用既有任务。");
+            }
+
+            retryStoreCommitted = true;
+            committedRetryTasks = result.Tasks;
+            var tasksByItemId = result.Tasks.ToDictionary(task => task.BatchItemId!, StringComparer.Ordinal);
+            await _runWorkspaceService.WriteManifestAsync(
+                    runWorkspace,
+                    new GenerationRunManifest(
+                        1,
+                        retryBatchId,
+                        retryBatchId,
+                        firstDelivery.AssetRoot,
+                        retryableParents[0].Constraints.WorkflowId,
+                        DateTimeOffset.UtcNow,
+                        "automatic-retry",
+                        "冻结自上一轮结构化失败诊断",
+                        manifestDrafts.Select(draft => new GenerationRunManifestItem(
+                            draft.ItemId,
+                            tasksByItemId[draft.ItemId].Id,
+                            draft.Description,
+                            draft.RowIndex,
+                            draft.VariantIndex,
+                            draft.VariantCount,
+                            draft.ModelOutputPath,
+                            draft.NormalizedPath,
+                            draft.ProcessedPath,
+                            draft.TargetPath)).ToArray()))
+                .ConfigureAwait(true);
+
+            _trackedBatchIds.Add(sourceBatchId);
+            _trackedBatchIds.Add(retryBatchId);
+            _currentBatchId = retryBatchId;
+            var refreshedParents = await _taskStore.ListBatchAsync(sourceBatchId).ConfigureAwait(true);
+            ApplyBatch(
+                refreshedParents.Concat(result.Tasks).ToArray(),
+                itemDescriptions,
+                forceStatusMessage: true,
+                mergeWithExisting: true);
+            _remainingTerminalArtifactPolls = TerminalArtifactPollCount;
+            StatusText =
+                $"批次 {ShortId(sourceBatchId)} 有 {result.Tasks.Count} 项未达标，已创建自动重做批次 {ShortId(retryBatchId)}";
+            RaiseBatchPublished(retryBatchId, result.Tasks, isRetry: true, dispatchRequested: true);
+            _pollTimer.Start();
+            return new AutomaticGenerationRetryResult(
+                true,
+                true,
+                retryBatchId,
+                result.Tasks.Count,
+                $"已创建 {result.Tasks.Count} 个新尝试；上一轮中间产物继续保留。");
+        }
+        catch (Exception exception) when (IsExpectedOperationException(exception))
+        {
+            if (retryStoreCommitted &&
+                committedRetryTasks.Count > 0 &&
+                !string.IsNullOrWhiteSpace(retryBatchId))
+            {
+                _trackedBatchIds.Add(sourceBatchId);
+                _trackedBatchIds.Add(retryBatchId);
+                _currentBatchId = retryBatchId;
+                var refreshedParents = await _taskStore.ListBatchAsync(sourceBatchId).ConfigureAwait(true);
+                ApplyBatch(
+                    refreshedParents.Concat(committedRetryTasks).ToArray(),
+                    descriptions: null,
+                    forceStatusMessage: true,
+                    mergeWithExisting: true);
+                _remainingTerminalArtifactPolls = TerminalArtifactPollCount;
+                StatusText =
+                    $"自动重做任务已持久化，但 Run manifest 写入未完成：{exception.Message}；" +
+                    "任务仍将派发，产物路径与任务存储继续作为权威恢复依据。";
+                RaiseBatchPublished(
+                    retryBatchId,
+                    committedRetryTasks,
+                    isRetry: true,
+                    dispatchRequested: true);
+                _pollTimer.Start();
+                return new AutomaticGenerationRetryResult(
+                    true,
+                    true,
+                    retryBatchId,
+                    committedRetryTasks.Count,
+                    $"后继任务已持久化并继续派发；Run manifest 需要稍后修复：{exception.Message}");
+            }
+
+            if (runWorkspace is not null)
+            {
+                _runWorkspaceService.DeleteIfUnpublished(runWorkspace);
+            }
+
+            return retryableParents.Length == 0
+                ? AutomaticGenerationRetryResult.Blocked($"自动重做准备失败：{exception.Message}")
+                : await BlockAutomaticRetryAsync(
+                        retryableParents,
+                        $"自动重做准备失败：{exception.Message}")
+                    .ConfigureAwait(true);
+        }
+        finally
+        {
+            _automaticRetryGate.Release();
+        }
+    }
+
+    private async Task<AutomaticGenerationRetryResult> BlockAutomaticRetryAsync(
+        IReadOnlyList<GenerationTask> parents,
+        string reason)
+    {
+        try
+        {
+            var blocked = await _taskStore.BlockAutomaticRetryAsync(
+                    parents.Select(parent => parent.Id).ToArray(),
+                    reason)
+                .ConfigureAwait(true);
+            ApplyBatch(
+                blocked,
+                descriptions: null,
+                forceStatusMessage: true,
+                mergeWithExisting: true);
+            RefreshManualFallbackState();
+            return AutomaticGenerationRetryResult.Blocked(
+                $"{reason} 已停止自动重做并开放人工重新生成入口。");
+        }
+        catch (Exception blockException) when (IsExpectedOperationException(blockException))
+        {
+            return AutomaticGenerationRetryResult.Blocked(
+                $"{reason} 同时无法持久化人工接管状态：{blockException.Message}");
+        }
+    }
+
     private AssetGenerationDraftRowViewModel? PrimaryDraftRow => DraftRows.FirstOrDefault();
 
     private void InitializeDraftRows(
@@ -1041,6 +1692,11 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             return "批次全部完成";
         }
 
+        if (active.Any(task => task.HasAutomaticRetryRemaining))
+        {
+            return "批次存在未达标项 · 自动重做中";
+        }
+
         if (active.All(task => task.Status == GenerationTaskStatus.Failed))
         {
             return "批次全部失败";
@@ -1075,12 +1731,15 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         }
 
         var completedRows = active.Count(task => task.Status == GenerationTaskStatus.Completed);
-        var failedRows = active.Count(task => task.Status == GenerationTaskStatus.Failed);
+        var retryingRows = active.Count(task => task.HasAutomaticRetryRemaining);
+        var failedRows = active.Count(task =>
+            task.Status == GenerationTaskStatus.Failed && !task.HasAutomaticRetryRemaining);
         var completedOutputs = active.Sum(task => task.CompletedOutputCount);
         var generatedOutputs = active.Sum(task => task.GeneratedOutputCount);
         var requestedOutputs = active.Sum(task => task.RequestedCount);
         return $"{completedRows}/{active.Length} 行完成 · {generatedOutputs}/{requestedOutputs} 张已落盘 · " +
                $"{completedOutputs}/{requestedOutputs} 张已完成登记" +
+               (retryingRows == 0 ? string.Empty : $" · {retryingRows} 行正在自动重做") +
                (failedRows == 0 ? string.Empty : $" · {failedRows} 行失败可单独重试");
     }
 
@@ -1256,6 +1915,9 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
 
     private static int NormalizeParallelism(int value) =>
         Math.Clamp(value, 1, Math.Min(8, GenerationInputValidator.MaximumOutputCount));
+
+    private static int NormalizeAutoRetryCount(int value) =>
+        Math.Clamp(value, 0, MaximumAutoRetryCount);
 
     public void Dispose()
     {
@@ -1453,6 +2115,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                     {
                         ItemId = itemId,
                         DisplayName = $"{BuildDisplayName(row.Description)} · {variantIndex + 1}/{row.Quantity}",
+                        MaxAttempts = MaxGenerationAttempts,
                         Constraints = constraints
                     });
                     manifestDrafts.Add(new GenerationRunManifestDraft(
@@ -1483,6 +2146,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                 BatchId = batchId,
                 DisplayName = $"Tilemap 批次 · {DraftRows.Count} 种 · {TotalRequestedCount} 张",
                 RequestedBy = "GAssetForge Desktop",
+                DispatchRequested = requestDispatch,
                 Items = items.ToArray()
             }).ConfigureAwait(true);
             batchCreated = true;
@@ -1516,6 +2180,8 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             PublishedTasks.Clear();
             GeneratedAssets.Clear();
             _observedOutputPaths.Clear();
+            _observedArtifactPaths.Clear();
+            _remainingTerminalArtifactPolls = TerminalArtifactPollCount;
             _currentBatchId = null;
             ApplyBatch(tasks, itemDescriptions, forceStatusMessage: true, mergeWithExisting: false);
             if (requestDispatch)
@@ -1660,6 +2326,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                 {
                     ItemId = itemId,
                     DisplayName = $"{failedTask.DisplayName} · 重试 {outputIndex + 1}/{failedTask.Constraints.Output.Count}",
+                    MaxAttempts = MaxGenerationAttempts,
                     Constraints = constraints
                 });
                 manifestDrafts.Add(new GenerationRunManifestDraft(
@@ -1685,6 +2352,8 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                 BatchId = retryBatchId,
                 DisplayName = $"重试 · {failedItem.Description}",
                 RequestedBy = "GAssetForge Desktop",
+                DispatchRequested = true,
+                IsRetryDispatch = true,
                 Items = retryItems.ToArray()
             }).ConfigureAwait(true);
             batchCreated = true;
@@ -1723,6 +2392,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             StatusText =
                 $"失败项已作为新批次 {retryBatchId[..8]} 重新发布；正在请求应用内调度，原失败任务保留用于审计";
             RaiseBatchPublished(retryBatchId, tasks, isRetry: true, dispatchRequested: true);
+            _remainingTerminalArtifactPolls = TerminalArtifactPollCount;
             _pollTimer.Start();
         }
         catch (Exception exception) when (IsExpectedOperationException(exception))
@@ -1849,6 +2519,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                     {
                         ItemId = itemId,
                         DisplayName = $"{failedTask.DisplayName} · 手动重试 {outputIndex + 1}/{failedTask.Constraints.Output.Count}",
+                        MaxAttempts = MaxGenerationAttempts,
                         Constraints = constraints
                     });
                     manifestDrafts.Add(new GenerationRunManifestDraft(
@@ -1869,6 +2540,8 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                 BatchId = retryBatchId,
                 DisplayName = $"Codex 手动重试 · {failedItems.Length} 项",
                 RequestedBy = "GAssetForge Desktop · Manual Codex Handoff",
+                DispatchRequested = false,
+                IsRetryDispatch = true,
                 Items = retryItems.ToArray()
             }).ConfigureAwait(true);
             batchCreated = true;
@@ -1917,6 +2590,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             ManualFallbackStatusText =
                 "手动重试批次已创建，旧 Failed taskId 已排除；现在可复制当前批次任务指令。";
             RaiseBatchPublished(retryBatchId, tasks, isRetry: true, dispatchRequested: false);
+            _remainingTerminalArtifactPolls = TerminalArtifactPollCount;
             _pollTimer.Start();
         }
         catch (Exception exception) when (IsExpectedOperationException(exception))
@@ -2064,8 +2738,15 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                     .FirstOrDefault();
                 if (latest?.BatchId is { Length: > 0 } latestBatchId)
                 {
-                    _trackedBatchIds.Add(latestBatchId);
-                    tasks = await _taskStore.ListBatchAsync(latestBatchId).ConfigureAwait(true);
+                    tasks = ResolveRelatedTaskChain(allTasks, latest);
+                    foreach (var relatedBatchId in tasks
+                                 .Select(task => task.BatchId)
+                                 .Where(batchId => !string.IsNullOrWhiteSpace(batchId)))
+                    {
+                        _trackedBatchIds.Add(relatedBatchId!);
+                    }
+
+                    _currentBatchId = latestBatchId;
                 }
                 else
                 {
@@ -2084,13 +2765,25 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                 var activeTasks = PublishedTasks.Where(task => !task.IsSuperseded).ToArray();
                 if (activeTasks.Length > 0 &&
                     activeTasks.All(task =>
-                        task.Status is GenerationTaskStatus.Completed or GenerationTaskStatus.Failed))
+                        (task.Status is GenerationTaskStatus.Completed or GenerationTaskStatus.Failed) &&
+                        !task.HasAutomaticRetryRemaining))
                 {
-                    _pollTimer.Stop();
+                    if (_remainingTerminalArtifactPolls > 0)
+                    {
+                        _remainingTerminalArtifactPolls--;
+                    }
+                    else
+                    {
+                        _pollTimer.Stop();
+                    }
                 }
-                else if (!_pollTimer.IsEnabled)
+                else
                 {
-                    _pollTimer.Start();
+                    _remainingTerminalArtifactPolls = TerminalArtifactPollCount;
+                    if (!_pollTimer.IsEnabled)
+                    {
+                        _pollTimer.Start();
+                    }
                 }
             }
         }
@@ -2114,12 +2807,143 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         delivery is not null &&
         AssetRootService.PathEquals(delivery.AssetRoot, _projectBrowser.RootPath);
 
+    private static GenerationTask[] ResolveRelatedTaskChain(
+        IReadOnlyList<GenerationTask> allTasks,
+        GenerationTask seed)
+    {
+        var tasksById = allTasks.ToDictionary(task => task.Id, StringComparer.Ordinal);
+        var tasksByBatch = allTasks
+            .Where(task => !string.IsNullOrWhiteSpace(task.BatchId))
+            .GroupBy(task => task.BatchId!, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
+        var tasksByRoot = allTasks
+            .Where(task => task.RetryLineage is not null)
+            .GroupBy(task => task.RetryLineage!.RootTaskId, StringComparer.Ordinal)
+            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.Ordinal);
+        var selectedIds = new HashSet<string>(StringComparer.Ordinal);
+        var pending = new Queue<GenerationTask>();
+        pending.Enqueue(seed);
+        while (pending.Count > 0)
+        {
+            var current = pending.Dequeue();
+            if (!selectedIds.Add(current.Id))
+            {
+                continue;
+            }
+
+            if (current.BatchId is { Length: > 0 } batchId &&
+                tasksByBatch.TryGetValue(batchId, out var batchTasks))
+            {
+                foreach (var batchTask in batchTasks)
+                {
+                    pending.Enqueue(batchTask);
+                }
+            }
+
+            if (current.RetryLineage is { } lineage &&
+                tasksByRoot.TryGetValue(lineage.RootTaskId, out var rootTasks))
+            {
+                foreach (var rootTask in rootTasks)
+                {
+                    pending.Enqueue(rootTask);
+                }
+
+                if (lineage.PreviousTaskId is { } previousTaskId &&
+                    tasksById.TryGetValue(previousTaskId, out var previousTask))
+                {
+                    pending.Enqueue(previousTask);
+                }
+            }
+
+            if (current.SupersededByTaskId is { } childTaskId &&
+                tasksById.TryGetValue(childTaskId, out var childTask))
+            {
+                pending.Enqueue(childTask);
+            }
+        }
+
+        return allTasks
+            .Where(task => selectedIds.Contains(task.Id))
+            .OrderBy(task => task.CreatedAtUtc)
+            .ThenBy(task => task.BatchItemIndex)
+            .ThenBy(task => task.Id, StringComparer.Ordinal)
+            .ToArray();
+    }
+
     private sealed record BatchOutputTarget(
         string TaskId,
         string RelativePath,
         string FullPath,
         bool Exists,
         int GlobalIndex);
+
+    private sealed record BatchArtifactTarget(
+        GeneratedAssetStage Stage,
+        string RelativePath,
+        string FullPath,
+        bool Exists);
+
+    private static IReadOnlyList<BatchArtifactTarget> BuildArtifactTargets(GenerationDeliveryPlan delivery)
+    {
+        var candidates = new List<(GeneratedAssetStage Stage, string RelativePath)>();
+        if (delivery.Workspace is not null)
+        {
+            candidates.AddRange(delivery.Workspace.ModelOutputPaths.Select(path =>
+                (GeneratedAssetStage.ModelOutput, path)));
+        }
+
+        candidates.AddRange(delivery.StagingPaths.Select(path =>
+            (GeneratedAssetStage.NormalizedInput, path)));
+
+        if (delivery.Workspace is not null)
+        {
+            candidates.AddRange(delivery.Workspace.ProcessedPaths.Select(path =>
+                (GeneratedAssetStage.BackgroundRemoved, path)));
+        }
+
+        candidates.AddRange(delivery.TargetPaths.Select(path =>
+            (GeneratedAssetStage.Final, path)));
+
+        var results = new List<BatchArtifactTarget>(candidates.Count);
+        var observedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var candidate in candidates)
+        {
+            try
+            {
+                var relativePath = candidate.RelativePath.Replace('\\', '/');
+                var fullPath = Path.GetFullPath(Path.Combine(
+                    delivery.AssetRoot,
+                    relativePath.Replace('/', Path.DirectorySeparatorChar)));
+                if (!AssetRootService.IsWithinRoot(delivery.AssetRoot, fullPath) ||
+                    !observedPaths.Add(fullPath))
+                {
+                    continue;
+                }
+
+                results.Add(new BatchArtifactTarget(
+                    candidate.Stage,
+                    relativePath,
+                    fullPath,
+                    File.Exists(fullPath)));
+            }
+            catch (Exception exception) when (exception is
+                ArgumentException or NotSupportedException or PathTooLongException)
+            {
+                // Corrupt legacy delivery paths must not break status polling for the whole batch.
+            }
+        }
+
+        return results;
+    }
+
+    private static string BuildArtifactStageText(GeneratedAssetStage stage) => stage switch
+    {
+        GeneratedAssetStage.ModelOutput => "模型原图",
+        GeneratedAssetStage.NormalizedInput => "画布归一化",
+        GeneratedAssetStage.BackgroundRemoved => "背景处理",
+        GeneratedAssetStage.Final => "最终产物",
+        _ => "生成产物"
+    };
 
     private void ApplyImageProgress(IReadOnlyList<BatchOutputTarget> targets)
     {
@@ -2367,8 +3191,10 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             }
         }
 
-        _currentTask = orderedTasks[0];
         _currentBatchId ??= orderedTasks[0].BatchId;
+        _currentTask = orderedTasks.FirstOrDefault(task =>
+                           string.Equals(task.BatchId, _currentBatchId, StringComparison.Ordinal)) ??
+                       orderedTasks[0];
         var existing = PublishedTasks.ToDictionary(item => item.TaskId, StringComparer.Ordinal);
         PublishedTasks.Clear();
         foreach (var task in orderedTasks)
@@ -2399,20 +3225,50 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         GeneratedAssets.Clear();
         var shouldRefreshProject = false;
         var outputTargets = new List<BatchOutputTarget>();
+        var currentArtifactPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var newlyObservedArtifacts = new List<BatchArtifactTarget>();
         var globalOutputIndex = 0;
         foreach (var task in orderedTasks)
         {
             var publishedTask = PublishedTasks.First(item =>
                 string.Equals(item.TaskId, task.Id, StringComparison.Ordinal));
-            if (publishedTask.IsSuperseded)
-            {
-                continue;
-            }
-
             if (!MaterialGenerationConstraintComposer.TryReadDelivery(task.Constraints, out var delivery) ||
                 delivery is null)
             {
                 publishedTask.ApplyDetectedOutputs(0, null);
+                continue;
+            }
+
+            foreach (var artifact in BuildArtifactTargets(delivery))
+            {
+                if (!artifact.Exists)
+                {
+                    continue;
+                }
+
+                currentArtifactPaths.Add(artifact.FullPath);
+                if (!_observedArtifactPaths.Contains(artifact.FullPath))
+                {
+                    newlyObservedArtifacts.Add(artifact);
+                }
+
+                GeneratedAssets.Add(new GeneratedAssetViewModel(
+                    delivery.AssetRoot,
+                    artifact.RelativePath,
+                    artifact.Stage,
+                    task.Status,
+                    publishedTask.CanRetry,
+                    publishedTask.IsSuperseded,
+                    publishedTask.HasAutomaticRetryRemaining,
+                    string.IsNullOrWhiteSpace(task.AutomaticRetryBlockedReason)
+                        ? task.FailureMessage
+                        : $"自动重做已停止：{task.AutomaticRetryBlockedReason}；原始问题：{task.FailureMessage}",
+                    task.Id,
+                    task.RetryLineage));
+            }
+
+            if (publishedTask.IsSuperseded)
+            {
                 continue;
             }
 
@@ -2439,19 +3295,36 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             publishedTask.ApplyDetectedOutputs(
                 visibleAssetPaths.Length,
                 taskTargets.FirstOrDefault(target => !target.Exists)?.RelativePath);
-            foreach (var relativePath in visibleAssetPaths)
-            {
-                GeneratedAssets.Add(new GeneratedAssetViewModel(
-                    delivery.AssetRoot,
-                    relativePath,
-                    task.Status));
-            }
 
             if (taskTargets.Any(target =>
                     target.Exists && !_observedOutputPaths.Contains(target.FullPath)) &&
                 AssetRootService.PathEquals(delivery.AssetRoot, _projectBrowser.RootPath))
             {
                 shouldRefreshProject = true;
+            }
+        }
+
+        _observedArtifactPaths.IntersectWith(currentArtifactPaths);
+        foreach (var artifactPath in currentArtifactPaths)
+        {
+            _observedArtifactPaths.Add(artifactPath);
+        }
+
+        if (newlyObservedArtifacts.Count > 0)
+        {
+            _remainingTerminalArtifactPolls = TerminalArtifactPollCount;
+        }
+
+        if (newlyObservedArtifacts.Count > 0 && HasDispatchProgress)
+        {
+            _lastOutputActivityUtc = GetUtcNow();
+            foreach (var artifact in newlyObservedArtifacts)
+            {
+                AddAgentFeedback(
+                    _lastOutputActivityUtc.Value,
+                    "工序产物",
+                    $"{BuildArtifactStageText(artifact.Stage)}已落盘：{artifact.RelativePath}",
+                    isWarning: false);
             }
         }
 
@@ -2500,7 +3373,9 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         }
 
         var completedCount = active.Count(task => task.Status == GenerationTaskStatus.Completed);
-        var failed = active.Where(task => task.Status == GenerationTaskStatus.Failed).ToArray();
+        var retrying = active.Where(task => task.HasAutomaticRetryRemaining).ToArray();
+        var failed = active.Where(task =>
+            task.Status == GenerationTaskStatus.Failed && !task.HasAutomaticRetryRemaining).ToArray();
         var claimed = active.Where(task => task.Status == GenerationTaskStatus.Claimed).ToArray();
         var pending = active.Where(task => task.Status == GenerationTaskStatus.Pending).ToArray();
 
@@ -2536,6 +3411,18 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                 progress,
                 $"gasset_forge.claim_generation_task(taskId={ShortId(pending[0].TaskId)})",
                 $"等待 Agent 认领 {pending.Length} 个任务 · 图片 {GeneratedImageCount}/{RequestedImageCount} 已落盘");
+            return;
+        }
+
+        if (retrying.Length > 0)
+        {
+            var retry = retrying[0];
+            ApplyDispatchProgress(
+                _currentDispatchBatchId,
+                GenerationBatchDispatchStage.GeneratingAssets,
+                Math.Max(DispatchProgress, 90d),
+                $"为任务 {ShortId(retry.TaskId)} 创建新的自动重做任务与交付路径",
+                $"{retrying.Length} 个未达标项仍有重做额度；本次中间产物已保留，软件正在继续尝试。\n{retry.DetailText}");
             return;
         }
 
@@ -2973,6 +3860,103 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         return $"Tilemap · {compact}";
     }
 
+    private static GenerationConstraintPackage BuildAutomaticRetryConstraints(
+        GenerationTask parent,
+        int attemptNumber)
+    {
+        var subCode = parent.FailureSubCode ?? parent.FailureCode ?? "generation_validation_failed";
+        var diagnostic = NormalizeRetryDiagnostic(parent.FailureMessage);
+        var correction = BuildDirectedRetryInstruction(subCode, diagnostic);
+        var retryRule = new GenerationConstraintRule
+        {
+            Key = $"generation.retry.attempt-{attemptNumber}",
+            Category = "retry",
+            Instruction = correction,
+            Required = true,
+            Weight = 1d
+        };
+        var negativeAddition = subCode switch
+        {
+            "tilemap_geometry_aspect_ratio_mismatch" =>
+                "vertical rectangle, horizontal rectangle, elongated tile body, unequal foreground width and height",
+            "tilemap_geometry_rotation_mismatch" =>
+                "tilted square, rotated tile body, diagonal outer edges, unintended canvas rotation",
+            "tilemap_geometry_diamond_detected" =>
+                "on-point diamond, 45 degree diamond, rhombus silhouette, top and bottom pointed corners",
+            _ => "repeat the previously rejected geometry or composition"
+        };
+        var negativePrompt = string.Join(
+            ", ",
+            new[] { parent.Constraints.NegativePrompt, negativeAddition }
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => value!.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase));
+        var prompt = parent.Constraints.Prompt.Trim() +
+                     $"\n\nAutomatic correction attempt {attemptNumber}: {correction}";
+        return parent.Constraints with
+        {
+            Prompt = prompt,
+            NegativePrompt = negativePrompt,
+            Output = parent.Constraints.Output with { Count = 1, MaxParallelism = 1 },
+            Rules = [.. parent.Constraints.Rules, retryRule]
+        };
+    }
+
+    private static string BuildDirectedRetryInstruction(string subCode, string diagnostic)
+    {
+        var directed = subCode switch
+        {
+            "tilemap_geometry_aspect_ratio_mismatch" =>
+                "上一轮主体是长方形。本轮前景瓦片主体的外接包围盒宽度与高度必须近似相等；画布正方形不代表主体合格。保持画布轴对齐，主体占画布较短边约 80%～90%，四条边完整，不得生成竖向/横向长方形或菱形。",
+            "tilemap_geometry_rotation_mismatch" =>
+                "上一轮主体边缘方向与设置角度不符。本轮必须严格使用冻结的边 A/边 B 屏幕方向，不得补偿或附加旋转；0° 时上下边水平、左右边垂直。",
+            "tilemap_geometry_diamond_detected" =>
+                "上一轮检测到上下尖角、中心最宽的真实菱形轮廓。本轮必须生成画布轴对齐方形主体，禁止 45° on-point diamond，四个方形角区都要有主体内容。",
+            _ =>
+                "上一轮产物未通过本地约束校验。本轮必须逐项修正诊断中的实测偏差，不得复用或近似复制上一轮构图。"
+        };
+        return string.IsNullOrWhiteSpace(diagnostic)
+            ? directed
+            : $"{directed} 上一轮结构化诊断：{diagnostic}";
+    }
+
+    private static string NormalizeRetryDiagnostic(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return string.Empty;
+        }
+
+        var normalized = string.Join(
+            " ",
+            value.Split(
+                new[] { '\r', '\n', '\t' },
+                StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries));
+        return normalized.Length <= 2_000 ? normalized : normalized[..2_000];
+    }
+
+    private static string ResolveRetryOutputDirectory(string previousOutputDirectory, string retryBatchId)
+    {
+        var segments = (previousOutputDirectory ?? string.Empty)
+            .Replace('\\', '/')
+            .Trim('/')
+            .Split('/', StringSplitOptions.RemoveEmptyEntries)
+            .ToList();
+        if (segments.Count >= 3 &&
+            string.Equals(segments[^3], "Tilemap", StringComparison.OrdinalIgnoreCase) &&
+            Guid.TryParseExact(segments[^2], "N", out _) &&
+            string.Equals(segments[^1], "Final", StringComparison.OrdinalIgnoreCase))
+        {
+            segments[^2] = retryBatchId;
+            return string.Join('/', segments);
+        }
+
+        var prefix = string.Join('/', segments);
+        return string.IsNullOrEmpty(prefix)
+            ? $"Generated/Tilemap/{retryBatchId}/Final"
+            : $"{prefix}/Tilemap/{retryBatchId}/Final";
+    }
+
     private void SubscribeStyleGroup(ArtStyleGroupViewModel? group)
     {
         if (group is null)
@@ -3095,6 +4079,8 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                 SelectedGenerationStep.Key,
                 NegativePrompt,
                 MaxParallelism,
+                AutoRetryEnabled,
+                AutoRetryCount,
                 DraftRows.Select(row => row.Snapshot()).ToArray()));
     }
 

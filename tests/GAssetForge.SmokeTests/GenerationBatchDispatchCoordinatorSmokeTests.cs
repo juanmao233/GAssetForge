@@ -236,13 +236,20 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
                 StringComparison.Ordinal),
             "Agent 指令必须说明软件负责中间落盘与后处理");
         True(prompt.Contains(
-                "只有内置 imagegen、run_image_delivery_fallback 或 submit_generation_output 返回真实错误时才调用 fail_generation_task",
+                "真正以 MCP tool error 失败时才调用 fail_generation_task",
                 StringComparison.Ordinal),
             "Agent 指令必须把失败登记限制在真实生成或提交失败");
         True(prompt.Contains(
-                "image_delivery_fallback_failed:",
+                "outcome=retryable_validation_failure",
                 StringComparison.Ordinal),
-            "Harness 兜底失败时必须报告准确的图片交付错误而不是误报模型失败");
+            "几何质量未通过必须作为已落盘 warning 处理而不是图片交付错误");
+        True(prompt.Contains(
+                "failureCode=image_delivery_fallback_failed",
+                StringComparison.Ordinal) &&
+             prompt.Contains(
+                "failureCode=output_geometry_validation_failed",
+                StringComparison.Ordinal),
+            "Agent 指令必须区分图片交付失败与末端几何校验失败");
         False(prompt.Contains("output.maxParallelism", StringComparison.Ordinal),
             "Agent 指令不得继续依赖页面并行数量");
         True(prompt.Contains("不要创建或复用固定命名的子 Agent 槽位", StringComparison.Ordinal),
@@ -378,6 +385,8 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
 
         True(coordinator.TryEnqueue("batch-1", ["task-a"], isRetry: false),
             "第一批次应进入 Agent 调度队列");
+        True(coordinator.TryEnqueue("batch-1", ["task-a-duplicate"], isRetry: false),
+            "相同 batchId 的恢复入队应幂等成功而不是创建第二个 Turn");
         True(coordinator.TryEnqueue("batch-2", ["task-b", "task-c"], isRetry: false),
             "第二批次应进入 Agent 调度队列");
         True(coordinator.TryEnqueue("batch-3", ["task-d"], isRetry: true),
@@ -386,6 +395,8 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
         await allCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Equal(1, maximumConcurrentTurns, "同一 Agent 会话的批次 Turn 必须严格串行");
         Equal(3, prompts.Count, "每个已发布批次应生成一个 Agent Turn prompt");
+        False(prompts.Any(prompt => prompt.Contains("task-a-duplicate", StringComparison.Ordinal)),
+            "正常发布与恢复扫描并发时不得重复派发同一批次");
         True(prompts[0].Contains("task-a", StringComparison.Ordinal),
             "第一 Turn prompt 应包含第一批任务");
         True(prompts[1].Contains("task-b", StringComparison.Ordinal) &&
@@ -396,6 +407,23 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
         True(completed.All(result => result.IsSuccess),
             "正常完成的 Turn 应报告成功调度结果");
         True(completed[2].Request.IsRetry, "重试批次标记必须保留到调度结果");
+
+        var recoveredCompletion = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        coordinator.DispatchCompleted += (_, eventArgs) =>
+        {
+            if (string.Equals(eventArgs.Request.BatchId, "batch-1", StringComparison.Ordinal) &&
+                eventArgs.Request.TaskIds.Contains("task-a-recovered", StringComparer.Ordinal))
+            {
+                recoveredCompletion.TrySetResult();
+            }
+        };
+        coordinator.ReleaseBatch("batch-1");
+        True(coordinator.TryEnqueue("batch-1", ["task-a-recovered"], isRetry: false),
+            "状态收束失败后释放 batch 生命周期应允许同一 Pending 批次再次派发");
+        await recoveredCompletion.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        Equal(4, prompts.Count,
+            "释放已完成调度生命周期后，恢复扫描应能为仍 Pending 的同一批次再启动一次 Turn");
     }
 
     private static async Task DispatchFailuresAreReportedWithoutRetryLoopsAsync()

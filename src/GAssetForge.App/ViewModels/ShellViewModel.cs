@@ -5,6 +5,7 @@ using GAssetForge.App.Services.AgentRuntime;
 using GAssetForge.Core.Generation;
 using GAssetForge.Core.Imaging;
 using GAssetForge.Core.Workflows;
+using System.ComponentModel;
 using System.IO;
 using System.Windows.Input;
 using System.Windows.Threading;
@@ -23,6 +24,7 @@ public sealed class ShellViewModel : ObservableObject
     private readonly GenerationBatchTurnReconciler _generationBatchTurnReconciler;
     private readonly Dispatcher _dispatcher;
     private readonly object _shutdownLock = new();
+    private readonly SemaphoreSlim _dispatchRecoveryGate = new(1, 1);
     private readonly AsyncRelayCommand _createNewProjectCommand;
     private readonly RelayCommand _closeNewProjectCommand;
     private GenerationBatchDispatchCoordinator _agentDispatchCoordinator = null!;
@@ -206,6 +208,7 @@ public sealed class ShellViewModel : ObservableObject
         AgentConnection.SettingsChanged += OnAgentConnectionSettingsChanged;
         AgentConnection.SessionChanged += OnAgentSessionChanged;
         AgentConnection.AgentActivityReceived += OnAgentActivityForStructuredLog;
+        AgentConnection.PropertyChanged += OnAgentConnectionPropertyChanged;
         _generationTaskStore = new JsonGenerationTaskStore(settingsService.Paths.GenerationDirectory);
         _generationBatchTurnReconciler = new GenerationBatchTurnReconciler(_generationTaskStore);
         AssetGeneration = new AssetGenerationViewModel(
@@ -222,7 +225,9 @@ public sealed class ShellViewModel : ObservableObject
             _settings.AssetGenerationNegativePrompt,
             _settings.AssetGenerationOutputPath,
             _settings.AssetGenerationRows,
-            _settings.AssetGenerationMaxParallelism);
+            _settings.AssetGenerationMaxParallelism,
+            _settings.AssetGenerationAutoRetryEnabled,
+            _settings.AssetGenerationAutoRetryCount);
         AssetGeneration.SettingsChanged += OnAssetGenerationSettingsChanged;
         AssetGeneration.StyleLibraryRequested += OnAssetGenerationStyleLibraryRequested;
         AssetGeneration.AgentConnectionRequested += OnAssetGenerationAgentConnectionRequested;
@@ -294,6 +299,7 @@ public sealed class ShellViewModel : ObservableObject
         CommandConsole.WriteInfo(
             "Workbench",
             $"GAssetForge 已启动 · 项目：{CurrentProjectDisplayName} · 工作流：{CurrentWorkflow.Label}");
+        _ = RecoverPendingGenerationDispatchesAsync();
     }
 
     public event EventHandler? LayoutResetRequested;
@@ -798,6 +804,7 @@ public sealed class ShellViewModel : ObservableObject
             {
                 _agentDispatchCoordinator = CreateAgentDispatchCoordinator();
                 AssetGeneration.BatchPublished += OnGenerationBatchPublished;
+                _ = RecoverPendingGenerationDispatchesAsync();
             }
         }
     }
@@ -928,6 +935,7 @@ public sealed class ShellViewModel : ObservableObject
             AgentConnection.SettingsChanged -= OnAgentConnectionSettingsChanged;
             AgentConnection.SessionChanged -= OnAgentSessionChanged;
             AgentConnection.AgentActivityReceived -= OnAgentActivityForStructuredLog;
+            AgentConnection.PropertyChanged -= OnAgentConnectionPropertyChanged;
             AssetGeneration.SettingsChanged -= OnAssetGenerationSettingsChanged;
             BackgroundRemoval.SettingsChanged -= OnBackgroundRemovalSettingsChanged;
             PixelAlignment.SettingsChanged -= OnPixelAlignmentSettingsChanged;
@@ -1119,6 +1127,19 @@ public sealed class ShellViewModel : ObservableObject
         SaveSettings();
     }
 
+    private void OnAgentConnectionPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (_isShutDown ||
+            (!string.IsNullOrEmpty(e.PropertyName) &&
+             e.PropertyName != nameof(AgentConnectionViewModel.IsConnected)) ||
+            !AgentConnection.IsConnected)
+        {
+            return;
+        }
+
+        _ = RecoverPendingGenerationDispatchesAsync();
+    }
+
     private void OnAgentSessionChanged(object? sender, AgentSessionChangedEventArgs e)
     {
         if (_isShutDown ||
@@ -1137,6 +1158,113 @@ public sealed class ShellViewModel : ObservableObject
         }
 
         SaveSettings();
+        if (AgentConnection.IsConnected)
+        {
+            _ = RecoverPendingGenerationDispatchesAsync();
+        }
+    }
+
+    private async Task RecoverPendingGenerationDispatchesAsync()
+    {
+        if (_isShutDown || !AgentConnection.IsConnected)
+        {
+            return;
+        }
+
+        await _dispatchRecoveryGate.WaitAsync().ConfigureAwait(true);
+        try
+        {
+            if (_isShutDown || !AgentConnection.IsConnected)
+            {
+                return;
+            }
+
+            var workingDirectory = ResolveAgentWorkingDirectory();
+            var pending = await AssetGeneration.GetRecoverablePendingDispatchesAsync()
+                .ConfigureAwait(true);
+            foreach (var dispatch in pending)
+            {
+                if (_isShutDown ||
+                    !AgentConnection.IsConnected ||
+                    !AgentSessionBookmarkService.PathEquals(
+                        workingDirectory,
+                        ResolveAgentWorkingDirectory()))
+                {
+                    return;
+                }
+
+                try
+                {
+                    await AssetGeneration.RepairPersistedDispatchWorkspaceAsync(dispatch.BatchId)
+                        .ConfigureAwait(true);
+                }
+                catch (Exception repairException) when (repairException is
+                    IOException or UnauthorizedAccessException or InvalidDataException or
+                    InvalidOperationException or NotSupportedException or PathTooLongException)
+                {
+                    CommandConsole.WriteWarning(
+                        "Generation",
+                        $"批次 {CompactIdentifier(dispatch.BatchId)} 的 Run manifest/prompt 自动修复失败：" +
+                        $"{repairException.GetType().Name}: {repairException.Message}；" +
+                        "任务仍按冻结约束和路径继续派发。");
+                }
+
+                OnGenerationBatchPublished(
+                    AssetGeneration,
+                    new GenerationBatchPublishedEventArgs(
+                        dispatch.BatchId,
+                        dispatch.TaskIds,
+                        dispatch.IsRetry,
+                        dispatchRequested: true));
+                CommandConsole.WriteWarning(
+                    "Generation",
+                    $"已恢复持久化 Pending 批次 {CompactIdentifier(dispatch.BatchId)} 的 Agent 调度；" +
+                    "不会创建或覆盖新的任务与产物路径。");
+            }
+
+            var retrySources = await AssetGeneration.GetRecoverableAutomaticRetrySourceBatchIdsAsync()
+                .ConfigureAwait(true);
+            foreach (var sourceBatchId in retrySources)
+            {
+                if (_isShutDown ||
+                    !AgentConnection.IsConnected ||
+                    !AgentSessionBookmarkService.PathEquals(
+                        workingDirectory,
+                        ResolveAgentWorkingDirectory()))
+                {
+                    return;
+                }
+
+                var retry = await AssetGeneration.TryCreateAutomaticRetryBatchAsync(sourceBatchId)
+                    .ConfigureAwait(true);
+                if (retry.Scheduled)
+                {
+                    CommandConsole.WriteWarning(
+                        "Generation",
+                        $"已从持久化失败状态恢复自动重做：源批次 {CompactIdentifier(sourceBatchId)}，" +
+                        $"后继批次 {CompactIdentifier(retry.RetryBatchId)}。");
+                }
+                else if (retry.HadEligibleFailures)
+                {
+                    CommandConsole.WriteError(
+                        "Generation",
+                        $"恢复批次 {CompactIdentifier(sourceBatchId)} 的自动重做失败：{retry.Message}");
+                }
+            }
+        }
+        catch (Exception exception) when (exception is
+            IOException or UnauthorizedAccessException or InvalidDataException or
+            InvalidOperationException or NotSupportedException or PathTooLongException)
+        {
+            CommandConsole.WriteError(
+                "Generation",
+                $"恢复持久化生成调度失败：{exception.Message}",
+                exception);
+        }
+        finally
+        {
+            _dispatchRecoveryGate.Release();
+        }
     }
 
     private void OnAgentActivityForStructuredLog(object? sender, AgentActivityEventArgs e)
@@ -1382,13 +1510,69 @@ public sealed class ShellViewModel : ObservableObject
                 AssetGeneration.ReportDispatchFailure(e.Request.BatchId, failure);
                 CommandConsole.WriteError("Generation", failure, exception);
             }).ConfigureAwait(false);
+            if (sender is GenerationBatchDispatchCoordinator failedCoordinator)
+            {
+                failedCoordinator.ReleaseBatch(e.Request.BatchId);
+            }
+
             return;
+        }
+
+        AutomaticGenerationRetryResult automaticRetry;
+        try
+        {
+            if (_dispatcher.HasShutdownStarted || _dispatcher.HasShutdownFinished)
+            {
+                automaticRetry = AutomaticGenerationRetryResult.None(
+                    "应用正在关闭，未创建自动重做任务。");
+            }
+            else if (_dispatcher.CheckAccess())
+            {
+                automaticRetry = await AssetGeneration
+                    .TryCreateAutomaticRetryBatchAsync(e.Request.BatchId)
+                    .ConfigureAwait(true);
+            }
+            else
+            {
+                automaticRetry = await _dispatcher.InvokeAsync(
+                        () => AssetGeneration.TryCreateAutomaticRetryBatchAsync(e.Request.BatchId),
+                        DispatcherPriority.DataBind)
+                    .Task
+                    .Unwrap()
+                    .ConfigureAwait(false);
+            }
+        }
+        catch (Exception exception)
+        {
+            automaticRetry = AutomaticGenerationRetryResult.Blocked(
+                $"自动重做协调失败：{exception.Message}");
         }
 
         void ApplyResult()
         {
             if (_isShutDown || !ReferenceEquals(sender, _agentDispatchCoordinator))
             {
+                return;
+            }
+
+            if (automaticRetry.Scheduled)
+            {
+                CommandConsole.WriteWarning(
+                    "Generation",
+                    $"批次 {CompactIdentifier(e.Request.BatchId)} 存在未达标产物；" +
+                    $"{automaticRetry.Message} 新批次 {CompactIdentifier(automaticRetry.RetryBatchId)} 已进入调度。");
+                _ = AssetGeneration.RefreshAfterDispatchAsync();
+                return;
+            }
+
+            if (automaticRetry.HadEligibleFailures)
+            {
+                AssetGeneration.ReportDispatchFailure(e.Request.BatchId, automaticRetry.Message);
+                CommandConsole.WriteError(
+                    "Generation",
+                    $"批次 {CompactIdentifier(e.Request.BatchId)} 的可恢复失败无法自动重做：" +
+                    automaticRetry.Message);
+                _ = AssetGeneration.RefreshAfterDispatchAsync();
                 return;
             }
 
@@ -1454,7 +1638,17 @@ public sealed class ShellViewModel : ObservableObject
             _ = AssetGeneration.RefreshAfterDispatchAsync();
         }
 
-        await InvokeOnDispatcherAsync(ApplyResult).ConfigureAwait(false);
+        try
+        {
+            await InvokeOnDispatcherAsync(ApplyResult).ConfigureAwait(false);
+        }
+        finally
+        {
+            if (sender is GenerationBatchDispatchCoordinator completedCoordinator)
+            {
+                completedCoordinator.ReleaseBatch(e.Request.BatchId);
+            }
+        }
     }
 
     private Task InvokeOnDispatcherAsync(Action action)
@@ -1481,6 +1675,8 @@ public sealed class ShellViewModel : ObservableObject
         _settings.AssetGenerationContentPrompt = e.ContentPrompt;
         _settings.AssetGenerationNegativePrompt = e.NegativePrompt;
         _settings.AssetGenerationMaxParallelism = e.MaxParallelism;
+        _settings.AssetGenerationAutoRetryEnabled = e.AutoRetryEnabled;
+        _settings.AssetGenerationAutoRetryCount = e.AutoRetryCount;
         _settings.AssetGenerationOutputPath = e.OutputDirectory;
         _settings.AssetGenerationRows = e.Rows
             .Select(row => new AssetGenerationDraftRowSettings
@@ -1824,6 +2020,8 @@ public sealed class ShellViewModel : ObservableObject
         _settings.AssetGenerationContentPrompt = AssetGeneration.ContentPrompt;
         _settings.AssetGenerationNegativePrompt = AssetGeneration.NegativePrompt;
         _settings.AssetGenerationMaxParallelism = AssetGeneration.MaxParallelism;
+        _settings.AssetGenerationAutoRetryEnabled = AssetGeneration.AutoRetryEnabled;
+        _settings.AssetGenerationAutoRetryCount = AssetGeneration.AutoRetryCount;
         _settings.AssetGenerationOutputPath = AssetGeneration.OutputDirectory;
         _settings.AssetGenerationRows = AssetGeneration.DraftRows
             .Select(row => new AssetGenerationDraftRowSettings

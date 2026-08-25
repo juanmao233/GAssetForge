@@ -10,9 +10,172 @@ internal static class BatchGenerationCoreSmokeTests
     {
         await BatchCreationIsAtomicAndKeepsStableOrderAsync();
         await BatchBoundariesRejectWithoutPartialWritesAsync();
+        await RetryLineageIsAtomicIdempotentAndStopsAtFrozenLimitAsync();
+        await AutomaticRetryBlockAndDispatchIntentPersistAsync();
         TilemapOutputCountBuildsVariantAwareConstraints();
         LegacyTasksRemainBatchNeutral();
     }
+
+    private static async Task AutomaticRetryBlockAndDispatchIntentPersistAsync()
+    {
+        var testRoot = CreateTestRoot("retry-dispatch-intent");
+        try
+        {
+            var store = new JsonGenerationTaskStore(testRoot);
+            var parent = (await store.CreateBatchAsync(new CreateGenerationBatchRequest
+            {
+                BatchId = Guid.NewGuid().ToString("N"),
+                DisplayName = "持久化自动调度与人工接管",
+                DispatchRequested = true,
+                Items =
+                [
+                    new CreateGenerationBatchItemRequest
+                    {
+                        ItemId = Guid.NewGuid().ToString("N"),
+                        DisplayName = "需要重做的瓦片",
+                        MaxAttempts = 4,
+                        Constraints = CreateConstraints("需要重做的瓦片", 1)
+                    }
+                ]
+            })).Single();
+            True(parent.DispatchIntent is { Requested: true, IsRetry: false },
+                "首次批次必须持久化应用内调度意图");
+
+            var failed = await FailGeometryAsync(store, parent, "retry-block-smoke-agent");
+            var reason = "自动重做准备失败：Run manifest 目录暂时不可写";
+            var blocked = (await store.BlockAutomaticRetryAsync([failed.Id], reason)).Single();
+            Equal(reason, blocked.AutomaticRetryBlockedReason,
+                "自动重做准备失败必须持久化人工接管原因");
+            await ThrowsAsync<InvalidOperationException>(
+                () => store.CreateRetryBatchAsync(CreateRetryRequest(blocked)),
+                "被阻断的任务不得被另一条自动路径继续创建 child");
+
+            var manualRequest = CreateRetryRequest(blocked) with
+            {
+                ManualOverride = true,
+                DispatchRequested = false
+            };
+            var manual = await store.CreateRetryBatchAsync(manualRequest);
+            True(manual.Created, "人工接管应能原子创建唯一后继任务");
+            True(manual.Tasks.Single().DispatchIntent is { Requested: false, IsRetry: true },
+                "人工接力 child 不得在重启后自动拉起 Agent Turn");
+            var persistedParent = await store.GetAsync(blocked.Id)
+                ?? throw new InvalidOperationException("人工接管父任务丢失。");
+            True(!string.IsNullOrWhiteSpace(persistedParent.SupersededByTaskId),
+                "人工接管必须原子回写父任务后继关系");
+            True(string.IsNullOrWhiteSpace(persistedParent.AutomaticRetryBlockedReason),
+                "父任务被人工 child 接替后应清除活动阻断标记");
+        }
+        finally
+        {
+            DeleteTestRoot(testRoot);
+        }
+    }
+
+    private static async Task RetryLineageIsAtomicIdempotentAndStopsAtFrozenLimitAsync()
+    {
+        var testRoot = CreateTestRoot("retry-lineage");
+        try
+        {
+            var store = new JsonGenerationTaskStore(testRoot);
+            var initial = (await store.CreateBatchAsync(new CreateGenerationBatchRequest
+            {
+                BatchId = Guid.NewGuid().ToString("N"),
+                DisplayName = "自动重做谱系",
+                Items =
+                [
+                    new CreateGenerationBatchItemRequest
+                    {
+                        ItemId = Guid.NewGuid().ToString("N"),
+                        DisplayName = "轴对齐方形瓦片",
+                        MaxAttempts = 4,
+                        Constraints = CreateConstraints("轴对齐方形瓦片", 1)
+                    }
+                ]
+            })).Single();
+            Equal(1, initial.RetryLineage?.AttemptNumber, "首次尝试编号");
+            Equal(4, initial.RetryLineage?.MaxAttempts, "默认三次重做应冻结为四次总尝试");
+            Equal(initial.Id, initial.RetryLineage?.RootTaskId, "首次尝试应成为谱系根");
+
+            var agentId = "retry-smoke-agent";
+            var failed = await FailGeometryAsync(store, initial, agentId);
+            var firstRetryRequest = CreateRetryRequest(failed);
+            var concurrent = await Task.WhenAll(
+                Enumerable.Range(0, 20)
+                    .Select(_ => store.CreateRetryBatchAsync(firstRetryRequest)));
+            var childIds = concurrent
+                .SelectMany(result => result.Tasks)
+                .Select(task => task.Id)
+                .Distinct(StringComparer.Ordinal)
+                .ToArray();
+            Equal(1, childIds.Length, "并发重试必须只创建一个后继任务");
+            Equal(1, concurrent.Count(result => result.Created), "并发重试必须只有一次原子创建成功");
+            Equal(2, (await store.ListAsync()).Count, "并发重试不得产生重复 child");
+
+            var attempt = await store.GetAsync(childIds[0])
+                ?? throw new InvalidOperationException("找不到第二次尝试。");
+            for (var expectedAttempt = 2; expectedAttempt <= 4; expectedAttempt++)
+            {
+                Equal(expectedAttempt, attempt.RetryLineage?.AttemptNumber, $"第 {expectedAttempt} 次尝试编号");
+                Equal(initial.Id, attempt.RetryLineage?.RootTaskId, "后继任务必须保留根任务 ID");
+                if (expectedAttempt == 4)
+                {
+                    break;
+                }
+
+                var failedAttempt = await FailGeometryAsync(store, attempt, agentId);
+                var retry = await store.CreateRetryBatchAsync(CreateRetryRequest(failedAttempt));
+                True(retry.Created, $"第 {expectedAttempt + 1} 次尝试应成功创建");
+                attempt = retry.Tasks.Single();
+            }
+
+            var exhausted = await FailGeometryAsync(store, attempt, agentId);
+            await ThrowsAsync<InvalidOperationException>(
+                () => store.CreateRetryBatchAsync(CreateRetryRequest(exhausted)),
+                "第四次失败后必须停止自动重做");
+            Equal(4, (await store.ListAsync()).Count, "三次额外重做应最多保留四个审计任务");
+        }
+        finally
+        {
+            DeleteTestRoot(testRoot);
+        }
+    }
+
+    private static async Task<GenerationTask> FailGeometryAsync(
+        JsonGenerationTaskStore store,
+        GenerationTask task,
+        string agentId)
+    {
+        var claimed = await store.ClaimAsync(task.Id, agentId);
+        return await store.FailAsync(
+            claimed.Id,
+            agentId,
+            new GenerationTaskFailure
+            {
+                Message =
+                    "output_geometry_validation_failed: tilemap_geometry_aspect_ratio_mismatch; actualWidth=384; actualHeight=448",
+                Code = "output_geometry_validation_failed",
+                SubCode = "tilemap_geometry_aspect_ratio_mismatch",
+                Stage = "output.geometry_validation",
+                Retryable = true
+            });
+    }
+
+    private static CreateGenerationRetryBatchRequest CreateRetryRequest(GenerationTask parent) => new()
+    {
+        BatchId = Guid.NewGuid().ToString("N"),
+        DisplayName = $"重做 {parent.RetryLineage?.AttemptNumber + 1}",
+        Items =
+        [
+            new CreateGenerationRetryBatchItemRequest
+            {
+                ParentTaskId = parent.Id,
+                ItemId = Guid.NewGuid().ToString("N"),
+                DisplayName = parent.DisplayName,
+                Constraints = parent.Constraints
+            }
+        ]
+    };
 
     private static async Task BatchCreationIsAtomicAndKeepsStableOrderAsync()
     {
