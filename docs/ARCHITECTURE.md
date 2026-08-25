@@ -8,7 +8,7 @@ GAssetForge.Core
   Workflows/         五类业务入口定义
   ArtStyles/         风格组、参考素材元数据、统一提示词样本、稳定指纹、校验与 JSON 契约
   Generation/        AI 约束包、Tilemap 规则、单图任务状态机、Run Schema 与阶段日志
-  Imaging/           像素对齐、几何矫正、格子采样、自动调色板与原子 PNG 输出
+  Imaging/           背景/棋盘格剔除、Alpha 描边、像素对齐、几何矫正、自动调色板与原子 PNG 输出
 
 GAssetForge.App
   ViewModels/        Shell 与 UI 编辑器状态/命令
@@ -43,6 +43,10 @@ AvalonDock 的模块接口只承担面板拓扑、大小、停靠位置、隐藏
 | `ui-layers` | 图层 | 右下 |
 | `ui-project` | Project / Prefab | 画布下方 |
 | `art-style-library` | 美术风格素材库 | 与 Project 共用画布下方标签停靠区 |
+| `asset-generation` | 素材生成 | 与 Project 共用画布下方标签停靠区 |
+| `background-removal` | 背景剔除 / 假透明棋盘格恢复 | 与 Project 共用画布下方标签停靠区 |
+| `image-outline` | 图片描边工具 | 与 Project 共用画布下方标签停靠区 |
+| `pixel-grid-alignment` | 像素点对齐工具 | 与 Project 共用画布下方标签停靠区 |
 | `workflow-blueprint` | Agent 与工具工作流蓝图 | 与 Project 共用画布下方标签停靠区 |
 | `mcp-agent-connection` | MCP Agent 连接管理 | 默认隐藏；拉起后位于宽底部区域 |
 
@@ -55,7 +59,7 @@ AvalonDock 的模块接口只承担面板拓扑、大小、停靠位置、隐藏
 | 项目清单 | `ProjectWorkspaceService` | `<ProjectRoot>\ProjectSettings\gassetforge.project.json`；项目身份、工作流与 Tilemap 参数 |
 | UI 编辑数据 | `JsonProjectRepository` | `<ProjectRoot>\ProjectSettings\ui-project.pfui.json`；自动保存、备份、导入、导出、Undo / Redo |
 | 停靠布局 | `AvalonDockLayoutService` | 窗口关闭保存、启动恢复、可独立重置 |
-| 用户设置 | `UserSettingsService` | 主题、最近项目、Agent/MCP 配置、Codex thread ID + 工作目录、素材生成表格草稿与统一提示词优先开关 |
+| 用户设置 | `UserSettingsService` | 主题、最近项目、Agent/MCP 配置、Codex thread ID + 工作目录、素材生成草稿、背景/棋盘格剔除、图片描边与像素对齐偏好 |
 | 美术风格素材库 | `JsonArtStyleLibraryRepository` | 风格组、人工提示词、统一提示词样本与当前选择即时原子保存；参考图片复制到受管目录 |
 | 风格提示词分析请求 | `AgentArtStylePromptAnalysisService` | Agent 工作目录下 `.gassetforge\style-analysis\<requestId>` 的一次性 request/result/diagnostics；不作为风格库真相源 |
 | AI 生成任务 | `JsonGenerationTaskStore` | 本地跨进程持久化单图任务、原子状态迁移、风格快照与冻结交付计划 |
@@ -91,6 +95,23 @@ Wu 量化并输出 Palette PNG，关闭时使用 RGBA PNG。完全透明像素�
 独立 Pending / Running / Completed / Failed 状态；失败只影响当前项，已经完成的原子文件继续保留。输出规划
 默认不覆盖现有文件，名称冲突使用稳定数字后缀。批量文件清单属于瞬时 UI 状态，不写入用户设置；颜色索引开关
 与最大颜色数则随其它像素工具偏好持久化。
+
+### 背景剔除与图片描边边界
+
+`ImageSharpBackgroundRemovalService` 保留旧单色路径，并在显式启用时切换为双颜色棋盘格路径。未对齐模式对每个
+像素选择距离更近的 A/B 底色；对齐模式根据正方形 cell、X/Y offset 和数学 FloorDiv 计算预期相位，只有格线
+容差带内才允许回退到两色最近距离。Matte、收缩、羽化和 Alpha 上限仍共享原有实现，despill 则使用当前像素的
+局部底色。单幅棋盘格合成图无法精确反演原始半透明前景，因此 UI 把它定义为显式本地兜底，而不是素材生成模型
+可以主动选择的输出格式；生成合同继续冻结单一纯色底。
+
+`ImageSharpImageOutlineService` 也是单图、确定性、原子落盘服务。它先按 Alpha threshold 清理极弱透明噪点，再用
+可分离滑动窗口 max/min 计算方形形态学轮廓：outside 为 `dilate(A)-A`，inside 为 `A-erode(A)`，center 把总宽度
+拆成外 `ceil/2` 与内 `floor/2`。外轮廓在源图后方 SourceOver，内轮廓只替换边缘颜色且保持源 Alpha；可选 canvas
+expansion 防止外描边被裁切。
+
+`ImageOutlineViewModel` 负责单图与最多 256 项的顺序批处理、碰撞安全文件名、逐项状态和进度。与像素工具一致，
+批量清单属于会话瞬态状态，不进入用户设置；描边种类、宽度、颜色、Alpha threshold、扩画布开关和最近目录即时
+持久化。Core 服务不依赖 AvalonDock、项目 Schema、Agent 或 MCP。
 
 ### 风格分析一次性文件协议
 

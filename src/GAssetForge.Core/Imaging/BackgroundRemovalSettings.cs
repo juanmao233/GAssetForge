@@ -4,6 +4,22 @@ public sealed record BackgroundRemovalSettings
 {
     public string KeyColorHex { get; init; } = "#FF00FF";
 
+    public bool UseFakeTransparencyGrid { get; init; }
+
+    public string CheckerColorAHex { get; init; } = "#FFFFFF";
+
+    public string CheckerColorBHex { get; init; } = "#CCCCCC";
+
+    public bool EnableCheckerGridAlignment { get; init; } = true;
+
+    public int CheckerCellSize { get; init; } = 16;
+
+    public int CheckerOffsetX { get; init; }
+
+    public int CheckerOffsetY { get; init; }
+
+    public int CheckerBoundaryTolerance { get; init; }
+
     public double TransparentThreshold { get; init; } = 30d;
 
     public double OpaqueThreshold { get; init; } = 120d;

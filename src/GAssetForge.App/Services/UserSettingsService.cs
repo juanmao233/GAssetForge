@@ -57,8 +57,23 @@ public sealed class UserSettingsModel
     public int BackgroundRemovalEdgeFeather { get; set; }
     public bool BackgroundRemovalDespill { get; set; } = true;
     public bool BackgroundRemovalEdgeConnectedOnly { get; set; } = true;
+    public bool BackgroundRemovalUseFakeTransparencyGrid { get; set; }
+    public string BackgroundRemovalCheckerColorAHex { get; set; } = "#FFFFFF";
+    public string BackgroundRemovalCheckerColorBHex { get; set; } = "#CCCCCC";
+    public bool BackgroundRemovalEnableCheckerGridAlignment { get; set; } = true;
+    public int BackgroundRemovalCheckerCellSize { get; set; } = 16;
+    public int BackgroundRemovalCheckerOffsetX { get; set; }
+    public int BackgroundRemovalCheckerOffsetY { get; set; }
+    public int BackgroundRemovalCheckerBoundaryTolerance { get; set; } = 1;
     public string? BackgroundRemovalLastInputDirectory { get; set; }
     public string? BackgroundRemovalLastOutputDirectory { get; set; }
+    public string ImageOutlinePlacement { get; set; } = "Outside";
+    public int ImageOutlineWidth { get; set; } = 2;
+    public string ImageOutlineColorHex { get; set; } = "#000000";
+    public int ImageOutlineAlphaThreshold { get; set; } = 1;
+    public bool ImageOutlineExpandCanvas { get; set; } = true;
+    public string? ImageOutlineLastInputDirectory { get; set; }
+    public string? ImageOutlineLastOutputDirectory { get; set; }
     public int PixelAlignmentMinimumUpscaleFactor { get; set; } = 10;
     public int PixelAlignmentColumns { get; set; } = 32;
     public int PixelAlignmentRows { get; set; } = 32;
@@ -115,6 +130,22 @@ public sealed class UserSettingsService
                 settings.AssetGenerationAutoRetryCount,
                 0,
                 10);
+            settings.BackgroundRemovalCheckerCellSize = Math.Clamp(
+                settings.BackgroundRemovalCheckerCellSize,
+                2,
+                512);
+            settings.BackgroundRemovalCheckerBoundaryTolerance = Math.Clamp(
+                settings.BackgroundRemovalCheckerBoundaryTolerance,
+                0,
+                8);
+            settings.ImageOutlineWidth = Math.Clamp(
+                settings.ImageOutlineWidth,
+                ImageOutlineLimits.MinimumWidth,
+                ImageOutlineLimits.MaximumWidth);
+            settings.ImageOutlineAlphaThreshold = Math.Clamp(
+                settings.ImageOutlineAlphaThreshold,
+                ImageOutlineLimits.MinimumAlphaThreshold,
+                ImageOutlineLimits.MaximumAlphaThreshold);
             settings.PixelAlignmentMaximumIndexedColors = Math.Clamp(
                 settings.PixelAlignmentMaximumIndexedColors,
                 PixelAlignmentLimits.MinimumIndexedColorCount,

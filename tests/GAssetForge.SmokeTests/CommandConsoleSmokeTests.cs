@@ -414,6 +414,8 @@ internal static class CommandConsoleSmokeTests
             Equal("command-console", requestedPanel, "show console 应请求拉起指令日志停靠页");
             Execute(console, "show pixel-grid");
             Equal("pixel-grid-alignment", requestedPanel, "show pixel-grid 应请求拉起像素点对齐停靠页");
+            Execute(console, "show outline");
+            Equal("image-outline", requestedPanel, "show outline 应请求拉起图片描边停靠页");
             Execute(console, "theme");
             ContainsLog(console, WorkbenchLogLevel.Information, "当前主题", "theme 状态查询");
             Execute(console, "status");

@@ -48,9 +48,29 @@ public sealed class ImageSharpBackgroundRemovalService : IBackgroundRemovalServi
 
         using var image = Image.Load<Rgba32>(normalizedInput);
         var key = ParseColor(settings.KeyColorHex);
+        var checkerColorA = settings.UseFakeTransparencyGrid
+            ? ParseColor(settings.CheckerColorAHex)
+            : default;
+        var checkerColorB = settings.UseFakeTransparencyGrid
+            ? ParseColor(settings.CheckerColorBHex)
+            : default;
         var originalAlpha = new byte[checked(image.Width * image.Height)];
         var distances = new float[originalAlpha.Length];
-        ReadSourceState(image, key, originalAlpha, distances);
+        if (settings.UseFakeTransparencyGrid)
+        {
+            ReadCheckerSourceState(
+                image,
+                checkerColorA,
+                checkerColorB,
+                settings,
+                originalAlpha,
+                distances);
+        }
+        else
+        {
+            ReadSourceState(image, key, originalAlpha, distances);
+        }
+
         var keyedRegion = settings.EdgeConnectedOnly
             ? FindEdgeConnectedRegion(image.Width, image.Height, distances, settings.OpaqueThreshold)
             : Enumerable.Repeat(true, originalAlpha.Length).ToArray();
@@ -66,7 +86,15 @@ public sealed class ImageSharpBackgroundRemovalService : IBackgroundRemovalServi
             matte = FeatherAlpha(matte, image.Width, image.Height, settings.EdgeFeather);
         }
 
-        var stats = ApplyMatte(image, originalAlpha, matte, key, settings.Despill);
+        var stats = settings.UseFakeTransparencyGrid
+            ? ApplyCheckerMatte(
+                image,
+                originalAlpha,
+                matte,
+                checkerColorA,
+                checkerColorB,
+                settings)
+            : ApplyMatte(image, originalAlpha, matte, key, settings.Despill);
         var temporaryPath = Path.Combine(
             outputDirectory,
             $".{Path.GetFileName(normalizedOutput)}.{Guid.NewGuid():N}.tmp");
@@ -102,6 +130,26 @@ public sealed class ImageSharpBackgroundRemovalService : IBackgroundRemovalServi
     private static void ValidateSettings(BackgroundRemovalSettings settings)
     {
         _ = BackgroundKeyColor.NormalizeHex(settings.KeyColorHex);
+        if (settings.UseFakeTransparencyGrid)
+        {
+            var normalizedColorA = BackgroundKeyColor.NormalizeHex(settings.CheckerColorAHex);
+            var normalizedColorB = BackgroundKeyColor.NormalizeHex(settings.CheckerColorBHex);
+            if (string.Equals(normalizedColorA, normalizedColorB, StringComparison.Ordinal))
+            {
+                throw new ArgumentException("假透明网格的两种颜色不能相同。", nameof(settings));
+            }
+
+            if (settings.CheckerCellSize is < 2 or > 512)
+            {
+                throw new ArgumentException("假透明网格单元尺寸必须位于 2 到 512 像素之间。", nameof(settings));
+            }
+
+            if (settings.CheckerBoundaryTolerance is < 0 or > 8)
+            {
+                throw new ArgumentException("假透明网格边界容差必须位于 0 到 8 像素之间。", nameof(settings));
+            }
+        }
+
         if (!double.IsFinite(settings.TransparentThreshold) ||
             !double.IsFinite(settings.OpaqueThreshold) ||
             settings.TransparentThreshold is < 0d or > 441.7d ||
@@ -149,6 +197,36 @@ public sealed class ImageSharpBackgroundRemovalService : IBackgroundRemovalServi
                     var pixel = row[x];
                     originalAlpha[index] = pixel.A;
                     distances[index] = Distance(pixel, key);
+                }
+            }
+        });
+    }
+
+    private static void ReadCheckerSourceState(
+        Image<Rgba32> image,
+        Rgba32 checkerColorA,
+        Rgba32 checkerColorB,
+        BackgroundRemovalSettings settings,
+        byte[] originalAlpha,
+        float[] distances)
+    {
+        image.ProcessPixelRows(accessor =>
+        {
+            for (var y = 0; y < accessor.Height; y++)
+            {
+                var row = accessor.GetRowSpan(y);
+                for (var x = 0; x < row.Length; x++)
+                {
+                    var index = y * accessor.Width + x;
+                    var pixel = row[x];
+                    originalAlpha[index] = pixel.A;
+                    distances[index] = ResolveCheckerKey(
+                        pixel,
+                        x,
+                        y,
+                        checkerColorA,
+                        checkerColorB,
+                        settings).Distance;
                 }
             }
         });
@@ -369,6 +447,147 @@ public sealed class ImageSharpBackgroundRemovalService : IBackgroundRemovalServi
         return (removed, transparent, partial, opaque);
     }
 
+    private static (long Removed, long Transparent, long Partial, long Opaque) ApplyCheckerMatte(
+        Image<Rgba32> image,
+        IReadOnlyList<byte> originalAlpha,
+        IReadOnlyList<byte> matte,
+        Rgba32 checkerColorA,
+        Rgba32 checkerColorB,
+        BackgroundRemovalSettings settings)
+    {
+        long removed = 0;
+        long transparent = 0;
+        long partial = 0;
+        long opaque = 0;
+        image.ProcessPixelRows(accessor =>
+        {
+            for (var y = 0; y < accessor.Height; y++)
+            {
+                var row = accessor.GetRowSpan(y);
+                for (var x = 0; x < row.Length; x++)
+                {
+                    var index = y * accessor.Width + x;
+                    var pixel = row[x];
+                    var sourceA = originalAlpha[index];
+                    var targetA = Math.Min(sourceA, matte[index]);
+                    if (targetA < sourceA)
+                    {
+                        removed++;
+                    }
+
+                    if (targetA == 0)
+                    {
+                        pixel.R = 0;
+                        pixel.G = 0;
+                        pixel.B = 0;
+                        transparent++;
+                    }
+                    else
+                    {
+                        if (settings.Despill && sourceA > 0 && targetA < sourceA)
+                        {
+                            var key = ResolveCheckerKey(
+                                pixel,
+                                x,
+                                y,
+                                checkerColorA,
+                                checkerColorB,
+                                settings).Key;
+                            var coverage = Math.Clamp(targetA / (double)sourceA, 1d / 255d, 1d);
+                            pixel.R = Unmix(pixel.R, key.R, coverage);
+                            pixel.G = Unmix(pixel.G, key.G, coverage);
+                            pixel.B = Unmix(pixel.B, key.B, coverage);
+                        }
+
+                        if (targetA < 255)
+                        {
+                            partial++;
+                        }
+                        else
+                        {
+                            opaque++;
+                        }
+                    }
+
+                    pixel.A = targetA;
+                    row[x] = pixel;
+                }
+            }
+        });
+
+        return (removed, transparent, partial, opaque);
+    }
+
+    private static CheckerKey ResolveCheckerKey(
+        Rgba32 pixel,
+        int x,
+        int y,
+        Rgba32 checkerColorA,
+        Rgba32 checkerColorB,
+        BackgroundRemovalSettings settings)
+    {
+        var distanceA = Distance(pixel, checkerColorA);
+        var distanceB = Distance(pixel, checkerColorB);
+        if (!settings.EnableCheckerGridAlignment || IsNearCheckerBoundary(x, y, settings))
+        {
+            return distanceA <= distanceB
+                ? new CheckerKey(checkerColorA, distanceA)
+                : new CheckerKey(checkerColorB, distanceB);
+        }
+
+        var cellX = FloorDiv((long)x - settings.CheckerOffsetX, settings.CheckerCellSize);
+        var cellY = FloorDiv((long)y - settings.CheckerOffsetY, settings.CheckerCellSize);
+        var expectsColorA = PositiveModulo(cellX + cellY, 2) == 0;
+        var expectedKey = expectsColorA ? checkerColorA : checkerColorB;
+        var expectedDistance = expectsColorA ? distanceA : distanceB;
+        var oppositeDistance = expectsColorA ? distanceB : distanceA;
+
+        // Away from a predicted grid boundary, a pixel that is closer to the opposite checker
+        // color is foreground evidence rather than background evidence. Treat it as fully distant
+        // so a subject detail matching the other checker color cannot become partially transparent
+        // merely because the caller chose a wide opacity threshold.
+        if (oppositeDistance < expectedDistance)
+        {
+            expectedDistance = float.MaxValue;
+        }
+
+        return new CheckerKey(expectedKey, expectedDistance);
+    }
+
+    private static bool IsNearCheckerBoundary(
+        int x,
+        int y,
+        BackgroundRemovalSettings settings)
+    {
+        var tolerance = settings.CheckerBoundaryTolerance;
+        if (tolerance <= 0)
+        {
+            return false;
+        }
+
+        var localX = PositiveModulo(
+            (long)x - settings.CheckerOffsetX,
+            settings.CheckerCellSize);
+        var localY = PositiveModulo(
+            (long)y - settings.CheckerOffsetY,
+            settings.CheckerCellSize);
+        return localX < tolerance || localX >= settings.CheckerCellSize - tolerance ||
+               localY < tolerance || localY >= settings.CheckerCellSize - tolerance;
+    }
+
+    private static long FloorDiv(long value, int divisor)
+    {
+        var quotient = value / divisor;
+        var remainder = value % divisor;
+        return remainder < 0 ? quotient - 1 : quotient;
+    }
+
+    private static int PositiveModulo(long value, int divisor)
+    {
+        var remainder = value % divisor;
+        return (int)(remainder < 0 ? remainder + divisor : remainder);
+    }
+
     private static byte Unmix(byte observed, byte key, double coverage) =>
         (byte)Math.Clamp(
             (int)Math.Round((observed - (1d - coverage) * key) / coverage),
@@ -382,4 +601,6 @@ public sealed class ImageSharpBackgroundRemovalService : IBackgroundRemovalServi
         var blue = pixel.B - key.B;
         return MathF.Sqrt(red * red + green * green + blue * blue);
     }
+
+    private readonly record struct CheckerKey(Rgba32 Key, float Distance);
 }

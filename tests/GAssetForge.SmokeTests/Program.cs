@@ -111,7 +111,11 @@ internal static class Program
             ImageGenerationCliFallbackSmokeTests.RunAllAsync(_temporaryRoot).GetAwaiter().GetResult();
             Console.WriteLine("PASS  MCP Harness 使用官方 image_gen.py 将模型原图确定性写入项目路径");
             BackgroundRemovalSmokeTests.Run();
-            Console.WriteLine("PASS  背景剔除六种底色、连通/全局模式、原有 Alpha 与原子 PNG 输出可用");
+            Console.WriteLine("PASS  背景剔除纯色与假透明棋盘格、连通/全局模式、原有 Alpha 与原子 PNG 输出可用");
+            ImageOutlineSmokeTests.Run();
+            Console.WriteLine("PASS  图片描边外/内/中心模式、Alpha 轮廓、扩展画布与原子 PNG 输出可用");
+            ImageToolIntegrationSmokeTests.Run(_temporaryRoot);
+            Console.WriteLine("PASS  图片描边批处理、设置持久化与假透明网格工具集成可用");
             PixelAlignmentSmokeTests.Run();
             Console.WriteLine("PASS  像素对齐最小兼容倍率、最近邻放大、裁切标尺与三种采样输出可用");
             BackgroundRemovalGenerationContractSmokeTests.Run();
@@ -719,6 +723,16 @@ internal static class Program
             Equal(MainWindow.BackgroundRemovalContentId, backgroundRemovalMenuItem.CommandParameter as string,
                 "背景剔除工具开关的 ContentId");
 
+            var imageOutlineMenuItem = window.FindName("ShowImageOutlineMenuItem") as MenuItem
+                ?? throw new SmokeTestException("视图菜单缺少图片描边工具开关。");
+            imageOutlineMenuItem.GetBindingExpression(MenuItem.CommandProperty)?.UpdateTarget();
+            True(imageOutlineMenuItem.IsCheckable,
+                "图片描边工具菜单应显示当前开启状态");
+            True(ReferenceEquals(shell.TogglePanelCommand, imageOutlineMenuItem.Command),
+                "图片描边工具菜单应绑定 TogglePanelCommand");
+            Equal(MainWindow.ImageOutlineContentId, imageOutlineMenuItem.CommandParameter as string,
+                "图片描边工具开关的 ContentId");
+
             var pixelAlignmentMenuItem = window.FindName("ShowPixelAlignmentMenuItem") as MenuItem
                 ?? throw new SmokeTestException("视图菜单缺少像素点对齐工具开关。");
             pixelAlignmentMenuItem.GetBindingExpression(MenuItem.CommandProperty)?.UpdateTarget();
@@ -785,6 +799,7 @@ internal static class Program
                 MainWindow.StyleLibraryContentId,
                 MainWindow.AssetGenerationContentId,
                 MainWindow.BackgroundRemovalContentId,
+                MainWindow.ImageOutlineContentId,
                 MainWindow.PixelAlignmentContentId,
                 MainWindow.BlueprintContentId,
                 MainWindow.AgentConnectionContentId,
@@ -854,6 +869,104 @@ internal static class Program
                 "重新开启后背景剔除工具面板应可见、选中并激活");
             True(backgroundRemovalMenuItem.IsChecked,
                 "背景剔除工具面板重新开启后视图菜单应恢复勾选");
+
+            var imageOutline = FindDockContent(manager, MainWindow.ImageOutlineContentId) as LayoutAnchorable
+                ?? throw new SmokeTestException("停靠交互测试未找到图片描边工具面板。");
+            True(imageOutline.IsVisible && !imageOutline.IsHidden,
+                "图片描边工具面板初始应作为 Project 同区标签页存在");
+            imageOutlineMenuItem.Command!.Execute(imageOutlineMenuItem.CommandParameter);
+            True(imageOutline.IsHidden, "从视图菜单关闭后图片描边工具面板应隐藏");
+            False(imageOutlineMenuItem.IsChecked,
+                "图片描边工具面板隐藏后视图菜单应取消勾选");
+            imageOutlineMenuItem.Command.Execute(imageOutlineMenuItem.CommandParameter);
+            False(imageOutline.IsHidden, "再次点击视图菜单应恢复图片描边工具面板");
+            True(imageOutline.IsVisible && imageOutline.IsSelected && imageOutline.IsActive,
+                "重新开启后图片描边工具面板应可见、选中并激活");
+            True(imageOutlineMenuItem.IsChecked,
+                "图片描边工具面板重新开启后视图菜单应恢复勾选");
+
+            var imageOutlineHost = imageOutline.Content as ContentControl
+                ?? throw new SmokeTestException("图片描边工具缺少稳定 ContentControl host。");
+            var imageOutlineView = imageOutlineHost.Content as ImageOutlineView
+                ?? throw new SmokeTestException("图片描边工具 host 未承载 ImageOutlineView。");
+            True(ReferenceEquals(shell.ImageOutline, imageOutlineView.DataContext),
+                "图片描边工具应绑定 Shell 持有的单实例 ViewModel");
+            var outlineModeComboBox = RequireNamedElement<ComboBox>(
+                imageOutlineView,
+                "ImageOutlineModeComboBox",
+                "图片描边工具缺少描边种类下拉框。");
+            var outlineWidthSlider = RequireNamedElement<Slider>(
+                imageOutlineView,
+                "ImageOutlineWidthSlider",
+                "图片描边工具缺少描边宽度控件。");
+            var outlineColorTextBox = RequireNamedElement<TextBox>(
+                imageOutlineView,
+                "ImageOutlineColorTextBox",
+                "图片描边工具缺少描边颜色输入框。");
+            var outlineBatchDataGrid = RequireNamedElement<DataGrid>(
+                imageOutlineView,
+                "ImageOutlineBatchDataGrid",
+                "图片描边工具缺少批处理队列。");
+            var outlineProcessButton = RequireNamedElement<Button>(
+                imageOutlineView,
+                "ProcessImageOutlineButton",
+                "图片描边工具缺少单图执行按钮。");
+            var outlineBatchProcessButton = RequireNamedElement<Button>(
+                imageOutlineView,
+                "ProcessImageOutlineBatchButton",
+                "图片描边工具缺少批量执行按钮。");
+            True(ReferenceEquals(shell.ImageOutline.ModeOptions, outlineModeComboBox.ItemsSource),
+                "描边种类下拉框应使用 ViewModel 稳定选项");
+            Equal(1d, outlineWidthSlider.Minimum, "描边宽度最小值");
+            Equal(128d, outlineWidthSlider.Maximum, "描边宽度最大值");
+            Equal(nameof(ImageOutlineViewModel.OutlineColorHex),
+                BindingOperations.GetBindingExpression(outlineColorTextBox, TextBox.TextProperty)?.ParentBinding.Path.Path,
+                "描边颜色输入绑定");
+            True(ReferenceEquals(shell.ImageOutline.BatchItems, outlineBatchDataGrid.ItemsSource),
+                "批处理表格应绑定图片描边队列");
+            True(ReferenceEquals(shell.ImageOutline.ProcessCommand, outlineProcessButton.Command),
+                "单图执行按钮应绑定图片描边命令");
+            True(ReferenceEquals(shell.ImageOutline.ProcessBatchCommand, outlineBatchProcessButton.Command),
+                "批量执行按钮应绑定批量描边命令");
+
+            var backgroundRemovalHost = backgroundRemoval.Content as ContentControl
+                ?? throw new SmokeTestException("背景剔除工具缺少稳定 ContentControl host。");
+            var backgroundRemovalView = backgroundRemovalHost.Content as BackgroundRemovalView
+                ?? throw new SmokeTestException("背景剔除工具 host 未承载 BackgroundRemovalView。");
+            var fakeTransparencyCheckBox = RequireNamedElement<CheckBox>(
+                backgroundRemovalView,
+                "BackgroundRemovalFakeTransparencyCheckBox",
+                "背景剔除工具缺少假透明网格开关。");
+            var checkerColorA = RequireNamedElement<TextBox>(
+                backgroundRemovalView,
+                "BackgroundRemovalCheckerColorATextBox",
+                "背景剔除工具缺少网格颜色 A。");
+            var checkerColorB = RequireNamedElement<TextBox>(
+                backgroundRemovalView,
+                "BackgroundRemovalCheckerColorBTextBox",
+                "背景剔除工具缺少网格颜色 B。");
+            var checkerOverlay = RequireNamedElement<CheckerGridOverlay>(
+                backgroundRemovalView,
+                "BackgroundRemovalCheckerGridOverlay",
+                "背景剔除工具缺少可视网格对齐叠加层。");
+            Equal(nameof(BackgroundRemovalViewModel.UseFakeTransparencyGrid),
+                BindingOperations.GetBindingExpression(fakeTransparencyCheckBox, ToggleButton.IsCheckedProperty)?.ParentBinding.Path.Path,
+                "假透明网格开关绑定");
+            Equal(nameof(BackgroundRemovalViewModel.CheckerColorAHex),
+                BindingOperations.GetBindingExpression(checkerColorA, TextBox.TextProperty)?.ParentBinding.Path.Path,
+                "网格颜色 A 绑定");
+            Equal(nameof(BackgroundRemovalViewModel.CheckerColorBHex),
+                BindingOperations.GetBindingExpression(checkerColorB, TextBox.TextProperty)?.ParentBinding.Path.Path,
+                "网格颜色 B 绑定");
+            Equal(nameof(BackgroundRemovalViewModel.CheckerCellSize),
+                BindingOperations.GetBindingExpression(checkerOverlay, CheckerGridOverlay.CellSizeProperty)?.ParentBinding.Path.Path,
+                "网格对齐叠加层尺寸绑定");
+            Equal(nameof(BackgroundRemovalViewModel.SourcePixelWidth),
+                BindingOperations.GetBindingExpression(checkerOverlay, CheckerGridOverlay.SourcePixelWidthProperty)?.ParentBinding.Path.Path,
+                "网格对齐叠加层源图宽度绑定");
+            Equal(nameof(BackgroundRemovalViewModel.SourcePixelHeight),
+                BindingOperations.GetBindingExpression(checkerOverlay, CheckerGridOverlay.SourcePixelHeightProperty)?.ParentBinding.Path.Path,
+                "网格对齐叠加层源图高度绑定");
 
             var commandConsole = FindDockContent(manager, MainWindow.CommandConsoleContentId) as LayoutAnchorable
                 ?? throw new SmokeTestException("停靠交互测试未找到指令日志面板。");
@@ -1287,6 +1400,7 @@ internal static class Program
                 [MainWindow.StyleLibraryContentId] = NewPanelHost(),
                 [MainWindow.AssetGenerationContentId] = NewPanelHost(),
                 [MainWindow.BackgroundRemovalContentId] = NewPanelHost(),
+                [MainWindow.ImageOutlineContentId] = NewPanelHost(),
                 [MainWindow.PixelAlignmentContentId] = NewPanelHost(),
                 [MainWindow.BlueprintContentId] = NewPanelHost(),
                 [MainWindow.AgentConnectionContentId] = NewPanelHost(),
@@ -4623,6 +4737,7 @@ internal static class Program
                 [MainWindow.StyleLibraryContentId] = NewPanelHost(),
                 [MainWindow.AssetGenerationContentId] = NewPanelHost(),
                 [MainWindow.BackgroundRemovalContentId] = NewPanelHost(),
+                [MainWindow.ImageOutlineContentId] = NewPanelHost(),
                 [MainWindow.PixelAlignmentContentId] = NewPanelHost(),
                 [MainWindow.BlueprintContentId] = NewPanelHost(),
                 [MainWindow.AgentConnectionContentId] = NewPanelHost(),
@@ -4663,20 +4778,20 @@ internal static class Program
                  FindDockContent(optionalManager, MainWindow.ParallelPerspectiveWorkspaceContentId) is LayoutDocument,
                 "关闭一个业务文档不得影响其它业务文档的布局恢复");
 
-            var revisionTenLayout = File.ReadAllText(paths.LayoutPath);
-            var revisionNineLayout = revisionTenLayout.Replace(
+            var revisionElevenLayout = File.ReadAllText(paths.LayoutPath);
+            var revisionTenLayout = revisionElevenLayout.Replace(
+                "\"presetRevision\": 11",
                 "\"presetRevision\": 10",
-                "\"presetRevision\": 9",
                 StringComparison.Ordinal);
-            False(string.Equals(revisionTenLayout, revisionNineLayout, StringComparison.Ordinal),
+            False(string.Equals(revisionElevenLayout, revisionTenLayout, StringComparison.Ordinal),
                 "布局迁移测试必须真实降级 presetRevision");
-            File.WriteAllText(paths.LayoutPath, revisionNineLayout);
-            var revisionNineManager = new DockingManager();
-            False(layoutService.TryRestore(revisionNineManager, restoredContent),
-                "单一主画布的 rev9 布局应回退到多业务文档 rev10 默认布局");
+            File.WriteAllText(paths.LayoutPath, revisionTenLayout);
+            var revisionTenManager = new DockingManager();
+            False(layoutService.TryRestore(revisionTenManager, restoredContent),
+                "缺少图片描边工具的 rev10 布局应回退到 rev11 默认布局");
             Equal("default", layoutService.LastRecoverySource,
                 "旧布局版本应明确标记为默认布局回退");
-            File.WriteAllText(paths.LayoutPath, revisionTenLayout);
+            File.WriteAllText(paths.LayoutPath, revisionElevenLayout);
             layoutService = new AvalonDockLayoutService(paths);
 
             layoutService.Save(sourceManager);
@@ -5465,6 +5580,7 @@ internal static class Program
             MainWindow.StyleLibraryContentId,
             MainWindow.AssetGenerationContentId,
             MainWindow.BackgroundRemovalContentId,
+            MainWindow.ImageOutlineContentId,
             MainWindow.PixelAlignmentContentId,
             MainWindow.BlueprintContentId,
             MainWindow.AgentConnectionContentId,
@@ -5538,6 +5654,7 @@ internal static class Program
         AssertPaneContains(center.Children[2], MainWindow.StyleLibraryContentId, "下方美术风格素材库区");
         AssertPaneContains(center.Children[2], MainWindow.AssetGenerationContentId, "下方素材生成区");
         AssertPaneContains(center.Children[2], MainWindow.BackgroundRemovalContentId, "下方背景剔除工具区");
+        AssertPaneContains(center.Children[2], MainWindow.ImageOutlineContentId, "下方图片描边工具区");
         AssertPaneContains(center.Children[2], MainWindow.PixelAlignmentContentId, "下方像素点对齐工具区");
         AssertPaneContains(center.Children[2], MainWindow.BlueprintContentId, "下方蓝图窗口区");
         AssertPaneContains(center.Children[2], MainWindow.CommandConsoleContentId, "下方指令日志区");

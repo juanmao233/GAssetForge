@@ -332,6 +332,11 @@
                           IsCheckable="True"
                           Command="{Binding TogglePanelCommand}"
                           CommandParameter="background-removal" />
+                <MenuItem x:Name="ShowImageOutlineMenuItem"
+                          Header="图片描边工具"
+                          IsCheckable="True"
+                          Command="{Binding TogglePanelCommand}"
+                          CommandParameter="image-outline" />
                 <MenuItem x:Name="ShowPixelAlignmentMenuItem"
                           Header="像素点对齐工具"
                           IsCheckable="True"

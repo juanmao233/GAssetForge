@@ -144,6 +144,14 @@ public sealed class ShellViewModel : ObservableObject
             _settings.BackgroundRemovalEdgeFeather,
             _settings.BackgroundRemovalDespill,
             _settings.BackgroundRemovalEdgeConnectedOnly,
+            _settings.BackgroundRemovalUseFakeTransparencyGrid,
+            _settings.BackgroundRemovalCheckerColorAHex,
+            _settings.BackgroundRemovalCheckerColorBHex,
+            _settings.BackgroundRemovalEnableCheckerGridAlignment,
+            _settings.BackgroundRemovalCheckerCellSize,
+            _settings.BackgroundRemovalCheckerOffsetX,
+            _settings.BackgroundRemovalCheckerOffsetY,
+            _settings.BackgroundRemovalCheckerBoundaryTolerance,
             _settings.BackgroundRemovalLastInputDirectory,
             _settings.BackgroundRemovalLastOutputDirectory,
             _workbenchConsoleService);
@@ -170,6 +178,19 @@ public sealed class ShellViewModel : ObservableObject
             lastOutputDirectory: _settings.PixelAlignmentLastOutputDirectory,
             workbenchLogSink: _workbenchConsoleService);
         PixelAlignment.SettingsChanged += OnPixelAlignmentSettingsChanged;
+        ImageOutline = new ImageOutlineViewModel(
+            new ImageSharpImageOutlineService(),
+            new DesktopImageOutlineInputPicker(),
+            new DesktopImageOutlineOutputPicker(),
+            _settings.ImageOutlinePlacement,
+            _settings.ImageOutlineWidth,
+            _settings.ImageOutlineColorHex,
+            _settings.ImageOutlineAlphaThreshold,
+            _settings.ImageOutlineExpandCanvas,
+            _settings.ImageOutlineLastInputDirectory,
+            _settings.ImageOutlineLastOutputDirectory,
+            _workbenchConsoleService);
+        ImageOutline.SettingsChanged += OnImageOutlineSettingsChanged;
         var configuredAssetRoot = _currentProject?.Paths.AssetDirectory ?? _settings.AssetRootPath;
         var configuredCurrentPath = _currentProject is null
             ? _settings.AssetCurrentPath
@@ -327,6 +348,8 @@ public sealed class ShellViewModel : ObservableObject
     public BackgroundRemovalViewModel BackgroundRemoval { get; }
 
     public PixelAlignmentViewModel PixelAlignment { get; }
+
+    public ImageOutlineViewModel ImageOutline { get; }
 
     public AgentConnectionViewModel AgentConnection { get; }
 
@@ -945,6 +968,7 @@ public sealed class ShellViewModel : ObservableObject
             AssetGeneration.SettingsChanged -= OnAssetGenerationSettingsChanged;
             BackgroundRemoval.SettingsChanged -= OnBackgroundRemovalSettingsChanged;
             PixelAlignment.SettingsChanged -= OnPixelAlignmentSettingsChanged;
+            ImageOutline.SettingsChanged -= OnImageOutlineSettingsChanged;
             AssetGeneration.StyleLibraryRequested -= OnAssetGenerationStyleLibraryRequested;
             AssetGeneration.AgentConnectionRequested -= OnAssetGenerationAgentConnectionRequested;
             AssetGeneration.BackgroundRemovalRequested -= OnAssetGenerationBackgroundRemovalRequested;
@@ -963,6 +987,7 @@ public sealed class ShellViewModel : ObservableObject
             CaptureAssetGenerationSettings();
             ApplyBackgroundRemovalSettings(BackgroundRemoval.CaptureSettings());
             ApplyPixelAlignmentSettings(PixelAlignment.CaptureSettings());
+            ApplyImageOutlineSettings(ImageOutline.CaptureSettings());
             CaptureTilemapSettings();
             if (_currentProject is not null)
             {
@@ -1715,6 +1740,14 @@ public sealed class ShellViewModel : ObservableObject
         _settings.BackgroundRemovalEdgeFeather = settings.EdgeFeather;
         _settings.BackgroundRemovalDespill = settings.Despill;
         _settings.BackgroundRemovalEdgeConnectedOnly = settings.EdgeConnectedOnly;
+        _settings.BackgroundRemovalUseFakeTransparencyGrid = settings.UseFakeTransparencyGrid;
+        _settings.BackgroundRemovalCheckerColorAHex = settings.CheckerColorAHex;
+        _settings.BackgroundRemovalCheckerColorBHex = settings.CheckerColorBHex;
+        _settings.BackgroundRemovalEnableCheckerGridAlignment = settings.EnableCheckerGridAlignment;
+        _settings.BackgroundRemovalCheckerCellSize = settings.CheckerCellSize;
+        _settings.BackgroundRemovalCheckerOffsetX = settings.CheckerOffsetX;
+        _settings.BackgroundRemovalCheckerOffsetY = settings.CheckerOffsetY;
+        _settings.BackgroundRemovalCheckerBoundaryTolerance = settings.CheckerBoundaryTolerance;
         _settings.BackgroundRemovalLastInputDirectory = settings.LastInputDirectory;
         _settings.BackgroundRemovalLastOutputDirectory = settings.LastOutputDirectory;
     }
@@ -1747,6 +1780,25 @@ public sealed class ShellViewModel : ObservableObject
         _settings.PixelAlignmentLastOutputDirectory = settings.LastOutputDirectory;
     }
 
+    private void OnImageOutlineSettingsChanged(
+        object? sender,
+        ImageOutlineSettingsChangedEventArgs e)
+    {
+        ApplyImageOutlineSettings(e.Settings);
+        SaveSettings();
+    }
+
+    private void ApplyImageOutlineSettings(ImageOutlineToolSettingsSnapshot settings)
+    {
+        _settings.ImageOutlinePlacement = settings.Placement;
+        _settings.ImageOutlineWidth = settings.Width;
+        _settings.ImageOutlineColorHex = settings.ColorHex;
+        _settings.ImageOutlineAlphaThreshold = settings.AlphaThreshold;
+        _settings.ImageOutlineExpandCanvas = settings.ExpandCanvas;
+        _settings.ImageOutlineLastInputDirectory = settings.LastInputDirectory;
+        _settings.ImageOutlineLastOutputDirectory = settings.LastOutputDirectory;
+    }
+
     private void OnAssetGenerationStyleLibraryRequested(object? sender, EventArgs e) =>
         PanelShowRequested?.Invoke(this, "art-style-library");
 
@@ -1777,7 +1829,7 @@ public sealed class ShellViewModel : ObservableObject
             "state");
         CommandConsole.RegisterCommand(
             "show",
-            "show <console|project|generation|background|pixel|blueprint|agent|style|tools|canvas|properties|layers>",
+            "show <console|project|generation|background|outline|pixel|blueprint|agent|style|tools|canvas|properties|layers>",
             "拉起并聚焦指定的 AvalonDock 停靠页。",
             HandleConsoleShowAsync,
             "panel.show");
@@ -1828,7 +1880,7 @@ public sealed class ShellViewModel : ObservableObject
             !TryResolveConsolePanel(invocation.Arguments[0], out var contentId, out var title))
         {
             return ConsoleResult(CommandConsoleResult.Failure(
-                "用法：show <console|project|generation|background|pixel|blueprint|agent|style|tools|canvas|properties|layers>"));
+                "用法：show <console|project|generation|background|outline|pixel|blueprint|agent|style|tools|canvas|properties|layers>"));
         }
 
         PanelShowRequested?.Invoke(this, contentId);
@@ -1978,6 +2030,8 @@ public sealed class ShellViewModel : ObservableObject
             "generation" or "gen" or "素材生成" => ("asset-generation", "素材生成"),
             "background" or "chroma" or "cutout" or "抠图" or "背景剔除" =>
                 ("background-removal", "背景剔除工具"),
+            "outline" or "stroke" or "描边" or "图片描边" =>
+                ("image-outline", "图片描边工具"),
             "pixel" or "pixel-grid" or "像素对齐" or "像素点对齐" =>
                 ("pixel-grid-alignment", "像素点对齐工具"),
             "blueprint" or "graph" or "蓝图" => ("workflow-blueprint", "蓝图窗口"),

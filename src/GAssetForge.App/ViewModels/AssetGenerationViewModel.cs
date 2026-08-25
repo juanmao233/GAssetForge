@@ -894,7 +894,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                                   SelectedGenerationStep.Key == TilemapConstraintPackageBuilder.WorkflowId &&
                                   DraftRows.Count > 0 &&
                                   DraftRows.All(row => row.IsValid) &&
-                                  BackgroundRemoval.IsConfigurationValid &&
+                                  BackgroundRemoval.IsGenerationConfigurationValid &&
                                   TotalRequestedCount is >= 1 and <= MaximumBatchOutputCount;
 
     public bool CanStartGeneration => CanCreateTask && IsAgentConnected;
@@ -3716,9 +3716,9 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             return "请至少添加一行需要生成的物品。";
         }
 
-        if (!BackgroundRemoval.IsConfigurationValid)
+        if (!BackgroundRemoval.IsGenerationConfigurationValid)
         {
-            return $"背景剔除参数无效：{BackgroundRemoval.ConfigurationValidationText}";
+            return $"背景剔除参数无效：{BackgroundRemoval.GenerationConfigurationValidationText}";
         }
 
         var invalidIndex = DraftRows
@@ -3800,9 +3800,9 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             return "请至少添加一行需要生成的物品";
         }
 
-        if (!BackgroundRemoval.IsConfigurationValid)
+        if (!BackgroundRemoval.IsGenerationConfigurationValid)
         {
-            return $"背景剔除参数无效：{BackgroundRemoval.ConfigurationValidationText}";
+            return $"背景剔除参数无效：{BackgroundRemoval.GenerationConfigurationValidationText}";
         }
 
         var invalid = DraftRows
@@ -4195,7 +4195,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             nameof(BackgroundRemovalViewModel.EdgeFeather) or
             nameof(BackgroundRemovalViewModel.Despill) or
             nameof(BackgroundRemovalViewModel.EdgeConnectedOnly) or
-            nameof(BackgroundRemovalViewModel.IsConfigurationValid))
+            nameof(BackgroundRemovalViewModel.IsGenerationConfigurationValid))
         {
             RefreshDerivedState();
         }

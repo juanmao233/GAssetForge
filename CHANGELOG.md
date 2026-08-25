@@ -5,6 +5,27 @@ development track; versioning policy will be finalized before the first public r
 
 ## Unreleased
 
+## 1.0.8t1 - 2026-08-25
+
+### Added
+
+- Added a dockable Image Outline tool with outside, inside, and centered Alpha-based strokes, configurable
+  1–128 px width, arbitrary `#RRGGBB` color, Alpha noise threshold, optional canvas expansion, transparent
+  before/after previews, and deterministic atomic PNG output.
+- Added Image Outline batch processing for up to 256 images with a shared output directory, per-item status,
+  aggregate progress, failure isolation, collision-safe filenames, and immediate preview of the latest result.
+- Added fake-transparency checkerboard removal to the Background Removal tool. Users can select two checker
+  colors and optionally align a square grid by cell size, X/Y offset, and boundary tolerance while a live
+  overlay shows the expected grid over the source image.
+
+### Changed
+
+- Background removal now supports per-pixel checkerboard key selection and despill while preserving the old
+  single-color path. The AI generation contract still uses the stable solid-color first stage; checkerboard
+  recovery remains an explicit local fallback for rasterized fake transparency.
+- Registered the Image Outline tool as a persistent AvalonDock panel, View menu item, console `show outline`
+  target, and user-settings-backed single-instance tool page.
+
 ## 1.0.7t1 - 2026-08-25
 
 ### Changed

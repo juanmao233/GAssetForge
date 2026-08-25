@@ -28,6 +28,14 @@ public sealed record BackgroundRemovalToolSettingsSnapshot(
     int EdgeFeather,
     bool Despill,
     bool EdgeConnectedOnly,
+    bool UseFakeTransparencyGrid,
+    string CheckerColorAHex,
+    string CheckerColorBHex,
+    bool EnableCheckerGridAlignment,
+    int CheckerCellSize,
+    int CheckerOffsetX,
+    int CheckerOffsetY,
+    int CheckerBoundaryTolerance,
     string? LastInputDirectory,
     string? LastOutputDirectory);
 
@@ -64,6 +72,7 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
     private readonly RelayCommand _chooseOutputCommand;
     private readonly AsyncRelayCommand _processCommand;
     private readonly RelayCommand _openOutputDirectoryCommand;
+    private readonly RelayCommand _swapCheckerColorsCommand;
     private BackgroundRemovalPresetOption _selectedPreset;
     private string _customColorHex;
     private double _transparentThreshold;
@@ -72,7 +81,17 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
     private int _edgeFeather;
     private bool _despill;
     private bool _edgeConnectedOnly;
+    private bool _useFakeTransparencyGrid;
+    private string _checkerColorAHex;
+    private string _checkerColorBHex;
+    private bool _enableCheckerGridAlignment;
+    private int _checkerCellSize;
+    private int _checkerOffsetX;
+    private int _checkerOffsetY;
+    private int _checkerBoundaryTolerance;
     private string _inputPath = string.Empty;
+    private int _sourcePixelWidth;
+    private int _sourcePixelHeight;
     private string _outputPath = string.Empty;
     private string _outputPreviewPath = string.Empty;
     private string? _lastInputDirectory;
@@ -94,6 +113,14 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         int edgeFeather = 0,
         bool despill = true,
         bool edgeConnectedOnly = true,
+        bool useFakeTransparencyGrid = false,
+        string? checkerColorAHex = null,
+        string? checkerColorBHex = null,
+        bool enableCheckerGridAlignment = true,
+        int checkerCellSize = 16,
+        int checkerOffsetX = 0,
+        int checkerOffsetY = 0,
+        int checkerBoundaryTolerance = 1,
         string? lastInputDirectory = null,
         string? lastOutputDirectory = null,
         IWorkbenchLogSink? workbenchLogSink = null)
@@ -111,6 +138,14 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         _edgeFeather = Math.Clamp(edgeFeather, 0, 2);
         _despill = despill;
         _edgeConnectedOnly = edgeConnectedOnly;
+        _useFakeTransparencyGrid = useFakeTransparencyGrid;
+        _checkerColorAHex = NormalizeInitialCustomColor(checkerColorAHex ?? "#FFFFFF");
+        _checkerColorBHex = NormalizeInitialCustomColor(checkerColorBHex ?? "#CCCCCC");
+        _enableCheckerGridAlignment = enableCheckerGridAlignment;
+        _checkerCellSize = Math.Clamp(checkerCellSize, 2, 512);
+        _checkerOffsetX = NormalizeCheckerOffset(checkerOffsetX, _checkerCellSize);
+        _checkerOffsetY = NormalizeCheckerOffset(checkerOffsetY, _checkerCellSize);
+        _checkerBoundaryTolerance = Math.Clamp(checkerBoundaryTolerance, 0, 8);
         _lastInputDirectory = NormalizeExistingDirectory(lastInputDirectory);
         _lastOutputDirectory = NormalizeExistingDirectory(lastOutputDirectory);
 
@@ -118,10 +153,12 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         _chooseOutputCommand = new RelayCommand(ChooseOutput, () => !IsBusy && HasInput);
         _processCommand = new AsyncRelayCommand(ProcessAsync, () => CanProcess);
         _openOutputDirectoryCommand = new RelayCommand(OpenOutputDirectory, () => HasOutputPreview);
+        _swapCheckerColorsCommand = new RelayCommand(SwapCheckerColors, () => !IsBusy);
         ChooseInputCommand = _chooseInputCommand;
         ChooseOutputCommand = _chooseOutputCommand;
         ProcessCommand = _processCommand;
         OpenOutputDirectoryCommand = _openOutputDirectoryCommand;
+        SwapCheckerColorsCommand = _swapCheckerColorsCommand;
         _suppressSettingsChanged = false;
     }
 
@@ -275,6 +312,150 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         }
     }
 
+    public bool UseFakeTransparencyGrid
+    {
+        get => _useFakeTransparencyGrid;
+        set
+        {
+            if (!SetProperty(ref _useFakeTransparencyGrid, value))
+            {
+                return;
+            }
+
+            OnPropertyChanged(nameof(IsSolidColorMode));
+            OnPropertyChanged(nameof(BackgroundModeText));
+            OnPropertyChanged(nameof(CheckerAlignmentSummary));
+            OnPropertyChanged(nameof(ShowCheckerGridOverlay));
+            RefreshValidationAndCommands();
+            NotifySettingsChanged();
+        }
+    }
+
+    public bool IsSolidColorMode => !UseFakeTransparencyGrid;
+
+    public string BackgroundModeText => UseFakeTransparencyGrid
+        ? "假透明棋盘格：按两种背景色恢复 Alpha；这是无法获得真实透明源文件时的本地兜底。"
+        : "纯色色键：按所选单一底色恢复 Alpha，也是素材生成首道底色使用的稳定模式。";
+
+    public string CheckerColorAHex
+    {
+        get => _checkerColorAHex;
+        set
+        {
+            value ??= string.Empty;
+            if (SetProperty(ref _checkerColorAHex, value))
+            {
+                OnPropertyChanged(nameof(EffectiveCheckerColorAHex));
+                RefreshValidationAndCommands();
+                NotifySettingsChanged();
+            }
+        }
+    }
+
+    public string CheckerColorBHex
+    {
+        get => _checkerColorBHex;
+        set
+        {
+            value ??= string.Empty;
+            if (SetProperty(ref _checkerColorBHex, value))
+            {
+                OnPropertyChanged(nameof(EffectiveCheckerColorBHex));
+                RefreshValidationAndCommands();
+                NotifySettingsChanged();
+            }
+        }
+    }
+
+    public string EffectiveCheckerColorAHex => ResolveDisplayColor(CheckerColorAHex);
+
+    public string EffectiveCheckerColorBHex => ResolveDisplayColor(CheckerColorBHex);
+
+    public bool EnableCheckerGridAlignment
+    {
+        get => _enableCheckerGridAlignment;
+        set
+        {
+            if (SetProperty(ref _enableCheckerGridAlignment, value))
+            {
+                OnPropertyChanged(nameof(CheckerAlignmentSummary));
+                OnPropertyChanged(nameof(ShowCheckerGridOverlay));
+                NotifySettingsChanged();
+            }
+        }
+    }
+
+    public int CheckerCellSize
+    {
+        get => _checkerCellSize;
+        set
+        {
+            var normalized = Math.Clamp(value, 2, 512);
+            if (!SetProperty(ref _checkerCellSize, normalized))
+            {
+                return;
+            }
+
+            CheckerOffsetX = NormalizeCheckerOffset(CheckerOffsetX, normalized);
+            CheckerOffsetY = NormalizeCheckerOffset(CheckerOffsetY, normalized);
+            OnPropertyChanged(nameof(CheckerOffsetMaximum));
+            OnPropertyChanged(nameof(CheckerAlignmentSummary));
+            RefreshValidationAndCommands();
+            NotifySettingsChanged();
+        }
+    }
+
+    public int CheckerOffsetMaximum => Math.Max(1, CheckerCellSize - 1);
+
+    public int CheckerOffsetX
+    {
+        get => _checkerOffsetX;
+        set
+        {
+            var normalized = NormalizeCheckerOffset(value, CheckerCellSize);
+            if (SetProperty(ref _checkerOffsetX, normalized))
+            {
+                OnPropertyChanged(nameof(CheckerAlignmentSummary));
+                NotifySettingsChanged();
+            }
+        }
+    }
+
+    public int CheckerOffsetY
+    {
+        get => _checkerOffsetY;
+        set
+        {
+            var normalized = NormalizeCheckerOffset(value, CheckerCellSize);
+            if (SetProperty(ref _checkerOffsetY, normalized))
+            {
+                OnPropertyChanged(nameof(CheckerAlignmentSummary));
+                NotifySettingsChanged();
+            }
+        }
+    }
+
+    public int CheckerBoundaryTolerance
+    {
+        get => _checkerBoundaryTolerance;
+        set
+        {
+            var normalized = Math.Clamp(value, 0, 8);
+            if (SetProperty(ref _checkerBoundaryTolerance, normalized))
+            {
+                OnPropertyChanged(nameof(CheckerAlignmentSummary));
+                RefreshValidationAndCommands();
+                NotifySettingsChanged();
+            }
+        }
+    }
+
+    public string CheckerAlignmentSummary => EnableCheckerGridAlignment
+        ? $"按 {CheckerCellSize}px 方格、偏移 ({CheckerOffsetX},{CheckerOffsetY}) 对齐；格线 ±{CheckerBoundaryTolerance}px 内允许匹配任一底色。"
+        : "关闭网格对齐后，任意位置只要接近两种底色之一就会进入剔除候选，误删风险更高。";
+
+    public bool ShowCheckerGridOverlay => UseFakeTransparencyGrid && EnableCheckerGridAlignment;
+
     public string InputPath
     {
         get => _inputPath;
@@ -294,6 +475,18 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
     public string InputFileName => HasInput ? Path.GetFileName(InputPath) : "尚未选择输入图片";
 
     public bool HasInput => File.Exists(InputPath);
+
+    public int SourcePixelWidth
+    {
+        get => _sourcePixelWidth;
+        private set => SetProperty(ref _sourcePixelWidth, value);
+    }
+
+    public int SourcePixelHeight
+    {
+        get => _sourcePixelHeight;
+        private set => SetProperty(ref _sourcePixelHeight, value);
+    }
 
     public string OutputPath
     {
@@ -365,8 +558,16 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
 
     public bool IsConfigurationValid => TryBuildSettings(out _, out _);
 
+    public bool IsGenerationConfigurationValid => TryBuildSolidColorSettings(out _, out _);
+
     public string ConfigurationValidationText => TryBuildSettings(out _, out var reason)
-        ? "参数有效；最终输出保持原图尺寸并写入真实 Alpha。"
+        ? UseFakeTransparencyGrid
+            ? "参数有效；将按双颜色棋盘格恢复 Alpha。单幅合成图无法精确还原原始半透明前景，边缘为近似恢复。"
+            : "参数有效；最终输出保持原图尺寸并写入真实 Alpha。"
+        : reason;
+
+    public string GenerationConfigurationValidationText => TryBuildSolidColorSettings(out _, out var reason)
+        ? "素材生成继续使用所选纯色底；假透明棋盘格仅作为独立工具兜底。"
         : reason;
 
     public ICommand ChooseInputCommand { get; }
@@ -376,6 +577,8 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
     public ICommand ProcessCommand { get; }
 
     public ICommand OpenOutputDirectoryCommand { get; }
+
+    public ICommand SwapCheckerColorsCommand { get; }
 
     private void ChooseInput()
     {
@@ -394,6 +597,7 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
                 return;
             }
 
+            UpdateSourcePixelDimensions(normalized);
             InputPath = normalized;
             _lastInputDirectory = Path.GetDirectoryName(normalized);
             OutputPath = string.Empty;
@@ -405,6 +609,34 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         catch (Exception exception) when (IsExpectedOperationException(exception))
         {
             StatusText = $"无法选择输入图片：{exception.Message}";
+        }
+    }
+
+    private void UpdateSourcePixelDimensions(string path)
+    {
+        SourcePixelWidth = 0;
+        SourcePixelHeight = 0;
+
+        try
+        {
+            using var stream = new FileStream(
+                path,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            var imageInfo = Image.Identify(stream);
+            if (imageInfo is null || imageInfo.Width <= 0 || imageInfo.Height <= 0)
+            {
+                return;
+            }
+
+            SourcePixelWidth = imageInfo.Width;
+            SourcePixelHeight = imageInfo.Height;
+        }
+        catch (Exception exception) when (IsExpectedOperationException(exception))
+        {
+            // Dimension lookup only improves the alignment overlay. Keep the selected
+            // file so the normal processing path can report a precise decode error.
         }
     }
 
@@ -456,12 +688,15 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         var inputPath = InputPath;
         var outputPath = OutputPath;
         IsBusy = true;
-        StatusText = $"正在使用 {settings.KeyColorHex} 剔除背景…";
+        var modeText = settings.UseFakeTransparencyGrid
+            ? $"假透明棋盘格 {settings.CheckerColorAHex} / {settings.CheckerColorBHex}"
+            : $"纯色 {settings.KeyColorHex}";
+        StatusText = $"正在使用{modeText}剔除背景…";
         OutputPreviewPath = string.Empty;
         _workbenchLogSink?.Write(
             WorkbenchLogLevel.Information,
             LogSource,
-            $"开始背景剔除：{Path.GetFileName(inputPath)} · 底色 {settings.KeyColorHex} · 输出 {outputPath}");
+            $"开始背景剔除：{Path.GetFileName(inputPath)} · {modeText} · 输出 {outputPath}");
         try
         {
             var result = await Task.Run(() =>
@@ -514,7 +749,72 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         }
     }
 
+    private void SwapCheckerColors()
+    {
+        var colorA = CheckerColorAHex;
+        CheckerColorAHex = CheckerColorBHex;
+        CheckerColorBHex = colorA;
+        StatusText = "已交换假透明网格的 A/B 颜色相位。";
+    }
+
     private bool TryBuildSettings(out BackgroundRemovalSettings settings, out string reason)
+    {
+        if (!TryBuildSolidColorSettings(out settings, out reason))
+        {
+            return false;
+        }
+
+        if (!UseFakeTransparencyGrid)
+        {
+            return true;
+        }
+
+        string checkerColorA;
+        string checkerColorB;
+        try
+        {
+            checkerColorA = BackgroundKeyColor.NormalizeHex(CheckerColorAHex);
+            checkerColorB = BackgroundKeyColor.NormalizeHex(CheckerColorBHex);
+        }
+        catch (ArgumentException exception)
+        {
+            reason = exception.Message;
+            return false;
+        }
+
+        if (string.Equals(checkerColorA, checkerColorB, StringComparison.Ordinal))
+        {
+            reason = "假透明网格的两种颜色不能相同。";
+            return false;
+        }
+
+        if (CheckerCellSize is < 2 or > 512)
+        {
+            reason = "假透明网格尺寸必须位于 2 到 512 像素之间。";
+            return false;
+        }
+
+        if (CheckerBoundaryTolerance is < 0 or > 8)
+        {
+            reason = "网格边界容差必须位于 0 到 8 像素之间。";
+            return false;
+        }
+
+        settings = settings with
+        {
+            UseFakeTransparencyGrid = true,
+            CheckerColorAHex = checkerColorA,
+            CheckerColorBHex = checkerColorB,
+            EnableCheckerGridAlignment = EnableCheckerGridAlignment,
+            CheckerCellSize = CheckerCellSize,
+            CheckerOffsetX = CheckerOffsetX,
+            CheckerOffsetY = CheckerOffsetY,
+            CheckerBoundaryTolerance = CheckerBoundaryTolerance
+        };
+        return true;
+    }
+
+    private bool TryBuildSolidColorSettings(out BackgroundRemovalSettings settings, out string reason)
     {
         settings = new BackgroundRemovalSettings();
         reason = string.Empty;
@@ -555,7 +855,9 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
     private void RefreshValidationAndCommands()
     {
         OnPropertyChanged(nameof(IsConfigurationValid));
+        OnPropertyChanged(nameof(IsGenerationConfigurationValid));
         OnPropertyChanged(nameof(ConfigurationValidationText));
+        OnPropertyChanged(nameof(GenerationConfigurationValidationText));
         OnPropertyChanged(nameof(CanProcess));
         RaiseCommandStates();
     }
@@ -566,6 +868,7 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         _chooseOutputCommand.RaiseCanExecuteChanged();
         _processCommand.RaiseCanExecuteChanged();
         _openOutputDirectoryCommand.RaiseCanExecuteChanged();
+        _swapCheckerColorsCommand.RaiseCanExecuteChanged();
     }
 
     private void NotifySettingsChanged()
@@ -587,12 +890,20 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         EdgeFeather,
         Despill,
         EdgeConnectedOnly,
+        UseFakeTransparencyGrid,
+        CheckerColorAHex,
+        CheckerColorBHex,
+        EnableCheckerGridAlignment,
+        CheckerCellSize,
+        CheckerOffsetX,
+        CheckerOffsetY,
+        CheckerBoundaryTolerance,
         _lastInputDirectory,
         _lastOutputDirectory);
 
     public GenerationBackgroundRemovalSpec CreateGenerationSpec()
     {
-        if (!TryBuildSettings(out var settings, out var reason))
+        if (!TryBuildSolidColorSettings(out var settings, out var reason))
         {
             throw new InvalidOperationException(reason);
         }
@@ -630,6 +941,25 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         {
             return BackgroundKeyColor.DefaultCustomColorHex;
         }
+    }
+
+    private static string ResolveDisplayColor(string colorHex)
+    {
+        try
+        {
+            return BackgroundKeyColor.NormalizeHex(colorHex);
+        }
+        catch (ArgumentException)
+        {
+            return "#00000000";
+        }
+    }
+
+    private static int NormalizeCheckerOffset(int value, int cellSize)
+    {
+        var normalizedCellSize = Math.Clamp(cellSize, 2, 512);
+        var remainder = value % normalizedCellSize;
+        return remainder < 0 ? remainder + normalizedCellSize : remainder;
     }
 
     private static (double Transparent, double Opaque) NormalizeInitialThresholds(
