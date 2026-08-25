@@ -47,11 +47,13 @@ internal static class PixelAlignmentSmokeTests
             LargeMutuallyPrimeCustomGridUsesVirtualWorkingCoordinates(testRoot);
             CropRulersAndDominantSamplingProduceTheLogicalGrid(testRoot);
             AverageSamplingUsesAlphaAwareColor(testRoot);
+            AutomaticColorIndexCreatesPalettePngAndPreservesTransparency(testRoot);
             DominantSamplingRejectsUnboundedHighEntropyCells(testRoot);
             JpegInputCanBeInspectedAndExportedAsPng(testRoot);
             ResourceLimitsRejectUnsafeGridAndWorkingSizes(testRoot);
             ExistingOutputsAreProtectedAndTemporaryFilesAreRemoved(testRoot);
             ViewModelBuildsTheCompatiblePlanAndWritesTheConfiguredOutput(testRoot);
+            ViewModelBatchProcessingMapsDifferentSizesAndContinuesAfterFailure(testRoot);
             ViewModelKeepsIndependentGridAndSafelySynchronizesAspectRatio(testRoot);
             ViewBindsCommandsParametersAndTheInteractiveSurface(testRoot);
             ShellLoadsAndPersistsToolPreferencesWithoutCropBounds(testRoot);
@@ -580,6 +582,117 @@ internal static class PixelAlignmentSmokeTests
         Equal((byte)128, output[0, 0].A, "平均采样应保留覆盖 Alpha");
     }
 
+    private static void AutomaticColorIndexCreatesPalettePngAndPreservesTransparency(string testRoot)
+    {
+        var defaults = new PixelAlignmentSettings().ColorIndex;
+        Equal(PixelColorIndexMode.Automatic, defaults.Mode, "颜色索引默认应启用自动模式");
+        Equal(256, defaults.MaximumColors, "自动颜色索引默认上限应为 256 色");
+
+        var lowColorInput = Path.Combine(testRoot, "indexed-low-color-input.png");
+        var lowColorOutput = Path.Combine(testRoot, "indexed-low-color-output.png");
+        using (var source = new Image<Rgba32>(2, 2))
+        {
+            source[0, 0] = new Rgba32(255, 0, 0, 0);
+            source[1, 0] = new Rgba32(0, 0, 255, 0);
+            source[0, 1] = new Rgba32(220, 40, 30, 128);
+            source[1, 1] = new Rgba32(20, 180, 70, 255);
+            source.Save(lowColorInput, new PngEncoder { ColorType = PngColorType.RgbWithAlpha });
+        }
+
+        var lowColorResult = Service.AlignToPng(
+            lowColorInput,
+            lowColorOutput,
+            new PixelAlignmentSettings
+            {
+                Columns = 2,
+                Rows = 2,
+                SamplingMode = PixelCellSamplingMode.CenterPixel,
+                ColorIndex = new PixelColorIndexSettings
+                {
+                    Mode = PixelColorIndexMode.Automatic,
+                    MaximumColors = 4
+                }
+            });
+
+        using (var output = SixLabors.ImageSharp.Image.Load<Rgba32>(lowColorOutput))
+        {
+            Equal(PngColorType.Palette, output.Metadata.GetPngMetadata().ColorType,
+                "自动颜色索引必须真正保存为调色板 PNG");
+            Equal(default(Rgba32), output[0, 0], "全透明像素的隐藏红色应清理为透明黑");
+            Equal(default(Rgba32), output[1, 0], "不同隐藏 RGB 不得重复占用透明索引");
+            Equal(new Rgba32(220, 40, 30, 128), output[0, 1], "未超色限时半透明 RGBA 必须精确保留");
+            Equal(new Rgba32(20, 180, 70, 255), output[1, 1], "未超色限时不透明颜色必须精确保留");
+            Equal(3, CountDistinctColors(output), "低色输入应产生三个真实 RGBA 索引");
+        }
+        Equal(3, lowColorResult.ActualIndexedColorCount, "结果颜色数必须等于落盘 PNG 的真实颜色数");
+
+        var highColorInput = Path.Combine(testRoot, "indexed-high-color-input.png");
+        var highColorOutput = Path.Combine(testRoot, "indexed-high-color-output.png");
+        using (var source = new Image<Rgba32>(32, 32))
+        {
+            for (var y = 0; y < source.Height; y++)
+            {
+                for (var x = 0; x < source.Width; x++)
+                {
+                    source[x, y] = new Rgba32(
+                        (byte)(x * 8),
+                        (byte)(y * 8),
+                        (byte)((x * 3 + y * 5) % 256),
+                        255);
+                }
+            }
+
+            source.Save(highColorInput, new PngEncoder { ColorType = PngColorType.RgbWithAlpha });
+        }
+
+        var indexedResult = Service.AlignToPng(
+            highColorInput,
+            highColorOutput,
+            new PixelAlignmentSettings
+            {
+                Columns = 32,
+                Rows = 32,
+                SamplingMode = PixelCellSamplingMode.CenterPixel,
+                ColorIndex = new PixelColorIndexSettings
+                {
+                    Mode = PixelColorIndexMode.Automatic,
+                    MaximumColors = 16
+                }
+            });
+        using (var output = SixLabors.ImageSharp.Image.Load<Rgba32>(highColorOutput))
+        {
+            var actualColors = CountDistinctColors(output);
+            True(actualColors <= 16, "高熵输入必须压缩到配置的最大颜色数量以内");
+            Equal(actualColors, indexedResult.ActualIndexedColorCount,
+                "结构化索引颜色数必须与最终文件一致");
+            Equal(PngColorType.Palette, output.Metadata.GetPngMetadata().ColorType,
+                "压缩后的高熵输出必须使用索引色 PNG");
+        }
+
+        var rgbaOutput = Path.Combine(testRoot, "indexed-disabled-output.png");
+        var disabledResult = Service.AlignToPng(
+            lowColorInput,
+            rgbaOutput,
+            new PixelAlignmentSettings
+            {
+                Columns = 2,
+                Rows = 2,
+                ColorIndex = new PixelColorIndexSettings
+                {
+                    Mode = PixelColorIndexMode.Disabled,
+                    MaximumColors = 256
+                }
+            });
+        using (var output = SixLabors.ImageSharp.Image.Load<Rgba32>(rgbaOutput))
+        {
+            Equal(PngColorType.RgbWithAlpha, output.Metadata.GetPngMetadata().ColorType,
+                "关闭颜色索引时应保持 RGBA PNG");
+            Equal(new Rgba32(255, 0, 0, 0), output[0, 0],
+                "关闭颜色索引时不得改写透明像素的隐藏 RGB");
+        }
+        Equal(0, disabledResult.ActualIndexedColorCount, "关闭索引时颜色数应标记为未统计");
+    }
+
     private static void DominantSamplingRejectsUnboundedHighEntropyCells(string testRoot)
     {
         const int side = 513;
@@ -723,6 +836,28 @@ internal static class PixelAlignmentSmokeTests
             "用户请求倍率必须有明确硬上限");
         Throws<ArgumentOutOfRangeException>(
             () => Service.CreatePlan(
+                50,
+                50,
+                new PixelAlignmentSettings
+                {
+                    Columns = 32,
+                    Rows = 32,
+                    ColorIndex = new PixelColorIndexSettings { MaximumColors = 1 }
+                }),
+            "自动颜色索引下限必须为 2 色");
+        Throws<ArgumentOutOfRangeException>(
+            () => Service.CreatePlan(
+                50,
+                50,
+                new PixelAlignmentSettings
+                {
+                    Columns = 32,
+                    Rows = 32,
+                    ColorIndex = new PixelColorIndexSettings { MaximumColors = 257 }
+                }),
+            "自动颜色索引上限必须为 256 色");
+        Throws<ArgumentOutOfRangeException>(
+            () => Service.CreatePlan(
                 PixelAlignmentLimits.MaximumWorkingDimension + 1,
                 1,
                 new PixelAlignmentSettings { Columns = 1, Rows = 1 }),
@@ -766,6 +901,8 @@ internal static class PixelAlignmentSmokeTests
             PixelAlignmentRows = 64,
             PixelAlignmentSamplingMode = PixelCellSamplingMode.CenterPixel.ToString(),
             PixelAlignmentShowGrid = false,
+            PixelAlignmentEnableAutomaticColorIndex = false,
+            PixelAlignmentMaximumIndexedColors = 16,
             PixelAlignmentLastInputDirectory = inputDirectory,
             PixelAlignmentLastOutputDirectory = outputDirectory
         });
@@ -784,6 +921,8 @@ internal static class PixelAlignmentSmokeTests
             Equal(PixelCellSamplingMode.CenterPixel.ToString(), loaded.SamplingMode,
                 "Shell 加载采样方式");
             False(loaded.ShowGrid, "Shell 加载网格显示开关");
+            False(loaded.EnableAutomaticColorIndex, "Shell 加载颜色索引开关");
+            Equal(16, loaded.MaximumIndexedColors, "Shell 加载颜色索引上限");
             Equal(inputDirectory, loaded.LastInputDirectory, "Shell 加载最近输入目录");
             Equal(outputDirectory, loaded.LastOutputDirectory, "Shell 加载最近输出目录");
 
@@ -793,6 +932,8 @@ internal static class PixelAlignmentSmokeTests
             shell.PixelAlignment.SelectedSamplingMode = shell.PixelAlignment.SamplingModeOptions.Single(
                 option => option.Mode == PixelCellSamplingMode.AverageColor);
             shell.PixelAlignment.ShowGrid = true;
+            shell.PixelAlignment.EnableAutomaticColorIndex = true;
+            shell.PixelAlignment.MaximumIndexedColors = 32;
 
             var persisted = settingsService.Load();
             Equal(12, persisted.PixelAlignmentMinimumUpscaleFactor, "倍率变化应即时持久化");
@@ -801,6 +942,8 @@ internal static class PixelAlignmentSmokeTests
             Equal(PixelCellSamplingMode.AverageColor.ToString(), persisted.PixelAlignmentSamplingMode,
                 "采样方式变化应即时持久化");
             True(persisted.PixelAlignmentShowGrid, "网格显示变化应即时持久化");
+            True(persisted.PixelAlignmentEnableAutomaticColorIndex, "颜色索引开关变化应即时持久化");
+            Equal(32, persisted.PixelAlignmentMaximumIndexedColors, "颜色索引上限变化应即时持久化");
             Equal(inputDirectory, persisted.PixelAlignmentLastInputDirectory,
                 "其他设置变化不应丢失最近输入目录");
             Equal(outputDirectory, persisted.PixelAlignmentLastOutputDirectory,
@@ -923,6 +1066,119 @@ internal static class PixelAlignmentSmokeTests
         Equal("800 × 800 px", viewModel.PreviewSizeText, "工作图预览尺寸不得仍显示 32×32");
     }
 
+    private static void ViewModelBatchProcessingMapsDifferentSizesAndContinuesAfterFailure(string testRoot)
+    {
+        var batchRoot = Path.Combine(testRoot, "batch-view-model");
+        var firstRoot = Path.Combine(batchRoot, "first");
+        var brokenRoot = Path.Combine(batchRoot, "broken");
+        var lastRoot = Path.Combine(batchRoot, "last");
+        var outputRoot = Path.Combine(batchRoot, "outputs");
+        Directory.CreateDirectory(firstRoot);
+        Directory.CreateDirectory(brokenRoot);
+        Directory.CreateDirectory(lastRoot);
+        Directory.CreateDirectory(outputRoot);
+
+        var firstPath = Path.Combine(firstRoot, "tile.png");
+        var brokenPath = Path.Combine(brokenRoot, "broken.png");
+        var lastPath = Path.Combine(lastRoot, "tile.png");
+        var singlePath = Path.Combine(batchRoot, "single-after-batch.png");
+        var firstLeft = new Rgba32(210, 30, 40, 255);
+        var firstRight = new Rgba32(30, 80, 220, 255);
+        var lastLeft = new Rgba32(20, 190, 80, 255);
+        var lastRight = new Rgba32(240, 190, 30, 255);
+        SaveVerticalHalves(firstPath, 4, 2, firstLeft, firstRight);
+        SaveVerticalHalves(brokenPath, 4, 2, new Rgba32(80, 80, 80, 255), new Rgba32(160, 160, 160, 255));
+        SaveVerticalHalves(lastPath, 8, 4, lastLeft, lastRight);
+        SaveVerticalHalves(singlePath, 3, 3, new Rgba32(30, 30, 30, 255), new Rgba32(220, 220, 220, 255));
+
+        File.WriteAllText(Path.Combine(outputRoot, "tile_2x2_aligned.png"), "existing-file-must-not-be-overwritten");
+        var viewModel = new PixelAlignmentViewModel(
+            Service,
+            new BatchInputPicker(singlePath, firstPath, brokenPath, lastPath),
+            new BatchOutputPicker(outputRoot),
+            minimumUpscaleFactor: 1,
+            columns: 2,
+            rows: 2,
+            maximumIndexedColors: 4);
+
+        viewModel.IsBatchMode = true;
+        viewModel.ChooseBatchInputsCommand.Execute(null);
+        Equal(3, viewModel.BatchTotalCount, "批量选择应一次加入三张图片");
+        Equal(Path.GetFullPath(firstPath), viewModel.InputPath, "第一张图片必须成为参数映射基准和预览源");
+        viewModel.CropLeft = 1;
+        viewModel.CropRight = 3;
+        viewModel.CropTop = 0;
+        viewModel.CropBottom = 2;
+        viewModel.ChooseBatchOutputDirectoryCommand.Execute(null);
+        Equal(Path.GetFullPath(outputRoot), viewModel.BatchOutputDirectory, "批量输出目录选择应生效");
+        True(viewModel.CanProcessBatch, "批量队列、基准参数和输出目录就绪后应允许处理");
+
+        var temporarilyMovedReference = Path.Combine(firstRoot, "tile-reference-temporarily-moved.png");
+        File.Move(firstPath, temporarilyMovedReference);
+        True(viewModel.CanProcessBatch,
+            "基准图尺寸和标尺已冻结后，文件短暂不可用不应阻止其它批量项进入处理");
+        File.Move(temporarilyMovedReference, firstPath);
+
+        File.Delete(brokenPath);
+        SaveVerticalHalves(lastPath, 12, 6, lastLeft, lastRight);
+        viewModel.ProcessBatchCommand.Execute(null);
+        WaitUntil(
+            () => !viewModel.IsBusy && viewModel.BatchProcessedCount == 3,
+            TimeSpan.FromSeconds(10),
+            "批处理未在超时前完成全部队列项");
+
+        Equal(2, viewModel.BatchCompletedCount, "删除的中间输入不得阻止前后两项成功");
+        Equal(1, viewModel.BatchFailedCount, "失效输入应只计为一个独立失败项");
+        Equal(100d, viewModel.BatchProgressPercent, "批次结束后进度应达到 100%");
+        Equal(PixelAlignmentBatchItemStatus.Completed, viewModel.BatchItems[0].Status, "第一项状态");
+        Equal(PixelAlignmentBatchItemStatus.Failed, viewModel.BatchItems[1].Status, "中间失效项状态");
+        Equal(PixelAlignmentBatchItemStatus.Completed, viewModel.BatchItems[2].Status, "失败后下一项仍应继续完成");
+        Equal("12 × 6 px", viewModel.BatchItems[2].SourceSizeText,
+            "同路径图片尺寸变化时应在处理前重新检查并刷新队列信息");
+
+        var firstOutput = Path.Combine(outputRoot, "tile_2x2_aligned_002.png");
+        var lastOutput = Path.Combine(outputRoot, "tile_2x2_aligned_003.png");
+        True(File.Exists(firstOutput), "已有同名输出存在时第一项必须使用 _002 后缀");
+        True(File.Exists(lastOutput), "同批同名输入必须继续使用唯一 _003 后缀");
+        Equal("existing-file-must-not-be-overwritten",
+            File.ReadAllText(Path.Combine(outputRoot, "tile_2x2_aligned.png")),
+            "批量输出不得覆盖已有文件");
+        Equal(Path.GetFullPath(lastOutput), viewModel.OutputPreviewPath,
+            "最后成功产物应成为批次预览");
+
+        using var last = SixLabors.ImageSharp.Image.Load<Rgba32>(lastOutput);
+        Equal(2, last.Width, "批量输出宽度应使用共享列数");
+        Equal(2, last.Height, "批量输出高度应使用共享行数");
+        Equal(lastLeft, last[0, 0], "4×2 基准裁切应按比例映射到 8×4 图片左半区");
+        Equal(lastRight, last[1, 0], "4×2 基准裁切应按比例映射到 8×4 图片右半区");
+        Equal(PngColorType.Palette, last.Metadata.GetPngMetadata().ColorType,
+            "批量图片应复用自动颜色索引设置");
+
+        viewModel.IsBatchMode = false;
+        viewModel.ChooseInputCommand.Execute(null);
+        Equal(0, viewModel.BatchTotalCount, "导入新的单张图片时必须清除旧批量队列，避免基准参数失同步");
+        Equal(Path.GetFullPath(singlePath), viewModel.InputPath, "清空批量队列后应载入新的单图输入");
+    }
+
+    private static void SaveVerticalHalves(
+        string path,
+        int width,
+        int height,
+        Rgba32 left,
+        Rgba32 right)
+    {
+        using var image = new Image<Rgba32>(width, height);
+        for (var y = 0; y < height; y++)
+        {
+            for (var x = 0; x < width; x++)
+            {
+                image[x, y] = x < width / 2 ? left : right;
+            }
+        }
+
+        image.Save(path, new PngEncoder { ColorType = PngColorType.RgbWithAlpha });
+    }
+
     private static void ViewModelKeepsIndependentGridAndSafelySynchronizesAspectRatio(string testRoot)
     {
         var viewModel = new PixelAlignmentViewModel(
@@ -984,6 +1240,14 @@ internal static class PixelAlignmentSmokeTests
         var columns = RequireElement<TextBox>(view, "PixelAlignmentColumnsTextBox");
         var rows = RequireElement<TextBox>(view, "PixelAlignmentRowsTextBox");
         var sampling = RequireElement<ComboBox>(view, "PixelAlignmentSamplingModeComboBox");
+        var colorIndex = RequireElement<CheckBox>(view, "PixelAlignmentColorIndexCheckBox");
+        var maximumColors = RequireElement<TextBox>(view, "PixelAlignmentMaximumColorsTextBox");
+        var batchMode = RequireElement<CheckBox>(view, "PixelAlignmentBatchModeCheckBox");
+        var chooseBatchInputs = RequireElement<Button>(view, "ChoosePixelAlignmentBatchInputsButton");
+        var chooseBatchOutput = RequireElement<Button>(view, "ChoosePixelAlignmentBatchOutputButton");
+        var processBatch = RequireElement<Button>(view, "ProcessPixelAlignmentBatchButton");
+        var batchItems = RequireElement<ListBox>(view, "PixelAlignmentBatchItemsListBox");
+        var batchProgress = RequireElement<ProgressBar>(view, "PixelAlignmentBatchProgressBar");
         var syncAspect = RequireElement<Button>(view, "PixelAlignmentSyncGridAspectButton");
         var rotation = RequireElement<TextBox>(view, "PixelAlignmentRotationDegreesTextBox");
         var targetAngle = RequireElement<TextBox>(view, "PixelAlignmentTargetEdgeAngleTextBox");
@@ -1002,6 +1266,28 @@ internal static class PixelAlignmentSmokeTests
             "自定义行数绑定");
         Equal("SelectedSamplingMode", RequireBindingPath(sampling, Selector.SelectedItemProperty, "采样方式"),
             "采样方式绑定");
+        Equal("EnableAutomaticColorIndex",
+            RequireBindingPath(colorIndex, ToggleButton.IsCheckedProperty, "自动颜色索引"),
+            "颜色索引开关绑定");
+        Equal("MaximumIndexedColors",
+            RequireBindingPath(maximumColors, TextBox.TextProperty, "最大颜色数"),
+            "最大颜色数绑定");
+        Equal("IsBatchMode", RequireBindingPath(batchMode, ToggleButton.IsCheckedProperty, "批量模式"),
+            "批量模式绑定");
+        Equal("ChooseBatchInputsCommand",
+            RequireBindingPath(chooseBatchInputs, ButtonBase.CommandProperty, "批量导入"),
+            "批量导入命令绑定");
+        Equal("ChooseBatchOutputDirectoryCommand",
+            RequireBindingPath(chooseBatchOutput, ButtonBase.CommandProperty, "批量输出目录"),
+            "批量输出目录命令绑定");
+        Equal("ProcessBatchCommand",
+            RequireBindingPath(processBatch, ButtonBase.CommandProperty, "开始批处理"),
+            "批处理命令绑定");
+        Equal("BatchItems", RequireBindingPath(batchItems, ItemsControl.ItemsSourceProperty, "批处理队列"),
+            "批处理队列绑定");
+        Equal("BatchProgressPercent",
+            RequireBindingPath(batchProgress, RangeBase.ValueProperty, "批处理进度"),
+            "批处理进度绑定");
         Equal("SyncGridToAspectRatioCommand",
             RequireBindingPath(syncAspect, ButtonBase.CommandProperty, "比例同步按钮"),
             "比例同步命令绑定");
@@ -1122,6 +1408,22 @@ internal static class PixelAlignmentSmokeTests
         }
     }
 
+    private static int CountDistinctColors(Image<Rgba32> image)
+    {
+        var colors = new HashSet<Rgba32>();
+        image.ProcessPixelRows(accessor =>
+        {
+            for (var y = 0; y < accessor.Height; y++)
+            {
+                foreach (var pixel in accessor.GetRowSpan(y))
+                {
+                    colors.Add(pixel);
+                }
+            }
+        });
+        return colors.Count;
+    }
+
     private static void Throws<TException>(Action action, string message)
         where TException : Exception
     {
@@ -1215,6 +1517,13 @@ internal static class PixelAlignmentSmokeTests
         public string? SelectInputFile(string? initialDirectory) => inputPath;
     }
 
+    private sealed class BatchInputPicker(string singleInputPath, params string[] inputPaths) : IPixelAlignmentInputPicker
+    {
+        public string? SelectInputFile(string? initialDirectory) => singleInputPath;
+
+        public IReadOnlyList<string> SelectInputFiles(string? initialDirectory) => inputPaths;
+    }
+
     private sealed class FixedOutputPicker(string outputPath) : IPixelAlignmentOutputPicker
     {
         public string? SelectOutputFile(string? initialDirectory, string suggestedFileName, string title) => outputPath;
@@ -1226,5 +1535,13 @@ internal static class PixelAlignmentSmokeTests
 
         public string? SelectOutputFile(string? initialDirectory, string suggestedFileName, string title) =>
             _outputPaths.Count > 0 ? _outputPaths.Dequeue() : null;
+    }
+
+    private sealed class BatchOutputPicker(string outputDirectory) : IPixelAlignmentOutputPicker
+    {
+        public string? SelectOutputFile(string? initialDirectory, string suggestedFileName, string title) =>
+            Path.Combine(outputDirectory, suggestedFileName);
+
+        public string? SelectOutputDirectory(string? initialDirectory) => outputDirectory;
     }
 }

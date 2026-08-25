@@ -8,6 +8,7 @@
              Background="{DynamicResource App.BackgroundBrush}">
     <UserControl.Resources>
         <conv:FilePathToImageSourceConverter x:Key="FilePathToImageSourceConverter" />
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
 
         <Style TargetType="{x:Type Button}" BasedOn="{StaticResource App.ButtonStyle}" />
         <Style TargetType="{x:Type TextBox}" BasedOn="{StaticResource App.TextBoxStyle}" />
@@ -88,30 +89,66 @@
                 BorderBrush="{DynamicResource App.BorderBrush}"
                 BorderThickness="0,0,0,1">
             <DockPanel LastChildFill="True">
-                <WrapPanel DockPanel.Dock="Right"
-                           Margin="14,0,0,0"
-                           HorizontalAlignment="Right"
-                           VerticalAlignment="Center">
-                    <Button x:Name="ChoosePixelAlignmentInputButton"
-                            MinWidth="96"
-                            Margin="0,0,7,0"
-                            Command="{Binding ChooseInputCommand}"
-                            Content="导入图片…" />
-                    <Button x:Name="ChoosePixelAlignmentOutputButton"
-                            MinWidth="100"
-                            Margin="0,0,7,0"
-                            Command="{Binding ChooseOutputCommand}"
-                            Content="设置输出…" />
-                    <Button x:Name="ExportPixelAlignmentWorkingButton"
-                            MinWidth="132"
-                            Margin="0,0,7,0"
-                            Command="{Binding ExportWorkingImageCommand}"
-                            Content="导出最近邻工作图" />
-                    <Button x:Name="ProcessPixelAlignmentButton"
-                            MinWidth="112"
-                            Command="{Binding ProcessCommand}"
-                            Content="生成对齐图" />
-                </WrapPanel>
+                <StackPanel DockPanel.Dock="Right"
+                            Margin="14,0,0,0"
+                            HorizontalAlignment="Right"
+                            VerticalAlignment="Center"
+                            Orientation="Horizontal">
+                    <CheckBox x:Name="PixelAlignmentBatchModeCheckBox"
+                              Margin="0,0,12,0"
+                              VerticalAlignment="Center"
+                              Content="批量处理"
+                              IsChecked="{Binding IsBatchMode, Mode=TwoWay}" />
+
+                    <WrapPanel VerticalAlignment="Center">
+                        <WrapPanel.Style>
+                            <Style TargetType="{x:Type WrapPanel}">
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsBatchMode}" Value="True">
+                                        <Setter Property="Visibility" Value="Collapsed" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </WrapPanel.Style>
+                        <Button x:Name="ChoosePixelAlignmentInputButton"
+                                MinWidth="96"
+                                Margin="0,0,7,0"
+                                Command="{Binding ChooseInputCommand}"
+                                Content="导入图片…" />
+                        <Button x:Name="ChoosePixelAlignmentOutputButton"
+                                MinWidth="100"
+                                Margin="0,0,7,0"
+                                Command="{Binding ChooseOutputCommand}"
+                                Content="设置输出…" />
+                        <Button x:Name="ExportPixelAlignmentWorkingButton"
+                                MinWidth="132"
+                                Margin="0,0,7,0"
+                                Command="{Binding ExportWorkingImageCommand}"
+                                Content="导出最近邻工作图" />
+                        <Button x:Name="ProcessPixelAlignmentButton"
+                                MinWidth="112"
+                                Command="{Binding ProcessCommand}"
+                                Content="生成对齐图" />
+                    </WrapPanel>
+
+                    <WrapPanel VerticalAlignment="Center"
+                               Visibility="{Binding IsBatchMode, Converter={StaticResource BooleanToVisibilityConverter}}">
+                        <Button x:Name="ChoosePixelAlignmentBatchInputsButton"
+                                MinWidth="100"
+                                Margin="0,0,7,0"
+                                Command="{Binding ChooseBatchInputsCommand}"
+                                Content="添加图片…" />
+                        <Button x:Name="ChoosePixelAlignmentBatchOutputButton"
+                                MinWidth="104"
+                                Margin="0,0,7,0"
+                                Command="{Binding ChooseBatchOutputDirectoryCommand}"
+                                Content="输出目录…" />
+                        <Button x:Name="ProcessPixelAlignmentBatchButton"
+                                MinWidth="112"
+                                Command="{Binding ProcessBatchCommand}"
+                                Content="开始批处理" />
+                    </WrapPanel>
+                </StackPanel>
 
                 <StackPanel VerticalAlignment="Center">
                     <TextBlock Foreground="{DynamicResource App.TextPrimaryBrush}"
@@ -256,6 +293,124 @@
                                        Foreground="{DynamicResource App.TextMutedBrush}"
                                        FontSize="9"
                                        Text="{Binding SamplingModeDescription}"
+                                       TextWrapping="Wrap" />
+
+                            <Separator Margin="0,10,0,8" />
+                            <CheckBox x:Name="PixelAlignmentColorIndexCheckBox"
+                                      IsChecked="{Binding EnableAutomaticColorIndex, Mode=TwoWay}"
+                                      Content="自动颜色索引" />
+                            <Grid Margin="0,8,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="8" />
+                                    <ColumnDefinition Width="92" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock VerticalAlignment="Center"
+                                           Style="{StaticResource PixelAlignmentFieldLabelStyle}"
+                                           Text="最大颜色数（2–256）" />
+                                <TextBox x:Name="PixelAlignmentMaximumColorsTextBox"
+                                         Grid.Column="2"
+                                         Style="{StaticResource PixelAlignmentNumericTextBoxStyle}"
+                                         IsEnabled="{Binding EnableAutomaticColorIndex}"
+                                         Text="{Binding MaximumIndexedColors, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                            </Grid>
+                            <TextBlock Margin="0,6,0,0"
+                                       Foreground="{DynamicResource App.TextMutedBrush}"
+                                       FontSize="9"
+                                       Text="{Binding ColorIndexDescription}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                    </Border>
+
+                    <Border x:Name="PixelAlignmentBatchQueueCard"
+                            Margin="0,8,0,0"
+                            Style="{StaticResource PixelAlignmentCardStyle}"
+                            Visibility="{Binding IsBatchMode, Converter={StaticResource BooleanToVisibilityConverter}}">
+                        <StackPanel>
+                            <DockPanel LastChildFill="True">
+                                <TextBlock DockPanel.Dock="Right"
+                                           Margin="8,0,0,0"
+                                           Foreground="{DynamicResource App.AccentBrush}"
+                                           FontFamily="Consolas"
+                                           FontSize="10"
+                                           Text="{Binding BatchTotalCount, StringFormat={}{0}/256}" />
+                                <TextBlock Style="{StaticResource App.PanelHeaderStyle}" Text="批处理队列" />
+                            </DockPanel>
+
+                            <TextBlock Margin="0,8,0,3"
+                                       Style="{StaticResource PixelAlignmentFieldLabelStyle}"
+                                       Text="输出目录" />
+                            <TextBlock Style="{StaticResource PixelAlignmentValueTextStyle}"
+                                       Text="{Binding BatchOutputDirectoryDisplay}"
+                                       ToolTip="{Binding BatchOutputDirectory}" />
+
+                            <ListBox x:Name="PixelAlignmentBatchItemsListBox"
+                                     Height="196"
+                                     Margin="0,9,0,0"
+                                     ItemsSource="{Binding BatchItems}"
+                                     SelectedItem="{Binding SelectedBatchItem, Mode=TwoWay}"
+                                     ScrollViewer.HorizontalScrollBarVisibility="Disabled">
+                                <ListBox.ItemTemplate>
+                                    <DataTemplate>
+                                        <Grid Margin="2,4">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel>
+                                                <TextBlock Foreground="{DynamicResource App.TextPrimaryBrush}"
+                                                           FontSize="10"
+                                                           Text="{Binding FileName}"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           ToolTip="{Binding InputPath}" />
+                                                <TextBlock Margin="0,2,0,0"
+                                                           Foreground="{DynamicResource App.TextMutedBrush}"
+                                                           FontSize="9"
+                                                           Text="{Binding SourceSizeText}" />
+                                                <TextBlock Margin="0,2,0,0"
+                                                           Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                                           FontSize="9"
+                                                           Text="{Binding Message}"
+                                                           TextTrimming="CharacterEllipsis"
+                                                           ToolTip="{Binding Message}" />
+                                            </StackPanel>
+                                            <TextBlock Grid.Column="1"
+                                                       Margin="8,0,0,0"
+                                                       VerticalAlignment="Top"
+                                                       Foreground="{DynamicResource App.AccentBrush}"
+                                                       FontSize="9"
+                                                       Text="{Binding StatusText}" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ListBox.ItemTemplate>
+                            </ListBox>
+
+                            <ProgressBar x:Name="PixelAlignmentBatchProgressBar"
+                                         Height="8"
+                                         Margin="0,9,0,0"
+                                         Maximum="100"
+                                         Value="{Binding BatchProgressPercent, Mode=OneWay}" />
+                            <TextBlock Margin="0,5,0,0"
+                                       Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                       FontSize="9"
+                                       Text="{Binding BatchProgressText}"
+                                       TextWrapping="Wrap" />
+                            <UniformGrid Margin="0,8,0,0" Columns="2">
+                                <Button x:Name="RemovePixelAlignmentBatchItemButton"
+                                        Margin="0,0,4,0"
+                                        Style="{StaticResource PixelAlignmentCompactButtonStyle}"
+                                        Command="{Binding RemoveSelectedBatchItemCommand}"
+                                        Content="移除选中" />
+                                <Button x:Name="ClearPixelAlignmentBatchItemsButton"
+                                        Margin="4,0,0,0"
+                                        Style="{StaticResource PixelAlignmentCompactButtonStyle}"
+                                        Command="{Binding ClearBatchItemsCommand}"
+                                        Content="清空队列" />
+                            </UniformGrid>
+                            <TextBlock Margin="0,7,0,0"
+                                       Foreground="{DynamicResource App.TextMutedBrush}"
+                                       FontSize="9"
+                                       Text="第一张图片作为预览与标尺基准；其它尺寸会按宽高比例映射裁切和透视点。"
                                        TextWrapping="Wrap" />
                         </StackPanel>
                     </Border>
@@ -815,7 +970,7 @@
                     </Style.Triggers>
                 </Style>
             </Border.Style>
-            <Border Width="246"
+            <Border Width="320"
                     Padding="18,14"
                     HorizontalAlignment="Center"
                     VerticalAlignment="Center"
@@ -823,17 +978,51 @@
                     BorderBrush="{DynamicResource App.AccentBrush}"
                     BorderThickness="1"
                     CornerRadius="8">
-                <StackPanel Orientation="Horizontal" HorizontalAlignment="Center">
-                    <TextBlock Margin="0,0,10,0"
-                               VerticalAlignment="Center"
-                               Foreground="{DynamicResource App.AccentBrush}"
-                               FontFamily="Segoe MDL2 Assets"
-                               FontSize="17"
-                               Text="&#xE895;" />
-                    <TextBlock VerticalAlignment="Center"
-                               Foreground="{DynamicResource App.TextPrimaryBrush}"
-                               FontWeight="SemiBold"
-                               Text="正在处理像素对齐任务…" />
+                <StackPanel>
+                    <StackPanel HorizontalAlignment="Center" Orientation="Horizontal">
+                        <TextBlock Margin="0,0,10,0"
+                                   VerticalAlignment="Center"
+                                   Foreground="{DynamicResource App.AccentBrush}"
+                                   FontFamily="Segoe MDL2 Assets"
+                                   FontSize="17"
+                                   Text="&#xE895;" />
+                        <TextBlock VerticalAlignment="Center"
+                                   Foreground="{DynamicResource App.TextPrimaryBrush}"
+                                   FontWeight="SemiBold"
+                                   Text="正在处理像素对齐任务…" />
+                    </StackPanel>
+                    <ProgressBar Height="8"
+                                 Margin="0,12,0,0"
+                                 Maximum="100"
+                                 Value="{Binding BatchProgressPercent, Mode=OneWay}">
+                        <ProgressBar.Style>
+                            <Style TargetType="{x:Type ProgressBar}">
+                                <Setter Property="Visibility" Value="Collapsed" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsBatchMode}" Value="True">
+                                        <Setter Property="Visibility" Value="Visible" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </ProgressBar.Style>
+                    </ProgressBar>
+                    <TextBlock Margin="0,7,0,0"
+                               HorizontalAlignment="Center"
+                               Foreground="{DynamicResource App.TextSecondaryBrush}"
+                               FontSize="9"
+                               Text="{Binding BatchProgressText}"
+                               TextTrimming="CharacterEllipsis">
+                        <TextBlock.Style>
+                            <Style TargetType="{x:Type TextBlock}">
+                                <Setter Property="Visibility" Value="Collapsed" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsBatchMode}" Value="True">
+                                        <Setter Property="Visibility" Value="Visible" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </TextBlock.Style>
+                    </TextBlock>
                 </StackPanel>
             </Border>
         </Border>

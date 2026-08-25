@@ -8,6 +8,7 @@ GAssetForge.Core
   Workflows/         五类业务入口定义
   ArtStyles/         风格组、参考素材元数据、统一提示词样本、稳定指纹、校验与 JSON 契约
   Generation/        AI 约束包、Tilemap 规则、单图任务状态机、Run Schema 与阶段日志
+  Imaging/           像素对齐、几何矫正、格子采样、自动调色板与原子 PNG 输出
 
 GAssetForge.App
   ViewModels/        Shell 与 UI 编辑器状态/命令
@@ -77,6 +78,19 @@ Shell 会在一次项目激活中协调项目清单、UI repository、Project Br
 domain separation 的稳定 SHA-256。重命名风格组不会令样本过期；修改描述、人工提示词、素材集合、素材哈希
 或媒体类型会改变当前指纹，使旧样本保留但标记为 stale。分析完成时 ViewModel 会再次核对当前指纹并原子
 保存；分析期间发生编辑、保存失败、取消或 Agent 错误都不会覆盖旧样本。
+
+### 像素对齐与批处理边界
+
+`ImageSharpPixelAlignmentService` 保持单图、确定性和原子落盘：先执行裁切与几何矫正，再生成逻辑格子采样结果，
+最后按可选颜色索引策略保存 PNG。自动索引只作用于最终逻辑图片，不改写源图或最近邻检查工作图；它使用无抖动
+Wu 量化并输出 Palette PNG，关闭时使用 RGBA PNG。完全透明像素在建立调色板前规范化为透明黑，半透明 Alpha
+作为 RGBA 索引的一部分保留。
+
+多图编排属于 App 层而不是 Core 图像算法。`PixelAlignmentViewModel` 在开始批次时冻结第一张参考图的设置，将
+裁切边界和四个透视顶点归一化为 `0..1` 坐标，再逐项映射到各自源尺寸，并串行调用同一个单图服务。每项拥有
+独立 Pending / Running / Completed / Failed 状态；失败只影响当前项，已经完成的原子文件继续保留。输出规划
+默认不覆盖现有文件，名称冲突使用稳定数字后缀。批量文件清单属于瞬时 UI 状态，不写入用户设置；颜色索引开关
+与最大颜色数则随其它像素工具偏好持久化。
 
 ### 风格分析一次性文件协议
 

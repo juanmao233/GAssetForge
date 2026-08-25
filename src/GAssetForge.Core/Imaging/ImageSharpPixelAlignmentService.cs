@@ -2,6 +2,7 @@ using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Formats.Png;
 using SixLabors.ImageSharp.PixelFormats;
 using SixLabors.ImageSharp.Processing;
+using SixLabors.ImageSharp.Processing.Processors.Quantization;
 
 namespace GAssetForge.Core.Imaging;
 
@@ -183,12 +184,17 @@ public sealed class ImageSharpPixelAlignmentService : IPixelAlignmentService
             SampleGrid(source, aligned, plan, settings.SamplingMode);
         }
 
-        SavePngAtomically(aligned, normalizedOutput, overwrite);
+        var colorIndexing = ApplyColorIndexing(aligned, settings.ColorIndex);
+
+        SavePngAtomically(aligned, normalizedOutput, overwrite, colorIndexing.Palette);
         return new PixelAlignmentResult
         {
             OutputPath = normalizedOutput,
             Plan = plan,
             SamplingMode = settings.SamplingMode,
+            ColorIndexMode = settings.ColorIndex.Mode,
+            MaximumIndexedColors = settings.ColorIndex.MaximumColors,
+            ActualIndexedColorCount = colorIndexing.ActualColorCount,
             OutputWidth = aligned.Width,
             OutputHeight = aligned.Height
         };
@@ -869,6 +875,22 @@ public sealed class ImageSharpPixelAlignmentService : IPixelAlignmentService
             throw new ArgumentOutOfRangeException(nameof(settings), "未知的像素格采样模式。");
         }
 
+        var colorIndex = settings.ColorIndex
+            ?? throw new ArgumentException("颜色索引设置不能为空。", nameof(settings));
+        if (!Enum.IsDefined(colorIndex.Mode))
+        {
+            throw new ArgumentOutOfRangeException(nameof(settings), "未知的颜色索引模式。");
+        }
+
+        if (colorIndex.MaximumColors is < PixelAlignmentLimits.MinimumIndexedColorCount or
+            > PixelAlignmentLimits.MaximumIndexedColorCount)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(settings),
+                $"颜色索引数量必须位于 {PixelAlignmentLimits.MinimumIndexedColorCount} 到 " +
+                $"{PixelAlignmentLimits.MaximumIndexedColorCount} 之间。");
+        }
+
         var outputPixelCount = checked(settings.Columns * settings.Rows);
         if (outputPixelCount > PixelAlignmentLimits.MaximumGridPixelCount)
         {
@@ -983,7 +1005,11 @@ public sealed class ImageSharpPixelAlignmentService : IPixelAlignmentService
         return normalizedOutput;
     }
 
-    private static void SavePngAtomically(Image<Rgba32> image, string outputPath, bool overwrite)
+    private static void SavePngAtomically(
+        Image<Rgba32> image,
+        string outputPath,
+        bool overwrite,
+        IReadOnlyList<Color>? indexedPalette = null)
     {
         var outputDirectory = Path.GetDirectoryName(outputPath)
             ?? throw new InvalidOperationException("无法解析像素对齐输出目录。");
@@ -992,10 +1018,23 @@ public sealed class ImageSharpPixelAlignmentService : IPixelAlignmentService
             $".{Path.GetFileName(outputPath)}.{Guid.NewGuid():N}.tmp");
         try
         {
-            image.Save(temporaryPath, new PngEncoder
-            {
-                ColorType = PngColorType.RgbWithAlpha
-            });
+            var encoder = indexedPalette is { Count: > 0 }
+                ? new PngEncoder
+                {
+                    ColorType = PngColorType.Palette,
+                    Quantizer = new PaletteQuantizer(
+                        indexedPalette.ToArray(),
+                        CreateQuantizerOptions(Math.Max(
+                            PixelAlignmentLimits.MinimumIndexedColorCount,
+                            indexedPalette.Count))),
+                    PixelSamplingStrategy = new ExtensivePixelSamplingStrategy(),
+                    TransparentColorMode = PngTransparentColorMode.Clear
+                }
+                : new PngEncoder
+                {
+                    ColorType = PngColorType.RgbWithAlpha
+                };
+            image.Save(temporaryPath, encoder);
             File.Move(temporaryPath, outputPath, overwrite);
         }
         finally
@@ -1005,6 +1044,100 @@ public sealed class ImageSharpPixelAlignmentService : IPixelAlignmentService
                 File.Delete(temporaryPath);
             }
         }
+    }
+
+    private static ColorIndexingOutcome ApplyColorIndexing(
+        Image<Rgba32> image,
+        PixelColorIndexSettings colorIndex)
+    {
+        if (colorIndex.Mode == PixelColorIndexMode.Disabled)
+        {
+            return ColorIndexingOutcome.Disabled;
+        }
+
+        ClearHiddenTransparentColors(image);
+        var existingColorCount = CountDistinctColorsUntil(image, colorIndex.MaximumColors + 1);
+        if (existingColorCount <= colorIndex.MaximumColors)
+        {
+            var existingPalette = CollectPalette(image, colorIndex.MaximumColors);
+            return new ColorIndexingOutcome(existingPalette.Count, existingPalette);
+        }
+
+        image.Mutate(context => context.Quantize(new WuQuantizer(
+            CreateQuantizerOptions(colorIndex.MaximumColors))));
+        var palette = CollectPalette(image, colorIndex.MaximumColors);
+        return new ColorIndexingOutcome(palette.Count, palette);
+    }
+
+    private static QuantizerOptions CreateQuantizerOptions(int maximumColors) => new()
+    {
+        MaxColors = maximumColors,
+        Dither = null,
+        ColorMatchingMode = ColorMatchingMode.Hybrid
+    };
+
+    private static void ClearHiddenTransparentColors(Image<Rgba32> image)
+    {
+        image.ProcessPixelRows(accessor =>
+        {
+            for (var y = 0; y < accessor.Height; y++)
+            {
+                var row = accessor.GetRowSpan(y);
+                for (var x = 0; x < row.Length; x++)
+                {
+                    if (row[x].A == 0)
+                    {
+                        row[x] = default;
+                    }
+                }
+            }
+        });
+    }
+
+    private static IReadOnlyList<Color> CollectPalette(Image<Rgba32> image, int maximumColors)
+    {
+        var packedColors = new HashSet<uint>();
+        var palette = new List<Color>(Math.Min(maximumColors, 256));
+        image.ProcessPixelRows(accessor =>
+        {
+            for (var y = 0; y < accessor.Height && palette.Count <= maximumColors; y++)
+            {
+                var row = accessor.GetRowSpan(y);
+                for (var x = 0; x < row.Length && palette.Count <= maximumColors; x++)
+                {
+                    var pixel = row[x];
+                    if (packedColors.Add(Pack(pixel)))
+                    {
+                        palette.Add(Color.FromPixel(pixel));
+                    }
+                }
+            }
+        });
+
+        if (palette.Count > maximumColors)
+        {
+            throw new InvalidOperationException(
+                $"自动颜色索引产生了超过 {maximumColors} 色的结果。");
+        }
+
+        return palette;
+    }
+
+    private static int CountDistinctColorsUntil(Image<Rgba32> image, int stopAfter)
+    {
+        var colors = new HashSet<uint>();
+        image.ProcessPixelRows(accessor =>
+        {
+            for (var y = 0; y < accessor.Height && colors.Count < stopAfter; y++)
+            {
+                var row = accessor.GetRowSpan(y);
+                for (var x = 0; x < row.Length && colors.Count < stopAfter; x++)
+                {
+                    colors.Add(Pack(row[x]));
+                }
+            }
+        });
+        return colors.Count;
     }
 
     private static int GreatestCommonDivisor(int left, int right)
@@ -1144,4 +1277,11 @@ public sealed class ImageSharpPixelAlignmentService : IPixelAlignmentService
     }
 
     private readonly record struct WeightedPixel(Rgba32 Color, long Weight);
+
+    private sealed record ColorIndexingOutcome(
+        int ActualColorCount,
+        IReadOnlyList<Color>? Palette)
+    {
+        public static ColorIndexingOutcome Disabled { get; } = new(0, null);
+    }
 }

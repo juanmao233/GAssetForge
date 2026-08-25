@@ -157,6 +157,8 @@ public sealed class ShellViewModel : ObservableObject
             _settings.PixelAlignmentRows,
             samplingMode: _settings.PixelAlignmentSamplingMode,
             showGrid: _settings.PixelAlignmentShowGrid,
+            enableAutomaticColorIndex: _settings.PixelAlignmentEnableAutomaticColorIndex,
+            maximumIndexedColors: _settings.PixelAlignmentMaximumIndexedColors,
             enableAspectRatioCorrection: _settings.PixelAlignmentEnableAspectRatioCorrection,
             targetAspectRatioA: _settings.PixelAlignmentTargetAspectRatioA,
             targetAspectRatioB: _settings.PixelAlignmentTargetAspectRatioB,
@@ -1732,6 +1734,8 @@ public sealed class ShellViewModel : ObservableObject
         _settings.PixelAlignmentRows = settings.Rows;
         _settings.PixelAlignmentSamplingMode = settings.SamplingMode;
         _settings.PixelAlignmentShowGrid = settings.ShowGrid;
+        _settings.PixelAlignmentEnableAutomaticColorIndex = settings.EnableAutomaticColorIndex;
+        _settings.PixelAlignmentMaximumIndexedColors = settings.MaximumIndexedColors;
         _settings.PixelAlignmentEnableAspectRatioCorrection = settings.EnableAspectRatioCorrection;
         _settings.PixelAlignmentTargetAspectRatioA = settings.TargetAspectRatioA;
         _settings.PixelAlignmentTargetAspectRatioB = settings.TargetAspectRatioB;

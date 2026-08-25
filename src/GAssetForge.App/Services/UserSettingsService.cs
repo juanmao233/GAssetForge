@@ -1,3 +1,4 @@
+using GAssetForge.Core.Imaging;
 using System.Text.Json;
 using System.IO;
 
@@ -63,6 +64,8 @@ public sealed class UserSettingsModel
     public int PixelAlignmentRows { get; set; } = 32;
     public string PixelAlignmentSamplingMode { get; set; } = "CenterPixel";
     public bool PixelAlignmentShowGrid { get; set; } = true;
+    public bool PixelAlignmentEnableAutomaticColorIndex { get; set; } = true;
+    public int PixelAlignmentMaximumIndexedColors { get; set; } = 256;
     public bool PixelAlignmentEnableAspectRatioCorrection { get; set; }
     public double PixelAlignmentTargetAspectRatioA { get; set; } = 1d;
     public double PixelAlignmentTargetAspectRatioB { get; set; } = 1d;
@@ -112,6 +115,10 @@ public sealed class UserSettingsService
                 settings.AssetGenerationAutoRetryCount,
                 0,
                 10);
+            settings.PixelAlignmentMaximumIndexedColors = Math.Clamp(
+                settings.PixelAlignmentMaximumIndexedColors,
+                PixelAlignmentLimits.MinimumIndexedColorCount,
+                PixelAlignmentLimits.MaximumIndexedColorCount);
             return settings;
         }
         catch

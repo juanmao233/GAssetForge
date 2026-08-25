@@ -20,6 +20,10 @@ public static class PixelAlignmentLimits
 
     public const int MaximumDominantDistinctColorsPerCell = 262_144;
 
+    public const int MinimumIndexedColorCount = 2;
+
+    public const int MaximumIndexedColorCount = 256;
+
     public const double MinimumTargetAspectRatio = 1d / 64d;
 
     public const double MaximumTargetAspectRatio = 64d;
@@ -50,6 +54,24 @@ public enum PixelCellSamplingMode
     DominantColor,
     AverageColor,
     CenterPixel
+}
+
+public enum PixelColorIndexMode
+{
+    Disabled,
+    Automatic
+}
+
+/// <summary>
+/// Defines the final output palette policy after geometry correction and cell sampling. Automatic
+/// mode derives a deterministic palette from the aligned output. A persisted/custom palette can be
+/// added later without changing the sampling contract.
+/// </summary>
+public sealed record PixelColorIndexSettings
+{
+    public PixelColorIndexMode Mode { get; init; } = PixelColorIndexMode.Automatic;
+
+    public int MaximumColors { get; init; } = PixelAlignmentLimits.MaximumIndexedColorCount;
 }
 
 /// <summary>
@@ -138,6 +160,8 @@ public sealed record PixelAlignmentSettings
 
     public PixelCellSamplingMode SamplingMode { get; init; } = PixelCellSamplingMode.CenterPixel;
 
+    public PixelColorIndexSettings ColorIndex { get; init; } = new();
+
     public PixelAlignmentCorrectionSettings Correction { get; init; } = new();
 }
 
@@ -211,6 +235,12 @@ public sealed record PixelAlignmentResult
     public PixelAlignmentPlan Plan { get; init; } = new();
 
     public PixelCellSamplingMode SamplingMode { get; init; }
+
+    public PixelColorIndexMode ColorIndexMode { get; init; }
+
+    public int MaximumIndexedColors { get; init; }
+
+    public int ActualIndexedColorCount { get; init; }
 
     public int OutputWidth { get; init; }
 

@@ -5,6 +5,32 @@ development track; versioning policy will be finalized before the first public r
 
 ## Unreleased
 
+## 1.0.6t1 - 2026-08-25
+
+### Added
+
+- Added automatic indexed-color output to Pixel Alignment. It builds a per-image Wu palette after
+  geometry correction and cell sampling, defaults to 256 colors, supports a configurable 2–256 color
+  limit, disables dithering for pixel-art stability, and writes a real palette PNG while retaining
+  per-entry Alpha.
+- Added Pixel Alignment batch processing with multi-file selection, a dedicated output directory,
+  per-item status, aggregate progress, and sequential processing that continues after individual
+  failures.
+
+### Changed
+
+- Batch processing freezes the reference image's crop rulers, perspective points, correction settings,
+  sampling mode, and color-index settings, then proportionally maps source-space coordinates onto each
+  differently sized image.
+- Batch outputs never silently overwrite an existing file. Name collisions receive a deterministic
+  numeric suffix, and the latest successful output is immediately available in the preview.
+
+### Fixed
+
+- Fully transparent pixels are normalized to transparent black before automatic palette construction,
+  preventing invisible RGB values from consuming multiple color entries. Disabling color indexing keeps
+  the original RGBA path unchanged.
+
 ## 1.0.5t1 - 2026-08-25
 
 ### Added
