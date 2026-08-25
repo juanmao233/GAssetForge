@@ -91,7 +91,14 @@ internal static class Program
             ProjectFileSystemBrowserPersistsAndStaysWithinRoot();
             Console.WriteLine("PASS  Project 文件系统浏览、空白区右键菜单、根目录约束与持久化可用");
             ArtStyleLibraryDockPanelImportsPersistsAndRemovesAssets();
-            Console.WriteLine("PASS  美术风格素材库可停靠、分组、多图导入、选择并本地持久化");
+            Console.WriteLine("PASS  美术风格素材库可停靠、分组、多图导入、统一提示词入口与本地持久化可用");
+            ArtStylePromptSampleSmokeTests.Run();
+            Console.WriteLine("PASS  美术风格统一提示词样本可稳定指纹、兼容旧库、原子保存并正确过期");
+            ArtStylePromptAnalysisServiceSmokeTests.RunAllAsync(_temporaryRoot)
+                .GetAwaiter().GetResult();
+            Console.WriteLine("PASS  美术风格分析经受限文件协议校验素材、Agent 结果与诊断身份");
+            UnifiedStylePromptGenerationSmokeTests.Run();
+            Console.WriteLine("PASS  素材生成优先复用新鲜统一提示词并在缺失、过期或关闭时回退参考图流程");
             AssetGenerationDockPanelBindsWorkflowAndTracksMenuState();
             Console.WriteLine("PASS  素材生成停靠页、顶部入口、视图开关与生成工作流绑定可用");
             BatchGenerationCoreSmokeTests.RunAllAsync().GetAwaiter().GetResult();
@@ -3029,6 +3036,8 @@ internal static class Program
 
     private static void ArtStyleLibraryDockPanelImportsPersistsAndRemovesAssets()
     {
+        StyleAnalysisCommandTracksAssetAvailability();
+
         var dockPaths = new WorkspacePaths(Path.Combine(_temporaryRoot, "art-style-library-dock"));
         var editor = new EditorWorkspaceViewModel(
             new JsonProjectRepository(dockPaths),
@@ -3087,6 +3096,10 @@ internal static class Program
                 styleView,
                 "RemoveStyleAssetButton",
                 "美术风格素材库缺少移除素材按钮。");
+            var analyzeUnifiedPromptButton = RequireNamedElement<Button>(
+                styleView,
+                "AnalyzeUnifiedStylePromptButton",
+                "美术风格素材库缺少分析生成统一提示词按钮。");
             var nameTextBox = RequireNamedElement<TextBox>(
                 styleView,
                 "StyleNameTextBox",
@@ -3099,6 +3112,10 @@ internal static class Program
                 styleView,
                 "StylePromptTextBox",
                 "美术风格素材库缺少 AI 风格提示词输入框。");
+            var unifiedPromptTextBox = RequireNamedElement<TextBox>(
+                styleView,
+                "UnifiedStylePromptTextBox",
+                "美术风格素材库缺少统一提示词样本只读框。");
 
             True(ReferenceEquals(shell.ArtStyleLibrary.Groups, groupList.ItemsSource),
                 "风格组列表应绑定风格库 Groups");
@@ -3110,12 +3127,28 @@ internal static class Program
                 "导入风格素材按钮命令实例");
             True(ReferenceEquals(shell.ArtStyleLibrary.RemoveAssetCommand, removeButton.Command),
                 "移除风格素材按钮命令实例");
+            True(ReferenceEquals(
+                    shell.ArtStyleLibrary.AnalyzeUnifiedPromptCommand,
+                    analyzeUnifiedPromptButton.Command),
+                "分析生成统一提示词按钮命令实例");
+            Equal(
+                nameof(ArtStyleLibraryViewModel.AnalyzeUnifiedPromptCommand),
+                BindingOperations.GetBinding(analyzeUnifiedPromptButton, Button.CommandProperty)?.Path?.Path,
+                "分析生成统一提示词按钮命令绑定路径");
             True(nameTextBox.GetBindingExpression(TextBox.TextProperty) is not null,
                 "风格组名称应保留双向绑定");
             True(descriptionTextBox.GetBindingExpression(TextBox.TextProperty) is not null,
                 "风格描述应保留双向绑定");
             True(promptTextBox.GetBindingExpression(TextBox.TextProperty) is not null,
                 "AI 风格提示词应保留双向绑定");
+            True(unifiedPromptTextBox.IsReadOnly,
+                "统一提示词样本必须保持只读，避免绕过分析结果元数据直接修改");
+            True(ReferenceEquals(shell.ArtStyleLibrary.SelectedGroup, unifiedPromptTextBox.DataContext),
+                "统一提示词样本应绑定当前选中的风格组");
+            Equal(
+                nameof(ArtStyleGroupViewModel.UnifiedPromptText),
+                BindingOperations.GetBinding(unifiedPromptTextBox, TextBox.TextProperty)?.Path?.Path,
+                "统一提示词样本文本绑定路径");
 
             var menuItem = window.FindName("ShowStyleLibraryMenuItem") as MenuItem
                 ?? throw new SmokeTestException("视图菜单缺少美术风格素材库入口。");
@@ -3214,6 +3247,43 @@ internal static class Program
         finally
         {
             restored.Shutdown();
+        }
+    }
+
+    private static void StyleAnalysisCommandTracksAssetAvailability()
+    {
+        var paths = new WorkspacePaths(Path.Combine(
+            _temporaryRoot,
+            "art-style-analysis-command-state"));
+        var sourceDirectory = Path.Combine(paths.RootDirectory, "ImportSources");
+        Directory.CreateDirectory(sourceDirectory);
+        var sourcePath = Path.Combine(sourceDirectory, "single-reference.png");
+        File.WriteAllBytes(
+            sourcePath,
+            Convert.FromBase64String(
+                "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="));
+
+        var library = new ArtStyleLibraryViewModel(
+            paths,
+            new FixedArtStyleAssetPicker([sourcePath]));
+        try
+        {
+            library.ConfigurePromptAnalysisService(new NeverRunArtStylePromptAnalysisService());
+            False(library.AnalyzeUnifiedPromptCommand.CanExecute(null),
+                "空风格组不应允许分析统一提示词");
+
+            library.ImportAssetsCommand.Execute(null);
+            True(library.AnalyzeUnifiedPromptCommand.CanExecute(null),
+                "首次导入参考图后应立即启用统一提示词分析命令");
+
+            library.SelectedAsset = library.SelectedGroup?.Assets.Single();
+            library.RemoveAssetCommand.Execute(null);
+            False(library.AnalyzeUnifiedPromptCommand.CanExecute(null),
+                "移除最后一张参考图后应立即禁用统一提示词分析命令");
+        }
+        finally
+        {
+            library.Shutdown();
         }
     }
 
@@ -5707,6 +5777,14 @@ internal static class Program
     private sealed class FixedArtStyleAssetPicker(IReadOnlyList<string> paths) : IArtStyleAssetPicker
     {
         public IReadOnlyList<string> SelectImageFiles() => paths;
+    }
+
+    private sealed class NeverRunArtStylePromptAnalysisService : IArtStylePromptAnalysisService
+    {
+        public Task<ArtStylePromptAnalysisResult> AnalyzeAsync(
+            ArtStylePromptAnalysisInput input,
+            CancellationToken cancellationToken = default) =>
+            throw new InvalidOperationException("命令状态测试不应实际启动风格分析。");
     }
 
     private sealed class SmokeTestException(string message) : Exception(message);

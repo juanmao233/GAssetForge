@@ -5,6 +5,38 @@ development track; versioning policy will be finalized before the first public r
 
 ## Unreleased
 
+## 1.0.5t1 - 2026-08-25
+
+### Added
+
+- Added a reusable unified prompt sample to each art style group, preserving the manually authored
+  style prompt separately and recording the generated prompt, summary, source fingerprint, analysis
+  time, analyzer identity/version, request ID, and the complete analyzed asset set.
+- Added an "Analyze unified prompt" action to the Art Style Library. It submits one bounded Agent Turn
+  that must inspect every managed reference image and returns a structured result without generating
+  or editing artwork.
+- Added a one-shot workspace protocol at
+  `.gassetforge/style-analysis/<requestId>/{request.v1.json,result.v1.json,diagnostics/}`. The desktop
+  writes the frozen request and remains the only component allowed to atomically update the style
+  library after validating the Agent result.
+
+### Changed
+
+- Asset Generation now enables unified-prompt priority by default. A fresh sample is frozen as
+  `sourceMode=unified-prompt-only` and deliberately omits reference images, avoiding repeated visual
+  analysis; missing, stale, or explicitly disabled samples fall back to the existing description,
+  manual prompt, and immutable reference-snapshot path.
+- Editing the style description, manual prompt, asset membership, asset hash, or media type now marks
+  an existing unified sample stale without deleting it, so users retain the previous result for review
+  while new generation work cannot mistake it for the current style definition.
+
+### Security
+
+- Treat reference images, embedded text, QR codes, metadata, and filenames as untrusted analysis data.
+  The result reader rejects reparse-point/path escapes, invalid or BOM-prefixed UTF-8, extra or missing
+  JSON fields, identity/fingerprint mismatches, changed reference hashes, invalid timestamps, and
+  over-limit text before persisting a sample.
+
 ## 1.0.4t1 - 2026-08-25
 
 ### Added

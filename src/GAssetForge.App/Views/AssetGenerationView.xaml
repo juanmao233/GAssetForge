@@ -317,6 +317,7 @@
                                              <RowDefinition Height="Auto" />
                                              <RowDefinition Height="Auto" />
                                              <RowDefinition Height="Auto" />
+                                             <RowDefinition Height="Auto" />
                                          </Grid.RowDefinitions>
 
                             <DockPanel Margin="0,0,0,13">
@@ -363,6 +364,37 @@
 
                             <Border Grid.Row="2"
                                     Margin="0,10,0,0"
+                                    Padding="10,8"
+                                    Background="{DynamicResource App.SurfaceRaisedBrush}"
+                                    BorderBrush="{DynamicResource App.BorderBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="5">
+                                <Grid>
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="12" />
+                                        <ColumnDefinition Width="*" />
+                                    </Grid.ColumnDefinitions>
+                                    <CheckBox x:Name="PreferUnifiedStylePromptCheckBox"
+                                              Grid.Column="0"
+                                              VerticalAlignment="Center"
+                                              Content="统一提示词优先"
+                                              IsChecked="{Binding PreferUnifiedStylePrompt, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                              ToolTip="样本新鲜时只冻结并使用统一提示词，不把参考图交给 Agent；样本缺失或过期时自动回退原有链路。" />
+                                    <TextBlock x:Name="UnifiedStylePromptStatusText"
+                                               Grid.Column="2"
+                                               VerticalAlignment="Center"
+                                               Foreground="{DynamicResource App.TextMutedBrush}"
+                                               FontSize="9"
+                                               Text="{Binding UnifiedStylePromptStatusText}"
+                                               TextTrimming="CharacterEllipsis"
+                                               TextWrapping="Wrap"
+                                               ToolTip="{Binding UnifiedStylePromptStatusText}" />
+                                </Grid>
+                            </Border>
+
+                            <Border Grid.Row="3"
+                                    Margin="0,10,0,0"
                                     Padding="9,7"
                                     Background="{DynamicResource App.SurfaceRaisedBrush}"
                                     BorderBrush="{DynamicResource App.BorderBrush}"
@@ -374,7 +406,7 @@
                                            TextWrapping="Wrap" />
                             </Border>
 
-                            <Border Grid.Row="3"
+                            <Border Grid.Row="4"
                                     Margin="0,12,0,0"
                                     Padding="10"
                                     Background="{DynamicResource App.SurfaceRaisedBrush}"
@@ -455,7 +487,7 @@
                                 </Grid>
                             </Border>
 
-                            <Grid Grid.Row="4" Margin="0,12,0,0">
+                            <Grid Grid.Row="5" Margin="0,12,0,0">
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto" />
                                     <RowDefinition Height="112" />

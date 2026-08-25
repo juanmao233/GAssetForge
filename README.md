@@ -90,8 +90,8 @@ mcp-config.example.json          外部 MCP 客户端的手动配置示例
 - Undo / Redo、自动保存、导入与导出
 - 暗色 / 亮色主题
 - AvalonDock 布局保存、恢复与重置
-- 可停靠的美术风格素材库：可从“视图”菜单勾选开启/隐藏，并支持风格分组、多图参考、描述、AI 风格提示词与当前选择持久化
-- 可停靠的素材生成页：选择风格组和 Tilemap 步骤后，以表格批量填写描述、数量与各自输出目录，再原子创建本地持久化任务批次；可把指定纯色底作为第一道生成工序，由 Agent 写入 staging、GAssetForge 本地逐张剔色后再交付透明 PNG；自动调度异常时可复制 Codex 连接/当前批次指令，或为已失败任务创建新的手动重试批次
+- 可停靠的美术风格素材库：可从“视图”菜单勾选开启/隐藏，并支持风格分组、多图参考、描述、人工 AI 风格提示词与当前选择持久化；“分析生成统一提示词”会让已连接 Agent 一次检查当前组全部参考图，并把可复用提示词、摘要、素材指纹、分析器版本和生成时间保存为独立样本，不覆盖人工提示词
+- 可停靠的素材生成页：选择风格组和 Tilemap 步骤后，以表格批量填写描述、数量与各自输出目录，再原子创建本地持久化任务批次；默认开启“统一提示词优先”，新鲜样本会直接冻结进任务并跳过重复参考图分析，样本缺失或过期则明确回退到描述、人工提示词与参考图；可把指定纯色底作为第一道生成工序，由 Agent 写入 staging、GAssetForge 本地逐张剔色后再交付透明 PNG；自动调度异常时可复制 Codex 连接/当前批次指令，或为已失败任务创建新的手动重试批次
 - 可停靠的背景剔除工具：支持洋红、绿、蓝、黑、白和自定义 `#RRGGBB`，可独立选择图片输出透明 PNG，也与素材生成步骤共享色键、阈值、边缘收缩/羽化、去色边和边缘连通设置
 - 可停靠的像素点对齐工具：读取 PNG/JPEG/BMP/GIF/TIFF/WebP，使用源像素整数标尺裁切，支持独立自定义行列、中心像素优先采样，以及比例重整、顺时针旋转和四顶点夹角透视矫正
 - 可停靠的蓝图窗口：提供系统起始、说明、Harness 工具、功能集合与 If 逻辑节点；添加工具使用类似 PS 的右键工具组和两段式虚影确认，连线可从输入或输出端点起线并右键取消，默认鼠标负责选择及右/中键画布导航，对象移动工具负责整卡拖拽；同时支持项目级保存、版本化执行计划和运行审计目录
@@ -157,6 +157,31 @@ Agent Turn，旧失败记录继续保留用于审计。
 OpenCode 会显示在 Agent 选择中，但当前明确标记为 Adapter 待接入，不能启动可执行会话；不会伪装成已支持。
 项目内部可用“MCACP”指代这组 Agent Control + MCP 工具组合，但它不是对外协议名，也不代表已经存在一个
 标准化的 MCACP 协议。
+
+### 风格素材库统一提示词
+
+美术风格素材库中的“分析生成统一提示词”使用当前已连接 Agent 执行一次性视觉分析。软件先冻结风格组 ID、
+描述、人工提示词、全部参考素材 ID / 绝对路径 / 媒体类型 / SHA-256 与稳定来源指纹，再在 Agent 工作目录创建：
+
+```text
+<Agent WorkingDirectory>\.gassetforge\style-analysis\<requestId>\
+  request.v1.json
+  result.v1.json
+  diagnostics\
+```
+
+Agent 只能读取 `request.v1.json` 与其中明确列出的图片，并只允许写入约定的 `result.v1.json`；图片内容、图片
+文字、二维码、元数据和文件名全部视为不可信数据。聊天文本不作为交付结果，MCP 也不直接改写风格库 JSON。
+WPF 会对结果执行无 BOM UTF-8、严格 JSON 字段、路径边界、请求/风格组/来源指纹身份、参考文件 SHA-256、
+长度和时间校验；分析结束时还会重新计算当前组指纹，只有素材与人工定义均未变化时才原子保存样本。失败、取消
+或并发修改不会覆盖此前样本，请求和诊断目录会保留用于排查。
+
+统一样本与人工 `StylePrompt` 相互独立，包含提示词正文、摘要、来源指纹、生成时间、分析器及版本、请求 ID
+和本次覆盖的素材 ID。修改描述、人工提示词、素材集合、素材哈希或媒体类型后，旧样本不会被删除，但会立即
+标记为过期。素材生成页默认开启“统一提示词优先”：样本新鲜时任务使用
+`parameters.style.sourceMode=unified-prompt-only`，只冻结样本文本与来源元数据，不复制或交给 Agent 参考图；
+样本缺失、过期或用户关闭该开关时，自动回退原有描述、人工提示词与参考图快照链路，避免把旧缓存伪装成
+当前风格。
 
 ### 背景剔除生成链路
 
@@ -263,10 +288,10 @@ HTTP Server 仅绑定本机 loopback 地址，并拒绝非本机客户端。`POS
 ```text
 Projects\default.pfui.json          未激活正式项目时的兼容 UI 工作区
 Workspace\ui-layout-v1.json         AvalonDock 布局
-Settings\user-settings.json         主题、Agent/MCP、Codex thread、生成草稿、背景剔除与像素对齐设置
+Settings\user-settings.json         主题、Agent/MCP、Codex thread、生成草稿及统一提示词优先、背景剔除与像素对齐设置
 Generation\generation-tasks.v1.json 本地持久化批次任务队列
 Generation\ReferenceSnapshots\... 任务创建时冻结的风格参考图
-Assets\StyleLibrary\art-style-library.v1.json  风格组、提示词与当前选择
+Assets\StyleLibrary\art-style-library.v1.json  风格组、人工提示词、统一提示词样本与当前选择
 ```
 
 风格参考图片会复制到 `Assets\StyleLibrary\assets\<风格组 ID>`，不依赖原始导入路径。创建生成任务时，
@@ -275,6 +300,10 @@ Assets\StyleLibrary\art-style-library.v1.json  风格组、提示词与当前选
 任务快照使用异步流式复制，单任务最多 128 张参考图、单图最大 512 MB、总量最大 2 GB。布局变化不会进入
 项目 Schema、dirty 状态、Undo / Redo 或项目导出。项目创建、恢复和数据边界详见
 [项目工作区说明](docs/PROJECTS.md)。
+
+统一提示词样本直接随 `art-style-library.v1.json` 持久化；一次性分析请求及诊断位于 Agent 工作目录的
+`.gassetforge\style-analysis`，不属于项目资产或生成任务真相源。新鲜样本创建任务时不会再生成风格参考图
+快照；只有回退到原链路的任务才会冻结并镜像参考图片。
 
 发布素材任务只代表把冻结约束与项目内 Run 交给已连接的 Agent Runtime；仓库不会因此宣称图片已经生成。
 只有 Agent 实际调用可用的图像生成模型，并由 `submit_generation_output` 把真实模型文件导入项目、完成确定性

@@ -35,6 +35,7 @@ output/
 /Workspace/
 /Packages/
 /ProjectSettings/
+**/.gassetforge/
 
 # Local configuration and secrets
 .env

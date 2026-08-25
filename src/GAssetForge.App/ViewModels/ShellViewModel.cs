@@ -209,6 +209,9 @@ public sealed class ShellViewModel : ObservableObject
         AgentConnection.SessionChanged += OnAgentSessionChanged;
         AgentConnection.AgentActivityReceived += OnAgentActivityForStructuredLog;
         AgentConnection.PropertyChanged += OnAgentConnectionPropertyChanged;
+        ArtStyleLibrary.ConfigurePromptAnalysisService(
+            new AgentArtStylePromptAnalysisService(
+                new AgentConnectionArtStylePromptAgentClient(AgentConnection)));
         _generationTaskStore = new JsonGenerationTaskStore(settingsService.Paths.GenerationDirectory);
         _generationBatchTurnReconciler = new GenerationBatchTurnReconciler(_generationTaskStore);
         AssetGeneration = new AssetGenerationViewModel(
@@ -227,7 +230,8 @@ public sealed class ShellViewModel : ObservableObject
             _settings.AssetGenerationRows,
             _settings.AssetGenerationMaxParallelism,
             _settings.AssetGenerationAutoRetryEnabled,
-            _settings.AssetGenerationAutoRetryCount);
+            _settings.AssetGenerationAutoRetryCount,
+            _settings.AssetGenerationPreferUnifiedStylePrompt);
         AssetGeneration.SettingsChanged += OnAssetGenerationSettingsChanged;
         AssetGeneration.StyleLibraryRequested += OnAssetGenerationStyleLibraryRequested;
         AssetGeneration.AgentConnectionRequested += OnAssetGenerationAgentConnectionRequested;
@@ -1677,6 +1681,7 @@ public sealed class ShellViewModel : ObservableObject
         _settings.AssetGenerationMaxParallelism = e.MaxParallelism;
         _settings.AssetGenerationAutoRetryEnabled = e.AutoRetryEnabled;
         _settings.AssetGenerationAutoRetryCount = e.AutoRetryCount;
+        _settings.AssetGenerationPreferUnifiedStylePrompt = e.PreferUnifiedStylePrompt;
         _settings.AssetGenerationOutputPath = e.OutputDirectory;
         _settings.AssetGenerationRows = e.Rows
             .Select(row => new AssetGenerationDraftRowSettings
@@ -2022,6 +2027,7 @@ public sealed class ShellViewModel : ObservableObject
         _settings.AssetGenerationMaxParallelism = AssetGeneration.MaxParallelism;
         _settings.AssetGenerationAutoRetryEnabled = AssetGeneration.AutoRetryEnabled;
         _settings.AssetGenerationAutoRetryCount = AssetGeneration.AutoRetryCount;
+        _settings.AssetGenerationPreferUnifiedStylePrompt = AssetGeneration.PreferUnifiedStylePrompt;
         _settings.AssetGenerationOutputPath = AssetGeneration.OutputDirectory;
         _settings.AssetGenerationRows = AssetGeneration.DraftRows
             .Select(row => new AssetGenerationDraftRowSettings

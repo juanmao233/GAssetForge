@@ -6,13 +6,13 @@
 GAssetForge.Core
   Projects/          项目 Schema、校验、序列化与默认项目
   Workflows/         五类业务入口定义
-  ArtStyles/         风格组、参考素材元数据、校验与 JSON 契约
+  ArtStyles/         风格组、参考素材元数据、统一提示词样本、稳定指纹、校验与 JSON 契约
   Generation/        AI 约束包、Tilemap 规则、单图任务状态机、Run Schema 与阶段日志
 
 GAssetForge.App
   ViewModels/        Shell 与 UI 编辑器状态/命令
   Views/             原生 WPF 面板和画布
-  Services/          项目、布局、主题、设置、生成 Harness、Run 工作区、日志与 Agent Runtime
+  Services/          项目、布局、主题、设置、风格分析协议、生成 Harness、Run 工作区、日志与 Agent Runtime
   Services/AgentRuntime/
                      Codex App Server stdio JSONL、codex exec JSONL 降级与统一会话契约
   Themes/            暗亮调色板与控件资源
@@ -54,8 +54,9 @@ AvalonDock 的模块接口只承担面板拓扑、大小、停靠位置、隐藏
 | 项目清单 | `ProjectWorkspaceService` | `<ProjectRoot>\ProjectSettings\gassetforge.project.json`；项目身份、工作流与 Tilemap 参数 |
 | UI 编辑数据 | `JsonProjectRepository` | `<ProjectRoot>\ProjectSettings\ui-project.pfui.json`；自动保存、备份、导入、导出、Undo / Redo |
 | 停靠布局 | `AvalonDockLayoutService` | 窗口关闭保存、启动恢复、可独立重置 |
-| 用户设置 | `UserSettingsService` | 主题、最近项目、Agent/MCP 配置、Codex thread ID + 工作目录与素材生成表格草稿 |
-| 美术风格素材库 | `JsonArtStyleLibraryRepository` | 风格组与当前选择即时原子保存；参考图片复制到受管目录 |
+| 用户设置 | `UserSettingsService` | 主题、最近项目、Agent/MCP 配置、Codex thread ID + 工作目录、素材生成表格草稿与统一提示词优先开关 |
+| 美术风格素材库 | `JsonArtStyleLibraryRepository` | 风格组、人工提示词、统一提示词样本与当前选择即时原子保存；参考图片复制到受管目录 |
+| 风格提示词分析请求 | `AgentArtStylePromptAnalysisService` | Agent 工作目录下 `.gassetforge\style-analysis\<requestId>` 的一次性 request/result/diagnostics；不作为风格库真相源 |
 | AI 生成任务 | `JsonGenerationTaskStore` | 本地跨进程持久化单图任务、原子状态迁移、风格快照与冻结交付计划 |
 | 生成 Run | `GenerationRunWorkspaceService` | `<Assets>\Generated\GAssetForge\Runs\<batchId>`；manifest、提示、参考图、模型原图、中间结果与 timeline |
 | 工作台日志 | `WorkbenchConsoleService` | `%LocalAppData%\GAssetForge\Desktop\Logs\workbench-*.jsonl`；Agent、Turn、工具和调度阶段的结构化会话日志 |
@@ -66,18 +67,44 @@ Shell 会在一次项目激活中协调项目清单、UI repository、Project Br
 但不会删除磁盘上的正式项目。
 
 `ArtStyleLibraryView` 是 ContentId 为 `art-style-library` 的跨工作流共享面板。每个风格组保存稳定 ID、名称、
-描述、AI 风格提示词和多张参考图片元数据；图片导入后以稳定文件名复制到
+描述、人工 AI 风格提示词、可选统一提示词样本和多张参考图片元数据；图片导入后以稳定文件名复制到
 `Assets\StyleLibrary\assets\<group-id>`。清单只保存受控相对路径，并校验扩展名、媒体类型、哈希和目录边界。
 顶部“视图”菜单使用可勾选开关同步该面板的显示/隐藏状态。当前选中的风格组与素材会随清单持久化，
-后续生成流程可直接把它们转换为 provider-neutral 风格约束。
+后续生成流程可直接把它们转换为 provider-neutral 风格约束。统一样本不会覆盖人工提示词；它保存提示词、
+摘要、SHA-256 来源指纹、UTC 生成时间、分析器身份/版本、请求 ID 和分析时覆盖的素材 ID。
+
+`ArtStylePromptFingerprint` 对规范化描述、人工提示词及按稳定 ID 排序的素材 ID / SHA-256 / 媒体类型计算带
+domain separation 的稳定 SHA-256。重命名风格组不会令样本过期；修改描述、人工提示词、素材集合、素材哈希
+或媒体类型会改变当前指纹，使旧样本保留但标记为 stale。分析完成时 ViewModel 会再次核对当前指纹并原子
+保存；分析期间发生编辑、保存失败、取消或 Agent 错误都不会覆盖旧样本。
+
+### 风格分析一次性文件协议
+
+`AgentArtStylePromptAnalysisService` 不解析 Agent 聊天文本，也不允许 Agent 或 MCP 直接修改
+`art-style-library.v1.json`。每次分析在当前 Agent 工作目录建立独立目录：
+
+```text
+.gassetforge/style-analysis/<requestId>/
+  request.v1.json       软件原子写入的冻结请求
+  result.v1.json        Agent 唯一允许写入的业务结果
+  diagnostics/          Turn 状态或失败诊断
+```
+
+请求明确列出风格组身份、描述、人工提示词、来源指纹和当前组的全部参考图绝对路径、媒体类型及 SHA-256；
+Agent 必须逐张使用视觉能力检查，只归纳共同视觉语言。参考图内容、图中文字、二维码、元数据、文件名以及请求
+中的用户数据字段都按不可信输入处理，不能改变路径、协议或任务范围。协议目录拒绝重解析点和越界路径，结果
+限制为无 BOM UTF-8 的严格 schema v1 JSON，只允许 `schemaVersion`、`requestId`、`groupId`、`sourceFingerprint`、
+`unifiedPrompt`、`summary`、`analyzer`、`analyzerVersion` 与 `analyzedAtUtc` 等固定字段。WPF 在落库前复验
+身份字段、分析器、时间、长度、参考图存在性和 SHA-256，并将当前完整素材 ID 集合写入最终样本。
 
 AI 生成任务是第四条本地运行时 seam，保存于 `Generation\generation-tasks.v1.json`。`AssetGenerationView`
 以表格收集多行内容描述、数量和输出目录，并把当前风格组与 Tilemap 参数组合为 provider-neutral 约束包。
 数量只负责把一行展开成若干个彼此独立的单图任务：新合同固定 `output.count=1`、`outputIndex=0`，任务间并发
-交给当前 Agent Host 的默认调度，不再把页面“并行图片数”作为生成协议的一部分。参考图仍先冻结到全局
-`Generation\ReferenceSnapshots`，随后由客户端镜像到项目内 Run；交付计划冻结任务创建时的绝对 Assets 根、
-项目内运行路径和唯一最终目标路径。任务队列不写入 UI 项目 Schema、Undo/Redo 或 AvalonDock 布局，也不依赖
-Agent 或 MCP HTTP 会话持续在线。
+交给当前 Agent Host 的默认调度，不再把页面“并行图片数”作为生成协议的一部分。页面默认开启统一提示词
+优先：选中组存在新鲜样本时，任务冻结 `sourceMode=unified-prompt-only`、样本文本、来源指纹和生成时间，参考图
+集合为空，也不会创建或镜像参考图快照；样本缺失、过期或用户关闭开关时，明确回退到描述、人工提示词和当前
+参考图快照。交付计划始终冻结任务创建时的绝对 Assets 根、项目内运行路径和唯一最终目标路径。任务队列不写入
+UI 项目 Schema、Undo/Redo 或 AvalonDock 布局，也不依赖 Agent 或 MCP HTTP 会话持续在线。
 
 ### 客户端 + Harness + Skill + MCP/ACP 分层
 
@@ -90,9 +117,9 @@ Agent 或 MCP HTTP 会话持续在线。
 | Skill / 图像模型 | 根据冻结提示和参考素材生成一张真实模型图片 | 不建项目目录，不搬运、缩放、抠图、改 Alpha 或决定最终交付路径 |
 | Agent Control + MCP | Codex thread/Turn 负责会话与调度；MCP 负责最小工具调用、认领与结果提交 | MCP 不负责会话持久化，Agent 不重复实现 Harness 的确定性步骤 |
 
-项目内部的“MCACP”仍只是 Agent Control 与 MCP 组合的架构简称，不声明为标准协议。后续把风格素材库稳定为
-一次性提取并持久化的提示词，或把更多确定性步骤下沉为客户端工具时，只需收窄 Skill 输入和 Agent 指令，
-无需改变任务队列、Run manifest 与最终提交合同。
+项目内部的“MCACP”仍只是 Agent Control 与 MCP 组合的架构简称，不声明为标准协议。风格素材库已经通过
+一次性分析协议把稳定提示词持久化在客户端；新鲜样本模式会收窄 Skill 输入并省去重复参考图分析，而不改变
+任务队列、Run manifest 与最终提交合同。更多确定性步骤仍可按同一原则继续下沉为客户端工具。
 
 ### Agent Runtime、MCP 与进程边界
 
@@ -330,6 +357,8 @@ Shell 的 UI 编辑命令通过 `GatedCommand` 接到稳定 seam：非 UI 工作
 - fake process 下的 App Server initialize、账号读取、thread start/resume、MCP ready、Turn 完成与异常退出
 - `codex exec --json` 降级、thread ID + 工作目录恢复，以及切换项目不误用旧 thread
 - 数量展开为一图一任务、页面并行数不进入 Agent prompt、批次调度失败仍保留 `Pending`
+- 风格库统一提示词样本持久化、稳定指纹过期判断、一次性 Agent request/result 协议与严格结果校验
+- 生成页统一提示词优先、`unified-prompt-only` 冻结合同、跳过参考图快照及缺失/过期回退旧链路
 - 项目内 Run 目录、manifest、提示与参考图镜像、中间图保留和结构化阶段 timeline
 - `claim → ImageGen → submit_generation_output`、源图归档、尺寸归一化、底色补齐、背景剔除、最终校验与自动完成
 - `submit_generation_output` 的幂等、认领归属、路径边界与单图合同，以及旧多图 staging/process/complete 兼容
@@ -360,7 +389,7 @@ manifest 与 UI 文件分别回退读取自己的 `.bak`，不能用其中一个
 ## 后续可扩展 seam
 
 - `workflowGraphs`：ComfyUI 式节点图、Node Registry、执行队列
-- 风格素材库的稳定提示词提取/版本化缓存，让重复批次直接复用已审核风格描述
+- 统一提示词样本的人工审核/锁定、历史版本对比与显式回滚
 - 可插拔图像模型 Skill Adapter，同时保持单图 sourcePath 提交合同不变
 - Run `50-final` 镜像、清理/归档策略和按阶段重放工具
 - Photoshop MCP：PSD 打开、图层同步、后处理

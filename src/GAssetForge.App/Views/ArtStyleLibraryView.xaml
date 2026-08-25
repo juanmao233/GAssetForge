@@ -154,6 +154,19 @@
                 BorderThickness="0,0,0,1">
             <DockPanel LastChildFill="True">
                 <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                    <Button x:Name="AnalyzeUnifiedStylePromptButton"
+                            Command="{Binding AnalyzeUnifiedPromptCommand}"
+                            Style="{StaticResource StyleLibraryToolbarButtonStyle}"
+                            ToolTip="让已连接的 Agent 检查当前组全部参考图并保存可复用的统一提示词样本">
+                        <StackPanel Orientation="Horizontal">
+                            <TextBlock Margin="0,0,6,0"
+                                       VerticalAlignment="Center"
+                                       FontFamily="Segoe MDL2 Assets"
+                                       Text="&#xE945;" />
+                            <TextBlock VerticalAlignment="Center"
+                                       Text="{Binding AnalyzeUnifiedPromptButtonText}" />
+                        </StackPanel>
+                    </Button>
                     <Button x:Name="ImportStyleAssetsButton"
                             Command="{Binding ImportAssetsCommand}"
                             Style="{StaticResource StyleLibraryToolbarButtonStyle}"
@@ -389,9 +402,9 @@
                         </Style>
                     </Grid.Style>
                     <Grid.RowDefinitions>
-                        <RowDefinition Height="194" MinHeight="145" />
+                        <RowDefinition Height="5*" MinHeight="230" />
                         <RowDefinition Height="5" />
-                        <RowDefinition Height="*" MinHeight="135" />
+                        <RowDefinition Height="6*" MinHeight="135" />
                     </Grid.RowDefinitions>
 
                     <Border Padding="14,11"
@@ -422,7 +435,8 @@
                                 </Grid.ColumnDefinitions>
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto" />
-                                    <RowDefinition Height="*" />
+                                    <RowDefinition Height="92" />
+                                    <RowDefinition Height="*" MinHeight="92" />
                                 </Grid.RowDefinitions>
 
                                 <StackPanel Grid.Column="0" Grid.ColumnSpan="3">
@@ -455,6 +469,54 @@
                                              TextWrapping="Wrap"
                                              VerticalScrollBarVisibility="Auto" />
                                 </StackPanel>
+
+                                <Border Grid.Row="2"
+                                        Grid.Column="0"
+                                        Grid.ColumnSpan="3"
+                                        Margin="0,10,0,0"
+                                        Padding="10,8"
+                                        Background="{DynamicResource App.SurfaceRaisedBrush}"
+                                        BorderBrush="{DynamicResource App.BorderBrush}"
+                                        BorderThickness="1"
+                                        CornerRadius="5">
+                                    <Grid>
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="*" />
+                                        </Grid.RowDefinitions>
+                                        <DockPanel Margin="0,0,0,6" LastChildFill="True">
+                                            <TextBlock DockPanel.Dock="Right"
+                                                       Margin="10,0,0,0"
+                                                       VerticalAlignment="Center"
+                                                       Foreground="{DynamicResource App.TextMutedBrush}"
+                                                       FontSize="9"
+                                                       Text="{Binding UnifiedPromptGeneratedAtText, StringFormat=生成时间：{0}}" />
+                                            <StackPanel Orientation="Horizontal">
+                                                <TextBlock Style="{StaticResource StyleLibraryFieldLabelStyle}"
+                                                           Text="统一提示词样本" />
+                                                <Border Margin="8,-1,0,0"
+                                                        Padding="6,2"
+                                                        Background="{DynamicResource App.SelectionBrush}"
+                                                        CornerRadius="3">
+                                                    <TextBlock Foreground="{DynamicResource App.AccentBrush}"
+                                                               FontSize="9"
+                                                               Text="{Binding UnifiedPromptStateText}" />
+                                                </Border>
+                                            </StackPanel>
+                                        </DockPanel>
+                                        <TextBox x:Name="UnifiedStylePromptTextBox"
+                                                 Grid.Row="1"
+                                                 MinHeight="62"
+                                                 IsReadOnly="True"
+                                                 AcceptsReturn="True"
+                                                 FontFamily="Consolas, Microsoft YaHei UI"
+                                                 FontSize="10.5"
+                                                 Text="{Binding UnifiedPromptText, Mode=OneWay}"
+                                                 TextWrapping="Wrap"
+                                                 ToolTip="{Binding UnifiedPromptSummary}"
+                                                 VerticalScrollBarVisibility="Auto" />
+                                    </Grid>
+                                </Border>
                             </Grid>
                         </Grid>
                     </Border>

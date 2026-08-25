@@ -1,6 +1,7 @@
 using GAssetForge.App.Infrastructure;
 using GAssetForge.Core.ArtStyles;
 using System.Collections.ObjectModel;
+using System.IO;
 
 namespace GAssetForge.App.ViewModels;
 
@@ -11,6 +12,7 @@ public sealed class ArtStyleGroupViewModel : ObservableObject
     private string _name;
     private string _description;
     private string _stylePrompt;
+    private string _unifiedPromptSourceFingerprint;
 
     internal ArtStyleGroupViewModel(
         ArtStyleGroupModel model,
@@ -24,10 +26,13 @@ public sealed class ArtStyleGroupViewModel : ObservableObject
         _name = model.Name;
         _description = model.Description;
         _stylePrompt = model.Prompt;
+        _unifiedPromptSourceFingerprint = string.Empty;
         foreach (var asset in assets)
         {
             Assets.Add(asset);
         }
+
+        _unifiedPromptSourceFingerprint = ArtStylePromptFingerprint.Compute(Model);
     }
 
     internal ArtStyleGroupModel Model { get; }
@@ -99,12 +104,14 @@ public sealed class ArtStyleGroupViewModel : ObservableObject
             Model.Description = value;
             Model.UpdatedAtUtc = DateTimeOffset.UtcNow;
             OnPropertyChanged();
+            RefreshUnifiedPromptSourceFingerprint();
             if (!_persistEdit(this))
             {
                 _description = previousValue;
                 Model.Description = previousValue;
                 Model.UpdatedAtUtc = previousUpdatedAt;
                 OnPropertyChanged();
+                RefreshUnifiedPromptSourceFingerprint();
             }
         }
     }
@@ -135,6 +142,7 @@ public sealed class ArtStyleGroupViewModel : ObservableObject
             Model.UpdatedAtUtc = DateTimeOffset.UtcNow;
             OnPropertyChanged();
             OnPropertyChanged(nameof(Prompt));
+            RefreshUnifiedPromptSourceFingerprint();
             if (!_persistEdit(this))
             {
                 _stylePrompt = previousValue;
@@ -142,6 +150,7 @@ public sealed class ArtStyleGroupViewModel : ObservableObject
                 Model.UpdatedAtUtc = previousUpdatedAt;
                 OnPropertyChanged();
                 OnPropertyChanged(nameof(Prompt));
+                RefreshUnifiedPromptSourceFingerprint();
             }
         }
     }
@@ -150,6 +159,76 @@ public sealed class ArtStyleGroupViewModel : ObservableObject
     {
         get => StylePrompt;
         set => StylePrompt = value;
+    }
+
+    public ArtStylePromptSampleModel? UnifiedPromptSample => Model.UnifiedPromptSample;
+
+    public string UnifiedPromptSourceFingerprint => _unifiedPromptSourceFingerprint;
+
+    public string UnifiedPromptText => UnifiedPromptSample?.Prompt ?? string.Empty;
+
+    public string UnifiedPromptSummary => UnifiedPromptSample?.Summary ?? string.Empty;
+
+    public DateTimeOffset? UnifiedPromptGeneratedAtUtc => UnifiedPromptSample?.GeneratedAtUtc;
+
+    public string UnifiedPromptGeneratedAtText => UnifiedPromptGeneratedAtUtc is { } generatedAt
+        ? generatedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss")
+        : "尚未生成";
+
+    public bool HasUnifiedPrompt => !string.IsNullOrWhiteSpace(UnifiedPromptText);
+
+    public bool IsUnifiedPromptFresh =>
+        UnifiedPromptSample is { } sample &&
+        HasUnifiedPrompt &&
+        string.Equals(
+            sample.SourceFingerprint,
+            UnifiedPromptSourceFingerprint,
+            StringComparison.OrdinalIgnoreCase);
+
+    public string UnifiedPromptStateText => !HasUnifiedPrompt
+        ? "尚未生成统一提示词样本"
+        : IsUnifiedPromptFresh
+            ? "统一提示词样本可用"
+            : "素材或人工风格定义已变化，请重新分析";
+
+    public bool ApplyUnifiedPromptSample(ArtStylePromptSampleModel sample)
+    {
+        ArgumentNullException.ThrowIfNull(sample);
+        var safeSample = ClonePromptSample(sample);
+        try
+        {
+            ArtStyleLibraryValidator.ValidatePromptSample(Model, safeSample);
+        }
+        catch (InvalidDataException exception)
+        {
+            _reportValidationError(exception.Message);
+            return false;
+        }
+
+        var currentFingerprint = UnifiedPromptSourceFingerprint;
+        if (!string.Equals(
+                currentFingerprint,
+                safeSample.SourceFingerprint,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            _reportValidationError("风格组内容已在分析期间发生变化，请重新生成统一提示词样本。");
+            return false;
+        }
+
+        var previousSample = Model.UnifiedPromptSample;
+        var previousUpdatedAt = Model.UpdatedAtUtc;
+        Model.UnifiedPromptSample = safeSample;
+        Model.UpdatedAtUtc = DateTimeOffset.UtcNow;
+        NotifyUnifiedPromptStateChanged();
+        if (_persistEdit(this))
+        {
+            return true;
+        }
+
+        Model.UnifiedPromptSample = previousSample;
+        Model.UpdatedAtUtc = previousUpdatedAt;
+        NotifyUnifiedPromptStateChanged();
+        return false;
     }
 
     public string AssetCountText => $"{Assets.Count} 张参考素材";
@@ -162,11 +241,47 @@ public sealed class ArtStyleGroupViewModel : ObservableObject
         }
 
         OnPropertyChanged(nameof(AssetCountText));
+        RefreshUnifiedPromptSourceFingerprint();
     }
 
     internal void RemoveAsset(ArtStyleAssetViewModel asset)
     {
         Assets.Remove(asset);
         OnPropertyChanged(nameof(AssetCountText));
+        RefreshUnifiedPromptSourceFingerprint();
     }
+
+    private void RefreshUnifiedPromptSourceFingerprint()
+    {
+        _unifiedPromptSourceFingerprint = ArtStylePromptFingerprint.Compute(Model);
+        NotifyUnifiedPromptStateChanged();
+    }
+
+    private void NotifyUnifiedPromptStateChanged()
+    {
+        OnPropertyChanged(nameof(UnifiedPromptSample));
+        OnPropertyChanged(nameof(UnifiedPromptSourceFingerprint));
+        OnPropertyChanged(nameof(UnifiedPromptText));
+        OnPropertyChanged(nameof(UnifiedPromptSummary));
+        OnPropertyChanged(nameof(UnifiedPromptGeneratedAtUtc));
+        OnPropertyChanged(nameof(UnifiedPromptGeneratedAtText));
+        OnPropertyChanged(nameof(HasUnifiedPrompt));
+        OnPropertyChanged(nameof(IsUnifiedPromptFresh));
+        OnPropertyChanged(nameof(UnifiedPromptStateText));
+    }
+
+    private static ArtStylePromptSampleModel ClonePromptSample(ArtStylePromptSampleModel sample) =>
+        new()
+        {
+            SchemaVersion = sample.SchemaVersion,
+            Prompt = sample.Prompt,
+            Summary = sample.Summary,
+            SourceFingerprint = sample.SourceFingerprint,
+            GeneratedAtUtc = sample.GeneratedAtUtc,
+            AnalyzerId = sample.AnalyzerId,
+            AnalyzerVersion = sample.AnalyzerVersion,
+            RequestId = sample.RequestId,
+            AnalyzedAssetIds = sample.AnalyzedAssetIds?.ToList() ?? [],
+            AnalyzedAssetCount = sample.AnalyzedAssetCount
+        };
 }

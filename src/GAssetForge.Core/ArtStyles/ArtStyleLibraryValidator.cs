@@ -10,6 +10,11 @@ public static partial class ArtStyleLibraryValidator
     public const int MaximumNameLength = 160;
     public const int MaximumDescriptionLength = 8_000;
     public const int MaximumPromptLength = 32_000;
+    public const int MaximumUnifiedPromptLength = 8_000;
+    public const int MaximumUnifiedPromptSummaryLength = 4_000;
+    public const int MaximumAnalyzerIdLength = 160;
+    public const int MaximumAnalyzerVersionLength = 80;
+    public const int MaximumAnalysisRequestIdLength = 160;
     public const long MaximumAssetFileBytes = 512L * 1024L * 1024L;
     public const long MaximumAssetImportBatchBytes = 2L * 1024L * 1024L * 1024L;
 
@@ -111,6 +116,95 @@ public static partial class ArtStyleLibraryValidator
         {
             throw new InvalidDataException($"美术风格组 {group.Id} 的素材数量无效。");
         }
+
+        if (group.UnifiedPromptSample is not null)
+        {
+            ValidatePromptSample(group, group.UnifiedPromptSample);
+        }
+    }
+
+    public static void ValidatePromptSample(
+        ArtStyleGroupModel group,
+        ArtStylePromptSampleModel sample)
+    {
+        ArgumentNullException.ThrowIfNull(group);
+        ArgumentNullException.ThrowIfNull(sample);
+
+        if (sample.SchemaVersion != ArtStylePromptSampleModel.CurrentSchemaVersion)
+        {
+            throw new InvalidDataException(
+                $"不支持的统一风格提示词样本版本：{sample.SchemaVersion}。");
+        }
+
+        if (string.IsNullOrWhiteSpace(sample.Prompt) ||
+            sample.Prompt.Length > MaximumUnifiedPromptLength)
+        {
+            throw new InvalidDataException(
+                $"美术风格组 {group.Id} 的统一提示词样本无效。");
+        }
+
+        if (sample.Summary is null || sample.Summary.Length > MaximumUnifiedPromptSummaryLength)
+        {
+            throw new InvalidDataException(
+                $"美术风格组 {group.Id} 的统一提示词摘要无效。");
+        }
+
+        if (!Sha256Pattern().IsMatch(sample.SourceFingerprint ?? string.Empty))
+        {
+            throw new InvalidDataException(
+                $"美术风格组 {group.Id} 的统一提示词来源指纹无效。");
+        }
+
+        if (sample.GeneratedAtUtc == default)
+        {
+            throw new InvalidDataException(
+                $"美术风格组 {group.Id} 的统一提示词生成时间无效。");
+        }
+
+        if (!IsBoundedMetadataText(sample.AnalyzerId, MaximumAnalyzerIdLength) ||
+            !IsBoundedMetadataText(sample.AnalyzerVersion, MaximumAnalyzerVersionLength) ||
+            !IsBoundedMetadataText(sample.RequestId, MaximumAnalysisRequestIdLength))
+        {
+            throw new InvalidDataException(
+                $"美术风格组 {group.Id} 的统一提示词分析器元数据无效。");
+        }
+
+        if (sample.AnalyzedAssetIds is null ||
+            sample.AnalyzedAssetIds.Count > MaximumAssetsPerGroup ||
+            sample.AnalyzedAssetCount != sample.AnalyzedAssetIds.Count)
+        {
+            throw new InvalidDataException(
+                $"美术风格组 {group.Id} 的统一提示词素材计数无效。");
+        }
+
+        var analyzedAssetIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var assetId in sample.AnalyzedAssetIds)
+        {
+            if (!IsStableId(assetId) ||
+                !analyzedAssetIds.Add(assetId))
+            {
+                throw new InvalidDataException(
+                    $"美术风格组 {group.Id} 的统一提示词引用了无效素材 ID。");
+            }
+        }
+
+        var currentFingerprint = ArtStylePromptFingerprint.Compute(group);
+        if (string.Equals(
+                sample.SourceFingerprint,
+                currentFingerprint,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            var groupAssetIds = (group.Assets ?? [])
+                .OfType<ArtStyleAssetModel>()
+                .Select(asset => asset.Id)
+                .ToHashSet(StringComparer.Ordinal);
+            if (sample.AnalyzedAssetCount != groupAssetIds.Count ||
+                !analyzedAssetIds.SetEquals(groupAssetIds))
+            {
+                throw new InvalidDataException(
+                    $"美术风格组 {group.Id} 的新鲜统一提示词没有精确覆盖当前组的全部素材。");
+            }
+        }
     }
 
     private static void ValidateAsset(ArtStyleAssetModel asset, string groupId)
@@ -173,6 +267,11 @@ public static partial class ArtStyleLibraryValidator
 
     private static bool IsStableId(string? value) =>
         value is { Length: 32 } && StableIdPattern().IsMatch(value);
+
+    private static bool IsBoundedMetadataText(string? value, int maximumLength) =>
+        !string.IsNullOrWhiteSpace(value) &&
+        value.Length <= maximumLength &&
+        value.All(character => !char.IsControl(character));
 
     private static bool IsSafeRelativePath(string? value)
     {

@@ -25,6 +25,16 @@ public sealed record MaterialGenerationStyleSelection
 
     public string Prompt { get; init; } = string.Empty;
 
+    /// <summary>
+    /// Optional style-source contract. Older persisted tasks omit this value and retain the
+    /// original description/prompt/reference behavior.
+    /// </summary>
+    public string? SourceMode { get; init; }
+
+    public string? SourceFingerprint { get; init; }
+
+    public DateTimeOffset? GeneratedAtUtc { get; init; }
+
     public MaterialGenerationStyleReference[] References { get; init; } = [];
 }
 
@@ -55,6 +65,7 @@ public static class MaterialGenerationConstraintComposer
 {
     public const string StyleRuleKey = "material.style.selection";
     public const string DeliveryRuleKey = "material.delivery.targets";
+    public const string UnifiedPromptOnlySourceMode = "unified-prompt-only";
     public const int MaximumReferenceCount = 128;
 
     private const int ContractSchemaVersion = 1;
@@ -88,8 +99,7 @@ public static class MaterialGenerationConstraintComposer
                 {
                     Key = StyleRuleKey,
                     Category = "style",
-                    Instruction =
-                        $"必须采用风格组“{safeStyle.Name}”的风格定义；完整描述、提示词和 {safeStyle.References.Length} 张参考图快照位于 parameters.style。",
+                    Instruction = BuildStyleInstruction(safeStyle),
                     Required = true
                 },
                 new GenerationConstraintRule
@@ -247,6 +257,11 @@ public static class MaterialGenerationConstraintComposer
         var name = NormalizeRequiredText(style.Name, nameof(style.Name), 160);
         var description = NormalizeOptionalText(style.Description, nameof(style.Description), 8_000);
         var prompt = NormalizeOptionalText(style.Prompt, nameof(style.Prompt), 32_000);
+        var sourceMode = NormalizeOptionalText(style.SourceMode, nameof(style.SourceMode), 80);
+        var sourceFingerprint = NormalizeOptionalText(
+            style.SourceFingerprint,
+            nameof(style.SourceFingerprint),
+            128);
         var references = style.References
             ?? throw new ArgumentException("风格参考图集合不能为空。", nameof(style));
         if (references.Length > MaximumReferenceCount)
@@ -288,12 +303,60 @@ public static class MaterialGenerationConstraintComposer
             };
         }
 
+        DateTimeOffset? generatedAtUtc = style.GeneratedAtUtc;
+        if (string.IsNullOrWhiteSpace(sourceMode))
+        {
+            if (!string.IsNullOrWhiteSpace(sourceFingerprint) || generatedAtUtc is not null)
+            {
+                throw new ArgumentException(
+                    "风格来源元数据必须与 sourceMode 一起提供。",
+                    nameof(style));
+            }
+
+            sourceMode = string.Empty;
+            sourceFingerprint = string.Empty;
+        }
+        else if (string.Equals(sourceMode, UnifiedPromptOnlySourceMode, StringComparison.Ordinal))
+        {
+            if (string.IsNullOrWhiteSpace(prompt))
+            {
+                throw new ArgumentException("统一提示词模式必须包含冻结提示词。", nameof(style));
+            }
+
+            if (normalizedReferences.Length != 0)
+            {
+                throw new ArgumentException("统一提示词模式不得携带风格参考图。", nameof(style));
+            }
+
+            if (sourceFingerprint.Length != 64 || sourceFingerprint.Any(character => !Uri.IsHexDigit(character)))
+            {
+                throw new ArgumentException(
+                    "统一提示词来源指纹必须是 64 位十六进制 SHA-256。",
+                    nameof(style));
+            }
+
+            if (generatedAtUtc is null || generatedAtUtc == default)
+            {
+                throw new ArgumentException("统一提示词模式必须包含有效生成时间。", nameof(style));
+            }
+
+            sourceFingerprint = sourceFingerprint.ToLowerInvariant();
+            generatedAtUtc = generatedAtUtc.Value.ToUniversalTime();
+        }
+        else
+        {
+            throw new ArgumentException($"不支持的风格来源模式：{sourceMode}。", nameof(style));
+        }
+
         return style with
         {
             GroupId = groupId,
             Name = name,
             Description = description,
             Prompt = prompt,
+            SourceMode = sourceMode.Length == 0 ? null : sourceMode,
+            SourceFingerprint = sourceFingerprint.Length == 0 ? null : sourceFingerprint,
+            GeneratedAtUtc = generatedAtUtc,
             References = normalizedReferences
         };
     }
@@ -442,7 +505,7 @@ public static class MaterialGenerationConstraintComposer
             });
         }
 
-        return new JsonObject
+        var node = new JsonObject
         {
             ["schemaVersion"] = ContractSchemaVersion,
             ["groupId"] = style.GroupId,
@@ -451,7 +514,21 @@ public static class MaterialGenerationConstraintComposer
             ["prompt"] = style.Prompt,
             ["references"] = referenceNodes
         };
+
+        if (!string.IsNullOrWhiteSpace(style.SourceMode))
+        {
+            node["sourceMode"] = style.SourceMode;
+            node["sourceFingerprint"] = style.SourceFingerprint;
+            node["generatedAt"] = style.GeneratedAtUtc?.ToString("O");
+        }
+
+        return node;
     }
+
+    private static string BuildStyleInstruction(MaterialGenerationStyleSelection style) =>
+        string.Equals(style.SourceMode, UnifiedPromptOnlySourceMode, StringComparison.Ordinal)
+            ? $"必须直接采用风格组“{style.Name}”的冻结统一提示词；本任务明确不携带参考图，不得重新扫描或分析实时美术风格素材库。完整提示词和来源元数据位于 parameters.style。"
+            : $"必须采用风格组“{style.Name}”的风格定义；完整描述、提示词和 {style.References.Length} 张参考图快照位于 parameters.style。";
 
     private static JsonObject BuildDeliveryNode(GenerationDeliveryPlan delivery)
     {

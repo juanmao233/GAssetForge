@@ -17,9 +17,13 @@ public sealed class ArtStyleLibraryViewModel : ObservableObject, IDisposable
     private readonly RelayCommand _importAssetsCommand;
     private readonly RelayCommand<string[]> _importDroppedAssetsCommand;
     private readonly RelayCommand _removeAssetCommand;
+    private readonly AsyncRelayCommand _analyzeUnifiedPromptCommand;
+    private IArtStylePromptAnalysisService? _promptAnalysisService;
+    private CancellationTokenSource? _promptAnalysisCancellation;
     private ArtStyleGroupViewModel? _selectedGroup;
     private ArtStyleAssetViewModel? _selectedAsset;
     private string _statusText = "美术风格素材库正在初始化";
+    private bool _isAnalyzingUnifiedPrompt;
     private bool _isApplyingPersistedSelection;
     private bool _isShutDown;
 
@@ -56,6 +60,10 @@ public sealed class ArtStyleLibraryViewModel : ObservableObject, IDisposable
         ImportDroppedAssetsCommand = _importDroppedAssetsCommand;
         _removeAssetCommand = new RelayCommand(RemoveSelectedAsset, () => SelectedAsset is not null);
         RemoveAssetCommand = _removeAssetCommand;
+        _analyzeUnifiedPromptCommand = new AsyncRelayCommand(
+            AnalyzeSelectedGroupAsync,
+            CanAnalyzeSelectedGroup);
+        AnalyzeUnifiedPromptCommand = _analyzeUnifiedPromptCommand;
 
         ApplyPersistedSelection();
         StatusText = _repository.LastRecoverySource switch
@@ -79,6 +87,7 @@ public sealed class ArtStyleLibraryViewModel : ObservableObject, IDisposable
             }
 
             OnPropertyChanged(nameof(HasSelectedGroup));
+            OnPropertyChanged(nameof(AnalyzeUnifiedPromptButtonText));
             RaiseCommandStates();
             if (_isApplyingPersistedSelection)
             {
@@ -112,6 +121,27 @@ public sealed class ArtStyleLibraryViewModel : ObservableObject, IDisposable
 
     public bool HasSelectedAsset => SelectedAsset is not null;
 
+    public bool IsAnalyzingUnifiedPrompt
+    {
+        get => _isAnalyzingUnifiedPrompt;
+        private set
+        {
+            if (!SetProperty(ref _isAnalyzingUnifiedPrompt, value))
+            {
+                return;
+            }
+
+            OnPropertyChanged(nameof(AnalyzeUnifiedPromptButtonText));
+            RaiseCommandStates();
+        }
+    }
+
+    public string AnalyzeUnifiedPromptButtonText => IsAnalyzingUnifiedPrompt
+        ? "正在分析风格…"
+        : SelectedGroup?.HasUnifiedPrompt == true
+            ? "重新分析统一提示词"
+            : "分析生成统一提示词";
+
     public string LibraryFilePath => _repository.LibraryFilePath;
 
     public string ManagedAssetRoot => _repository.AssetRoot;
@@ -127,6 +157,15 @@ public sealed class ArtStyleLibraryViewModel : ObservableObject, IDisposable
     public ICommand ImportDroppedAssetsCommand { get; }
 
     public ICommand RemoveAssetCommand { get; }
+
+    public ICommand AnalyzeUnifiedPromptCommand { get; }
+
+    public void ConfigurePromptAnalysisService(IArtStylePromptAnalysisService service)
+    {
+        ObjectDisposedException.ThrowIf(_isShutDown, this);
+        _promptAnalysisService = service ?? throw new ArgumentNullException(nameof(service));
+        RaiseCommandStates();
+    }
 
     public void RenameSelectedGroup(string? requestedName)
     {
@@ -173,6 +212,7 @@ public sealed class ArtStyleLibraryViewModel : ObservableObject, IDisposable
                 .Select(CreateAssetViewModel)
                 .ToArray();
             targetGroup.AddAssets(importedViewModels);
+            RaiseCommandStates();
             ApplySelectedAsset(importedViewModels.LastOrDefault() ?? SelectedAsset, persist: false);
             StatusText = result.ImportedAssets.Count switch
             {
@@ -197,6 +237,7 @@ public sealed class ArtStyleLibraryViewModel : ObservableObject, IDisposable
         }
 
         _isShutDown = true;
+        _promptAnalysisCancellation?.Cancel();
         try
         {
             _repository.Save(_library);
@@ -296,6 +337,7 @@ public sealed class ArtStyleLibraryViewModel : ObservableObject, IDisposable
         {
             _repository.RemoveAsset(_library, group.Id, asset.Id);
             group.RemoveAsset(asset);
+            RaiseCommandStates();
             var nextAsset = group.Assets.FirstOrDefault(candidate => candidate.Id == _library.SelectedAssetId);
             ApplySelectedAsset(nextAsset, persist: false);
             StatusText = $"已从风格组移除素材：{asset.Name}";
@@ -303,6 +345,151 @@ public sealed class ArtStyleLibraryViewModel : ObservableObject, IDisposable
         catch (Exception exception) when (IsExpectedOperationException(exception))
         {
             StatusText = $"移除素材失败：{exception.Message}";
+        }
+    }
+
+    private bool CanAnalyzeSelectedGroup() =>
+        !_isShutDown &&
+        !IsAnalyzingUnifiedPrompt &&
+        _promptAnalysisService is not null &&
+        SelectedGroup is { Assets.Count: > 0 };
+
+    private async Task AnalyzeSelectedGroupAsync()
+    {
+        var service = _promptAnalysisService;
+        var group = SelectedGroup;
+        if (service is null)
+        {
+            StatusText = "风格分析服务尚未初始化，请稍后重试";
+            return;
+        }
+
+        if (group is null)
+        {
+            StatusText = "请先选择要分析的风格组";
+            return;
+        }
+
+        if (group.Assets.Count == 0)
+        {
+            StatusText = "当前风格组没有参考图片，无法生成统一提示词样本";
+            return;
+        }
+
+        var missingAssets = group.Assets.Where(asset => asset.IsMissing).ToArray();
+        if (missingAssets.Length > 0)
+        {
+            StatusText = $"当前风格组有 {missingAssets.Length} 张参考图片缺失，请先重新导入或移除";
+            return;
+        }
+
+        if (group.Assets.Count > AgentArtStylePromptAnalysisService.MaximumReferenceCount)
+        {
+            StatusText =
+                $"统一分析最多支持 {AgentArtStylePromptAnalysisService.MaximumReferenceCount} 张图片；" +
+                "请拆分风格组，避免只分析部分素材却产生不完整样本";
+            return;
+        }
+
+        var sourceFingerprint = group.UnifiedPromptSourceFingerprint;
+        var analyzedAssetIds = group.Assets.Select(asset => asset.Id).ToArray();
+        var input = new ArtStylePromptAnalysisInput
+        {
+            GroupId = group.Id,
+            GroupName = group.Name,
+            Description = group.Description,
+            ExistingPrompt = group.StylePrompt,
+            SourceFingerprint = sourceFingerprint,
+            References = group.Assets
+                .Select(asset => new ArtStylePromptAnalysisReference
+                {
+                    Id = asset.Id,
+                    Name = asset.Name,
+                    SourcePath = asset.FullPath,
+                    Sha256 = asset.Sha256,
+                    MediaType = asset.MediaType
+                })
+                .ToArray()
+        };
+
+        var cancellation = new CancellationTokenSource();
+        _promptAnalysisCancellation = cancellation;
+        IsAnalyzingUnifiedPrompt = true;
+        StatusText =
+            $"正在让 Agent 分析“{group.Name}”的 {group.Assets.Count} 张参考图片；旧提示词样本会继续保留";
+        try
+        {
+            var result = await service.AnalyzeAsync(input, cancellation.Token).ConfigureAwait(true);
+            if (_isShutDown)
+            {
+                return;
+            }
+
+            if (!Groups.Contains(group))
+            {
+                StatusText =
+                    $"“{group.Name}”已在分析期间被删除；结果保留在 {result.DiagnosticsDirectory}，未写入其它风格组";
+                return;
+            }
+
+            if (!string.Equals(
+                    sourceFingerprint,
+                    group.UnifiedPromptSourceFingerprint,
+                    StringComparison.OrdinalIgnoreCase))
+            {
+                StatusText =
+                    $"“{group.Name}”的素材或人工风格定义在分析期间发生变化；结果保留在 " +
+                    $"{result.DiagnosticsDirectory}，请重新分析";
+                return;
+            }
+
+            var sample = new ArtStylePromptSampleModel
+            {
+                Prompt = result.UnifiedPrompt,
+                Summary = result.Summary,
+                SourceFingerprint = result.SourceFingerprint,
+                GeneratedAtUtc = result.AnalyzedAtUtc,
+                AnalyzerId = result.Analyzer,
+                AnalyzerVersion = result.AnalyzerVersion,
+                RequestId = result.RequestId,
+                AnalyzedAssetIds = analyzedAssetIds.ToList(),
+                AnalyzedAssetCount = analyzedAssetIds.Length
+            };
+            if (!group.ApplyUnifiedPromptSample(sample))
+            {
+                StatusText =
+                    $"统一提示词已返回但未能写入“{group.Name}”；诊断目录：{result.DiagnosticsDirectory}";
+                return;
+            }
+
+            OnPropertyChanged(nameof(AnalyzeUnifiedPromptButtonText));
+            StatusText =
+                $"已生成并保存“{group.Name}”的统一提示词样本；后续生成可选择提示词优先，" +
+                "无需再次分析参考图片";
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            if (!_isShutDown)
+            {
+                StatusText = "统一提示词分析已取消；此前保存的样本未受影响";
+            }
+        }
+        catch (Exception exception) when (IsExpectedOperationException(exception))
+        {
+            StatusText = $"统一提示词分析失败：{exception.Message}；此前保存的样本仍可继续审核或使用";
+        }
+        finally
+        {
+            if (ReferenceEquals(_promptAnalysisCancellation, cancellation))
+            {
+                _promptAnalysisCancellation = null;
+            }
+
+            cancellation.Dispose();
+            if (!_isShutDown)
+            {
+                IsAnalyzingUnifiedPrompt = false;
+            }
         }
     }
 
@@ -413,6 +600,7 @@ public sealed class ArtStyleLibraryViewModel : ObservableObject, IDisposable
         _importAssetsCommand?.RaiseCanExecuteChanged();
         _importDroppedAssetsCommand?.RaiseCanExecuteChanged();
         _removeAssetCommand?.RaiseCanExecuteChanged();
+        _analyzeUnifiedPromptCommand?.RaiseCanExecuteChanged();
     }
 
     private static bool IsExpectedOperationException(Exception exception) => exception is

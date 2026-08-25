@@ -21,11 +21,43 @@ public sealed class ArtStyleGroupModel
 
     public string Prompt { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Optional agent-produced prompt cache derived from this group's current description,
+    /// manually-authored prompt and managed reference assets. The manually-authored
+    /// <see cref="Prompt"/> remains independent and is never overwritten by analysis.
+    /// </summary>
+    public ArtStylePromptSampleModel? UnifiedPromptSample { get; set; }
+
     public DateTimeOffset CreatedAtUtc { get; set; }
 
     public DateTimeOffset UpdatedAtUtc { get; set; }
 
     public List<ArtStyleAssetModel> Assets { get; set; } = [];
+}
+
+public sealed class ArtStylePromptSampleModel
+{
+    public const int CurrentSchemaVersion = 1;
+
+    public int SchemaVersion { get; set; } = CurrentSchemaVersion;
+
+    public string Prompt { get; set; } = string.Empty;
+
+    public string Summary { get; set; } = string.Empty;
+
+    public string SourceFingerprint { get; set; } = string.Empty;
+
+    public DateTimeOffset GeneratedAtUtc { get; set; }
+
+    public string AnalyzerId { get; set; } = string.Empty;
+
+    public string AnalyzerVersion { get; set; } = string.Empty;
+
+    public string RequestId { get; set; } = string.Empty;
+
+    public List<string> AnalyzedAssetIds { get; set; } = [];
+
+    public int AnalyzedAssetCount { get; set; }
 }
 
 public sealed class ArtStyleAssetModel

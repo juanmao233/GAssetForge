@@ -45,6 +45,7 @@ public sealed class UserSettingsModel
     public int AssetGenerationMaxParallelism { get; set; } = 2;
     public bool AssetGenerationAutoRetryEnabled { get; set; } = true;
     public int AssetGenerationAutoRetryCount { get; set; } = 3;
+    public bool AssetGenerationPreferUnifiedStylePrompt { get; set; } = true;
     public string? AssetGenerationOutputPath { get; set; }
     public List<AssetGenerationDraftRowSettings> AssetGenerationRows { get; set; } = [];
     public string BackgroundRemovalPresetKey { get; set; } = "magenta";

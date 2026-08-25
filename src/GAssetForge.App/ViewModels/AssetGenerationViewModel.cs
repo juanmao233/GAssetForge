@@ -163,6 +163,7 @@ public sealed class AssetGenerationSettingsChangedEventArgs(
     int maxParallelism,
     bool autoRetryEnabled,
     int autoRetryCount,
+    bool preferUnifiedStylePrompt,
     IReadOnlyList<AssetGenerationDraftRowSnapshot> rows) : EventArgs
 {
     public string StepKey { get; } = stepKey;
@@ -174,6 +175,8 @@ public sealed class AssetGenerationSettingsChangedEventArgs(
     public bool AutoRetryEnabled { get; } = autoRetryEnabled;
 
     public int AutoRetryCount { get; } = autoRetryCount;
+
+    public bool PreferUnifiedStylePrompt { get; } = preferUnifiedStylePrompt;
 
     public IReadOnlyList<AssetGenerationDraftRowSnapshot> Rows { get; } = rows;
 
@@ -262,6 +265,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
     private int _maxParallelism;
     private bool _autoRetryEnabled;
     private int _autoRetryCount;
+    private bool _preferUnifiedStylePrompt;
     private AssetGenerationDraftRowViewModel? _selectedDraftRow;
     private string _constraintPreview = string.Empty;
     private string _statusText = "确认风格、批量条目和输出目录后可直接开始生成；未连接时也可仅发布本地队列";
@@ -321,6 +325,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         int maxParallelism = 2,
         bool autoRetryEnabled = true,
         int autoRetryCount = 3,
+        bool preferUnifiedStylePrompt = true,
         TimeProvider? timeProvider = null)
     {
         _paths = paths ?? throw new ArgumentNullException(nameof(paths));
@@ -341,6 +346,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         _maxParallelism = NormalizeParallelism(maxParallelism);
         _autoRetryEnabled = autoRetryEnabled;
         _autoRetryCount = NormalizeAutoRetryCount(autoRetryCount);
+        _preferUnifiedStylePrompt = preferUnifiedStylePrompt;
         _timeProvider = timeProvider ?? TimeProvider.System;
         InitializeDraftRows(draftRows, contentPrompt, outputDirectory);
 
@@ -538,6 +544,49 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
     }
 
     public IReadOnlyList<int> AutoRetryCountOptions => SupportedAutoRetryCounts;
+
+    public bool PreferUnifiedStylePrompt
+    {
+        get => _preferUnifiedStylePrompt;
+        set
+        {
+            if (!SetProperty(ref _preferUnifiedStylePrompt, value))
+            {
+                return;
+            }
+
+            RefreshDerivedState();
+            NotifySettingsChanged();
+        }
+    }
+
+    public bool IsUsingUnifiedStylePrompt =>
+        TryGetFreshUnifiedPrompt(SelectedStyleGroup, out _);
+
+    public string UnifiedStylePromptStatusText
+    {
+        get
+        {
+            if (!PreferUnifiedStylePrompt)
+            {
+                return "统一提示词优先已关闭；本批次保持原有风格描述、人工提示词与参考图链路。";
+            }
+
+            if (SelectedStyleGroup is null)
+            {
+                return "选择风格组后将优先使用其统一提示词样本。";
+            }
+
+            if (TryGetFreshUnifiedPrompt(SelectedStyleGroup, out _))
+            {
+                return "已命中新鲜统一提示词样本；本批次不会携带或读取参考图。";
+            }
+
+            return SelectedStyleGroup.UnifiedPromptSample is null
+                ? "当前风格组尚无统一提示词样本，将自动回退到风格描述、人工提示词与参考图。"
+                : "统一提示词样本已过期（素材或风格定义已变化），将自动回退到风格描述、人工提示词与参考图。";
+        }
+    }
 
     public bool AutoRetryEnabled
     {
@@ -837,11 +886,12 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
     public bool HasDispatchFailure => !string.IsNullOrWhiteSpace(DispatchFailureText);
 
     public bool CanCreateTask => !IsBusy &&
-                                 !IsDispatching &&
-                                 SelectedStyleGroup is not null &&
-                                 HasUsableStyle(SelectedStyleGroup) &&
-                                 TryValidateStyleReferences(SelectedStyleGroup, out _) &&
-                                 SelectedGenerationStep.Key == TilemapConstraintPackageBuilder.WorkflowId &&
+                                  !IsDispatching &&
+                                  SelectedStyleGroup is not null &&
+                                  HasUsableSelectedStyle(SelectedStyleGroup) &&
+                                  (TryGetFreshUnifiedPrompt(SelectedStyleGroup, out _) ||
+                                   TryValidateStyleReferences(SelectedStyleGroup, out _)) &&
+                                  SelectedGenerationStep.Key == TilemapConstraintPackageBuilder.WorkflowId &&
                                   DraftRows.Count > 0 &&
                                   DraftRows.All(row => row.IsValid) &&
                                   BackgroundRemoval.IsConfigurationValid &&
@@ -1984,15 +2034,20 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                     $"正在准备 {DraftRows.Count} 个任务、{TotalRequestedCount} 个预期产物的冻结约束。");
             }
 
-            var sourceReferences = SelectedStyleGroup.Assets
-                .Where(asset => !asset.IsMissing)
-                .Select(asset => new GenerationReferenceSource(
-                    asset.Id,
-                    asset.Name,
-                    asset.FullPath,
-                    asset.Sha256,
-                    asset.MediaType))
-                .ToArray();
+            var useUnifiedPrompt = TryGetFreshUnifiedPrompt(
+                SelectedStyleGroup,
+                out var unifiedPromptSample);
+            var sourceReferences = useUnifiedPrompt
+                ? []
+                : SelectedStyleGroup.Assets
+                    .Where(asset => !asset.IsMissing)
+                    .Select(asset => new GenerationReferenceSource(
+                        asset.Id,
+                        asset.Name,
+                        asset.FullPath,
+                        asset.Sha256,
+                        asset.MediaType))
+                    .ToArray();
             if (requestDispatch)
             {
                 ApplyDispatchProgress(
@@ -2000,7 +2055,9 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                     GenerationBatchDispatchStage.FreezingStyleReferences,
                     15d,
                     "GenerationReferenceSnapshotService.CaptureAsync(batchId, references)",
-                    $"正在复制并校验 {sourceReferences.Length} 张风格参考图快照。");
+                    useUnifiedPrompt
+                        ? "已冻结新鲜统一提示词样本；本批次明确跳过参考图校验与携带。"
+                        : $"正在复制并校验 {sourceReferences.Length} 张风格参考图快照。");
             }
 
             snapshot = await _snapshotService.CaptureAsync(batchId, sourceReferences)
@@ -2009,11 +2066,24 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             {
                 GroupId = SelectedStyleGroup.Id,
                 Name = SelectedStyleGroup.Name,
-                Description = SelectedStyleGroup.Description,
-                Prompt = SelectedStyleGroup.StylePrompt,
+                Description = useUnifiedPrompt ? string.Empty : SelectedStyleGroup.Description,
+                Prompt = useUnifiedPrompt
+                    ? unifiedPromptSample!.Prompt
+                    : SelectedStyleGroup.StylePrompt,
+                SourceMode = useUnifiedPrompt
+                    ? MaterialGenerationConstraintComposer.UnifiedPromptOnlySourceMode
+                    : null,
+                SourceFingerprint = useUnifiedPrompt
+                    ? unifiedPromptSample!.SourceFingerprint
+                    : null,
+                GeneratedAtUtc = useUnifiedPrompt
+                    ? unifiedPromptSample!.GeneratedAtUtc
+                    : null,
                 References = snapshot.References.ToArray()
             };
-            var stylePrompt = BuildEffectiveStylePrompt(SelectedStyleGroup);
+            var stylePrompt = useUnifiedPrompt
+                ? unifiedPromptSample!.Prompt.Trim()
+                : BuildLegacyStylePrompt(SelectedStyleGroup);
             var backgroundRemoval = BackgroundRemoval.CreateGenerationSpec();
             var assetRoot = Path.GetFullPath(_projectBrowser.RootPath);
             runWorkspace = _runWorkspaceService.Prepare(batchId, assetRoot);
@@ -3612,6 +3682,8 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(ConnectionStatusText));
         OnPropertyChanged(nameof(CanvasSizeText));
         OnPropertyChanged(nameof(TilemapGeometryText));
+        OnPropertyChanged(nameof(IsUsingUnifiedStylePrompt));
+        OnPropertyChanged(nameof(UnifiedStylePromptStatusText));
         OnPropertyChanged(nameof(CanCreateTask));
         OnPropertyChanged(nameof(CanStartGeneration));
         RefreshManualFallbackState();
@@ -3625,12 +3697,16 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             return "请选择一个美术风格组。";
         }
 
-        if (!HasUsableStyle(SelectedStyleGroup))
+        if (!HasUsableSelectedStyle(SelectedStyleGroup))
         {
-            return "当前风格组没有风格描述、AI 风格提示词或可用参考图片，请先完善美术风格素材库。";
+            return BuildUnavailableStyleMessage(SelectedStyleGroup);
         }
 
-        if (!TryValidateStyleReferences(SelectedStyleGroup, out var referenceReason))
+        var useUnifiedPrompt = TryGetFreshUnifiedPrompt(
+            SelectedStyleGroup,
+            out var unifiedPromptSample);
+        if (!useUnifiedPrompt &&
+            !TryValidateStyleReferences(SelectedStyleGroup, out var referenceReason))
         {
             return referenceReason;
         }
@@ -3661,12 +3737,18 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         try
         {
             var availableReferences = SelectedStyleGroup.Assets.Count(asset => !asset.IsMissing);
+            var stylePrompt = useUnifiedPrompt
+                ? unifiedPromptSample!.Prompt.Trim()
+                : BuildLegacyStylePrompt(SelectedStyleGroup);
             var builder = new StringBuilder()
                 .AppendLine($"【生成步骤】{SelectedGenerationStep.DisplayName}")
                 .AppendLine($"【风格组】{SelectedStyleGroup.Name}")
-                .AppendLine($"【风格描述】{BuildEffectiveStylePrompt(SelectedStyleGroup)}")
+                .AppendLine($"【风格输入】{BuildStyleSourcePreviewText(SelectedStyleGroup, useUnifiedPrompt)}")
+                .AppendLine($"【风格提示】{stylePrompt}")
                 .AppendLine(
-                    $"【参考图片】{availableReferences} / {MaterialGenerationConstraintComposer.MaximumReferenceCount} 张，将在发布时冻结一次并供整批共享")
+                    useUnifiedPrompt
+                        ? $"【参考图片】素材库现有 {availableReferences} 张，本批次携带 0 张；不会让 Agent 重新查看素材"
+                        : $"【参考图片】{availableReferences} / {MaterialGenerationConstraintComposer.MaximumReferenceCount} 张，将在发布时冻结一次并供整批共享")
                 .AppendLine(
                     $"【首道底色】{BackgroundRemoval.SelectedPresetDisplayName} {BackgroundRemoval.EffectiveColorHex}；Agent 只生成纯色底原图，GAssetForge 本地剔色后才写入最终透明 PNG")
                 .AppendLine($"【批量规模】{DraftRows.Count} 种物品 · {TotalRequestedCount} 个产物")
@@ -3702,12 +3784,13 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             return "请选择一个美术风格组";
         }
 
-        if (!HasUsableStyle(SelectedStyleGroup))
+        if (!HasUsableSelectedStyle(SelectedStyleGroup))
         {
-            return "当前风格组没有可用于匹配的描述、提示词或参考图片";
+            return BuildUnavailableStyleMessage(SelectedStyleGroup);
         }
 
-        if (!TryValidateStyleReferences(SelectedStyleGroup, out var referenceReason))
+        if (!TryGetFreshUnifiedPrompt(SelectedStyleGroup, out _) &&
+            !TryValidateStyleReferences(SelectedStyleGroup, out var referenceReason))
         {
             return referenceReason;
         }
@@ -3789,10 +3872,38 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         return true;
     }
 
-    private static bool HasUsableStyle(ArtStyleGroupViewModel group) =>
+    private bool HasUsableSelectedStyle(ArtStyleGroupViewModel group) =>
+        TryGetFreshUnifiedPrompt(group, out _) || HasUsableLegacyStyle(group);
+
+    private static bool HasUsableLegacyStyle(ArtStyleGroupViewModel group) =>
         !string.IsNullOrWhiteSpace(group.Description) ||
         !string.IsNullOrWhiteSpace(group.StylePrompt) ||
         group.Assets.Any(asset => !asset.IsMissing);
+
+    private bool TryGetFreshUnifiedPrompt(
+        ArtStyleGroupViewModel? group,
+        out ArtStylePromptSampleModel? sample)
+    {
+        sample = group?.UnifiedPromptSample;
+        return PreferUnifiedStylePrompt &&
+               group is { IsUnifiedPromptFresh: true } &&
+               sample is not null &&
+               !string.IsNullOrWhiteSpace(sample.Prompt) &&
+               !string.IsNullOrWhiteSpace(sample.SourceFingerprint) &&
+               sample.GeneratedAtUtc != default;
+    }
+
+    private string BuildUnavailableStyleMessage(ArtStyleGroupViewModel group)
+    {
+        if (!PreferUnifiedStylePrompt)
+        {
+            return "当前风格组没有可用于匹配的描述、人工提示词或参考图片。";
+        }
+
+        return group.UnifiedPromptSample is null
+            ? "当前风格组尚无统一提示词样本，且没有可回退的风格描述、人工提示词或参考图片；请先在美术风格素材库分析生成提示词。"
+            : "当前统一提示词样本已过期，且没有可回退的风格描述、人工提示词或参考图片；请重新分析当前风格库。";
+    }
 
     private static bool TryValidateStyleReferences(
         ArtStyleGroupViewModel group,
@@ -3833,7 +3944,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         return true;
     }
 
-    private static string BuildEffectiveStylePrompt(ArtStyleGroupViewModel group)
+    private static string BuildLegacyStylePrompt(ArtStyleGroupViewModel group)
     {
         var parts = new[] { group.Description.Trim(), group.StylePrompt.Trim() }
             .Where(value => !string.IsNullOrWhiteSpace(value))
@@ -3845,6 +3956,30 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         }
 
         return $"严格参考风格组“{group.Name}”中的图像，统一色彩、材质、光照、笔触与细节密度";
+    }
+
+    private string BuildStyleSourcePreviewText(
+        ArtStyleGroupViewModel group,
+        bool useUnifiedPrompt)
+    {
+        if (useUnifiedPrompt && group.UnifiedPromptSample is { } sample)
+        {
+            var fingerprint = sample.SourceFingerprint.Length > 12
+                ? sample.SourceFingerprint[..12]
+                : sample.SourceFingerprint;
+            return $"统一提示词优先 · 样本生成于 {sample.GeneratedAtUtc.ToLocalTime():yyyy-MM-dd HH:mm} · 来源 {fingerprint}";
+        }
+
+        if (!PreferUnifiedStylePrompt)
+        {
+            return "旧链路 · 已关闭统一提示词优先";
+        }
+
+        if (group.UnifiedPromptSample is null)
+        {
+            return "自动回退旧链路 · 当前没有统一提示词样本";
+        }
+        return "自动回退旧链路 · 统一提示词样本已过期";
     }
 
     private static string BuildDisplayName(string prompt)
@@ -4081,6 +4216,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                 MaxParallelism,
                 AutoRetryEnabled,
                 AutoRetryCount,
+                PreferUnifiedStylePrompt,
                 DraftRows.Select(row => row.Snapshot()).ToArray()));
     }
 
