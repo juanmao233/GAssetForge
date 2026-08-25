@@ -593,10 +593,17 @@
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
                                 <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
 
-                            <DockPanel Margin="0,0,0,13">
-                                <Border Style="{StaticResource GenerationStepBadgeStyle}">
+                            <Grid Margin="0,0,0,13">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="Auto" />
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <Border Grid.Column="0"
+                                        Style="{StaticResource GenerationStepBadgeStyle}">
                                     <TextBlock HorizontalAlignment="Center"
                                                VerticalAlignment="Center"
                                                Foreground="{DynamicResource App.AccentBrush}"
@@ -604,21 +611,194 @@
                                                FontWeight="Bold"
                                                Text="2" />
                                 </Border>
-                                <StackPanel VerticalAlignment="Center">
+                                <StackPanel Grid.Column="1"
+                                            Margin="8,0,8,0"
+                                            VerticalAlignment="Center">
                                     <TextBlock Style="{StaticResource App.PanelHeaderStyle}"
+                                               TextTrimming="CharacterEllipsis"
                                                Text="描述内容与输出位置" />
                                     <TextBlock Margin="0,2,0,0"
                                                Style="{StaticResource GenerationMutedTextStyle}"
+                                               TextTrimming="CharacterEllipsis"
                                                Text="每行对应一个独立任务；可拖动列宽、行高与左右分隔条，并用 Ctrl+C 复制所选单元格。" />
                                 </StackPanel>
-                                <Button x:Name="AddGenerationRowButton"
-                                        DockPanel.Dock="Right"
-                                        Command="{Binding AddDraftRowCommand}"
-                                        Content="＋ 新建行"
-                                        Style="{StaticResource GenerationSmallButtonStyle}" />
-                            </DockPanel>
+                                <StackPanel Grid.Column="2"
+                                            HorizontalAlignment="Right"
+                                            VerticalAlignment="Center"
+                                            Orientation="Horizontal">
+                                    <Button x:Name="ImportGenerationSpreadsheetButton"
+                                            Command="{Binding ImportDescriptionSpreadsheetCommand}"
+                                            Content="从 Excel 导入…"
+                                            Style="{StaticResource GenerationSmallButtonStyle}"
+                                            ToolTip="导入 .xlsx、.xls、.csv 或 .tsv，预览并选择需要追加的物品描述" />
+                                    <Button x:Name="AddGenerationRowButton"
+                                            Command="{Binding AddDraftRowCommand}"
+                                            Content="＋ 新建行"
+                                            Style="{StaticResource GenerationSmallButtonStyle}" />
+                                </StackPanel>
+                            </Grid>
 
-                            <Grid Grid.Row="1">
+                            <StackPanel Grid.Row="1">
+                                <TextBlock x:Name="AssetGenerationSpreadsheetInlineStatusText"
+                                           Margin="2,0,2,8"
+                                           Foreground="{DynamicResource App.TextMutedBrush}"
+                                           FontSize="9"
+                                           Text="{Binding SpreadsheetImportStatusText}"
+                                           TextWrapping="Wrap" />
+                                <Border x:Name="AssetGenerationSpreadsheetPreviewPanel"
+                                        Margin="0,0,0,12"
+                                        Padding="10"
+                                        Background="{DynamicResource App.SurfaceRaisedBrush}"
+                                        BorderBrush="{DynamicResource App.BorderBrush}"
+                                        BorderThickness="1"
+                                        CornerRadius="5"
+                                        Visibility="{Binding HasSpreadsheetPreview, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                <Grid>
+                                    <Grid.RowDefinitions>
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                        <RowDefinition Height="Auto" />
+                                    </Grid.RowDefinitions>
+
+                                    <DockPanel Margin="0,0,0,9">
+                                        <Button DockPanel.Dock="Right"
+                                                Width="28"
+                                                Height="24"
+                                                Padding="0"
+                                                Command="{Binding ClearSpreadsheetPreviewCommand}"
+                                                Content="×"
+                                                FontSize="15"
+                                                ToolTip="关闭表格预览；已加入任务表的内容不会删除" />
+                                        <StackPanel>
+                                            <TextBlock Foreground="{DynamicResource App.TextPrimaryBrush}"
+                                                       FontSize="11"
+                                                       FontWeight="SemiBold"
+                                                       Text="{Binding ImportedSpreadsheetFileName}" />
+                                        </StackPanel>
+                                    </DockPanel>
+
+                                    <WrapPanel Grid.Row="1" Margin="0,0,0,9">
+                                        <StackPanel Margin="0,0,14,0">
+                                            <TextBlock Margin="0,0,0,4"
+                                                       Style="{StaticResource GenerationFieldLabelStyle}"
+                                                       Text="工作表" />
+                                            <ComboBox x:Name="AssetGenerationWorkbookSheetComboBox"
+                                                      Width="210"
+                                                      Style="{StaticResource App.ComboBoxStyle}"
+                                                      DisplayMemberPath="Name"
+                                                      ItemsSource="{Binding ImportedWorksheets}"
+                                                      SelectedItem="{Binding SelectedImportedWorksheet, Mode=TwoWay}" />
+                                        </StackPanel>
+                                        <StackPanel>
+                                            <TextBlock Margin="0,0,0,4"
+                                                       Style="{StaticResource GenerationFieldLabelStyle}"
+                                                       Text="作为物品描述的列" />
+                                            <ComboBox x:Name="AssetGenerationDescriptionColumnComboBox"
+                                                      Width="250"
+                                                      Style="{StaticResource App.ComboBoxStyle}"
+                                                      DisplayMemberPath="Header"
+                                                      ItemsSource="{Binding ImportedColumns}"
+                                                      SelectedItem="{Binding SelectedDescriptionColumn, Mode=TwoWay}" />
+                                        </StackPanel>
+                                    </WrapPanel>
+
+                                    <DataGrid x:Name="AssetGenerationSpreadsheetPreviewGrid"
+                                              Grid.Row="2"
+                                              MinHeight="170"
+                                              MaxHeight="300"
+                                              AutoGenerateColumns="False"
+                                              CanUserAddRows="False"
+                                              CanUserDeleteRows="False"
+                                              CanUserReorderColumns="True"
+                                              CanUserResizeColumns="True"
+                                              CanUserSortColumns="False"
+                                              EnableColumnVirtualization="True"
+                                              EnableRowVirtualization="True"
+                                              FrozenColumnCount="2"
+                                              GridLinesVisibility="All"
+                                              HeadersVisibility="Column"
+                                              HorizontalScrollBarVisibility="Auto"
+                                              IsReadOnly="False"
+                                              ItemsSource="{Binding ImportedRows}"
+                                              RowHeaderWidth="0"
+                                              SelectionMode="Extended"
+                                              SelectionUnit="CellOrRowHeader"
+                                              Style="{StaticResource GenerationDataGridStyle}"
+                                              VerticalScrollBarVisibility="Auto">
+                                        <DataGrid.Columns>
+                                            <DataGridCheckBoxColumn Header="选择"
+                                                                    Width="54"
+                                                                    MinWidth="54"
+                                                                    MaxWidth="54"
+                                                                    CanUserResize="False"
+                                                                    Binding="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                            <DataGridTextColumn Header="Excel 行"
+                                                                Width="70"
+                                                                MinWidth="70"
+                                                                IsReadOnly="True"
+                                                                Binding="{Binding SourceRowNumber}" />
+                                            <DataGridTextColumn Header="匹配状态"
+                                                                Width="150"
+                                                                MinWidth="120"
+                                                                IsReadOnly="True"
+                                                                Binding="{Binding ValidationMessage}" />
+                                        </DataGrid.Columns>
+                                    </DataGrid>
+
+                                    <Grid Grid.Row="3" Margin="0,9,0,0">
+                                        <Grid.RowDefinitions>
+                                            <RowDefinition Height="Auto" />
+                                            <RowDefinition Height="Auto" />
+                                        </Grid.RowDefinitions>
+                                        <StackPanel Margin="0,0,0,7">
+                                            <TextBlock x:Name="AssetGenerationSpreadsheetSummaryText"
+                                                       Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                                       FontSize="9"
+                                                       Text="{Binding SpreadsheetPreviewSummaryText}"
+                                                       TextWrapping="Wrap" />
+                                            <TextBlock x:Name="AssetGenerationSpreadsheetApplyHintText"
+                                                       Margin="0,2,0,0"
+                                                       Foreground="{DynamicResource App.TextMutedBrush}"
+                                                       FontSize="9"
+                                                       Text="{Binding SpreadsheetApplyHintText}"
+                                                       TextWrapping="Wrap" />
+                                        </StackPanel>
+                                        <Grid Grid.Row="1">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Orientation="Horizontal">
+                                                <Button x:Name="SelectAllImportedRowsButton"
+                                                        Command="{Binding SelectAllImportedRowsCommand}"
+                                                        Content="全选有效行"
+                                                        Style="{StaticResource GenerationSmallButtonStyle}" />
+                                                <Button x:Name="ClearImportedRowSelectionButton"
+                                                        Command="{Binding ClearImportedRowSelectionCommand}"
+                                                        Content="清除选择"
+                                                        Style="{StaticResource GenerationSmallButtonStyle}" />
+                                            </StackPanel>
+                                            <StackPanel Grid.Column="1"
+                                                        HorizontalAlignment="Right"
+                                                        Orientation="Horizontal">
+                                                <Button x:Name="AppendSelectedWorkbookRowsButton"
+                                                        Command="{Binding AppendSelectedImportedRowsCommand}"
+                                                        Content="追加为任务条"
+                                                        Style="{StaticResource GenerationSmallButtonStyle}" />
+                                                <Button x:Name="ReplaceWithSelectedWorkbookRowsButton"
+                                                        Command="{Binding ReplaceDraftRowsWithImportedRowsCommand}"
+                                                        Content="替换任务表"
+                                                        Style="{StaticResource GenerationSmallButtonStyle}"
+                                                        ToolTip="清空当前任务条后，用选中的 Excel 描述重新建立任务表" />
+                                            </StackPanel>
+                                        </Grid>
+                                    </Grid>
+                                </Grid>
+                                </Border>
+                            </StackPanel>
+
+                            <Grid Grid.Row="2">
                                 <TextBox x:Name="AssetGenerationContentPromptTextBox"
                                          Visibility="Collapsed"
                                          Text="{Binding ContentPrompt, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
@@ -783,7 +963,7 @@
                                 </DataGrid>
                             </Grid>
 
-                            <Grid Grid.Row="2" Margin="0,10,0,0">
+                            <Grid Grid.Row="3" Margin="0,10,0,0">
                                 <Grid.RowDefinitions>
                                     <RowDefinition Height="Auto" />
                                     <RowDefinition Height="Auto" />
@@ -815,7 +995,7 @@
                                 </StackPanel>
                             </Grid>
 
-                            <Grid Grid.Row="3" Margin="0,11,0,0">
+                            <Grid Grid.Row="4" Margin="0,11,0,0">
                                 <Grid.ColumnDefinitions>
                                     <ColumnDefinition Width="*" />
                                     <ColumnDefinition Width="10" />

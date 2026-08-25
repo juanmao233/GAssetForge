@@ -15,6 +15,11 @@
           "Dirkster.AvalonDock": "4.74.1"
         }
       },
+      "ExcelDataReader": {
+        "type": "Transitive",
+        "resolved": "3.9.0",
+        "contentHash": "3lEkUzG67UWPYj/xlX5Hua3MeQQktnK0B7WGzDjLpdJpBtct7szX0E4WB3Kl6C/8bNnbkyT2eO0FSPV+9CCemw=="
+      },
       "SixLabors.ImageSharp": {
         "type": "Transitive",
         "resolved": "3.1.12",
@@ -25,7 +30,8 @@
         "dependencies": {
           "Dirkster.AvalonDock": "[4.74.1, )",
           "Dirkster.AvalonDock.Themes.VS2013": "[4.74.1, )",
-          "GAssetForge.Core": "[1.0.0, )"
+          "ExcelDataReader": "[3.9.0, )",
+          "GAssetForge.Core": "[1.0.10, )"
         }
       },
       "gassetforge.core": {
@@ -37,7 +43,7 @@
       "gassetforge.mcpserver": {
         "type": "Project",
         "dependencies": {
-          "GAssetForge.Core": "[1.0.0, )"
+          "GAssetForge.Core": "[1.0.10, )"
         }
       }
     }

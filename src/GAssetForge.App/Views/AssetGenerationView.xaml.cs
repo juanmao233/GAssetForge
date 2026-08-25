@@ -1,7 +1,9 @@
 using GAssetForge.App.ViewModels;
+using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
+using System.Windows.Data;
 using System.Globalization;
 using System.Windows.Threading;
 
@@ -9,10 +11,78 @@ namespace GAssetForge.App.Views;
 
 public partial class AssetGenerationView : UserControl
 {
+    private const int SpreadsheetPreviewFixedColumnCount = 3;
+    private AssetGenerationViewModel? _subscribedViewModel;
+
     public AssetGenerationView()
     {
         InitializeComponent();
         AssetGenerationRequestGrid.ItemContainerGenerator.ItemsChanged += OnRequestGridItemsChanged;
+        DataContextChanged += OnAssetGenerationDataContextChanged;
+    }
+
+    private void OnAssetGenerationDataContextChanged(
+        object sender,
+        DependencyPropertyChangedEventArgs e)
+    {
+        if (_subscribedViewModel is not null)
+        {
+            _subscribedViewModel.PropertyChanged -= OnAssetGenerationViewModelPropertyChanged;
+        }
+
+        _subscribedViewModel = e.NewValue as AssetGenerationViewModel;
+        if (_subscribedViewModel is not null)
+        {
+            _subscribedViewModel.PropertyChanged += OnAssetGenerationViewModelPropertyChanged;
+        }
+
+        RebuildSpreadsheetPreviewColumns();
+    }
+
+    private void OnAssetGenerationViewModelPropertyChanged(
+        object? sender,
+        PropertyChangedEventArgs e)
+    {
+        // A description-column change only changes row matching. Recreating DataGrid columns here
+        // would discard the Excel-like Width and DisplayIndex choices the user just made.
+        if (e.PropertyName == nameof(AssetGenerationViewModel.ImportedColumns))
+        {
+            Dispatcher.BeginInvoke(
+                DispatcherPriority.DataBind,
+                new Action(RebuildSpreadsheetPreviewColumns));
+        }
+    }
+
+    private void RebuildSpreadsheetPreviewColumns()
+    {
+        while (AssetGenerationSpreadsheetPreviewGrid.Columns.Count > SpreadsheetPreviewFixedColumnCount)
+        {
+            AssetGenerationSpreadsheetPreviewGrid.Columns.RemoveAt(
+                AssetGenerationSpreadsheetPreviewGrid.Columns.Count - 1);
+        }
+
+        if (DataContext is not AssetGenerationViewModel viewModel)
+        {
+            return;
+        }
+
+        foreach (var column in viewModel.ImportedColumns)
+        {
+            AssetGenerationSpreadsheetPreviewGrid.Columns.Add(
+                new DataGridTextColumn
+                {
+                    Header = column.Header,
+                    IsReadOnly = true,
+                    MinWidth = 100d,
+                    Width = new DataGridLength(
+                        ReferenceEquals(column, viewModel.SelectedDescriptionColumn) ? 260d : 160d),
+                    Binding = new Binding($"Cells[{column.Index}]")
+                    {
+                        Mode = BindingMode.OneWay
+                    },
+                    ClipboardContentBinding = new Binding($"Cells[{column.Index}]")
+                });
+        }
     }
 
     private void OnRequestGridLoadingRow(object sender, DataGridRowEventArgs e) =>

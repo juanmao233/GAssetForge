@@ -147,6 +147,11 @@ Agent 必须逐张使用视觉能力检查，只归纳共同视觉语言。参�
 
 AI 生成任务是第四条本地运行时 seam，保存于 `Generation\generation-tasks.v1.json`。`AssetGenerationView`
 以表格收集多行内容描述、数量和输出目录，并把当前风格组与 Tilemap 参数组合为 provider-neutral 约束包。
+步骤 2 还通过 `IAssetGenerationSpreadsheetReader` / `IAssetGenerationSpreadsheetPicker` 提供独立导入 seam：
+ExcelDataReader 只把 `.xlsx/.xls/.csv/.tsv` 转为有界、惰性的 workbook/sheet/column/row 值模型，公式只取缓存值，
+不执行宏、外部链接或工作簿内容。预览、工作表选择、描述列和勾选行属于会话瞬态状态；真正追加或替换后的
+`DraftRows` 才进入现有用户设置持久化。导入只映射描述，数量固定为 1，输出目录由当前任务行继承，因此不可信
+工作簿不能改变项目 Assets 边界。
 数量只负责把一行展开成若干个彼此独立的单图任务：新合同固定 `output.count=1`、`outputIndex=0`，任务间并发
 交给当前 Agent Host 的默认调度，不再把页面“并行图片数”作为生成协议的一部分。页面默认开启统一提示词
 优先：选中组存在新鲜样本时，任务冻结 `sourceMode=unified-prompt-only`、样本文本、来源指纹和生成时间，参考图
@@ -171,7 +176,7 @@ UI 项目 Schema、Undo/Redo 或 AvalonDock 布局，也不依赖 Agent 或 MCP 
 
 ### Agent Runtime、MCP 与进程边界
 
-顶部 `MCP 接入 → 打开 Agent 连接面板` 拉起 ContentId 为 `mcp-agent-connection` 的单实例
+`视图 → Agent 连接` 拉起 ContentId 为 `mcp-agent-connection` 的单实例
 `AgentConnectionView`。它与属性、图层和项目区域使用同一 AvalonDock 生命周期，可隐藏、浮动、重新停靠
 并随布局 XML 持久化；重复执行菜单命令只会恢复并聚焦同一面板。隐藏面板不会中断会话，主窗口退出时按
 Agent Runtime → MCP Server 的顺序回收桌面端启动的子进程。
@@ -236,7 +241,7 @@ Adapter seam；在实现并验证真实 Adapter 前不能呈现为可用连接�
 Shell，Shell 使用 `GenerationAgentPromptBuilder` 构造 prompt，并通过受管 Codex Runtime 启动串行 Turn。
 分发失败只记录 dispatch 错误，任务继续保持 `Pending`，因此 Runtime 故障不会吞掉本地待办。
 
-批量表格单行允许 1–16 张、最多 128 行、整批最多 256 张；发布时每个数量变体都创建一个独立单图任务，
+批量表格单行允许 1–16 张、最多 256 行、整批最多 256 张；发布时每个数量变体都创建一个独立单图任务，
 而不是让一条任务内部管理多张图片和自定义并行槽位。某一图片失败不阻塞同批其它任务。桌面端默认开启
 自动重做并允许初次生成后再尝试 3 次，即每条谱系最多 4 次尝试；用户可以关闭，或把重做次数设置为
 0–10。该上限在首次任务创建时冻结为 `RetryLineage.MaxAttempts`，不会被后续设置变化改写。新任务的 Agent

@@ -7,11 +7,13 @@ not automatically to the GAssetForge source code as a whole.
 | --- | ---: | --- | --- |
 | Dirkster.AvalonDock | 4.74.1 | Microsoft Public License (Ms-PL) | https://github.com/Dirkster99/AvalonDock |
 | Dirkster.AvalonDock.Themes.VS2013 | 4.74.1 | Microsoft Public License (Ms-PL) | https://github.com/Dirkster99/AvalonDock |
+| ExcelDataReader | 3.9.0 | MIT | https://github.com/ExcelDataReader/ExcelDataReader |
 | SixLabors.ImageSharp | 3.1.12 | Six Labors Split License 1.0 | https://github.com/SixLabors/ImageSharp |
 
 Verbatim license texts from the installed NuGet packages are stored in:
 
 - `licenses/AvalonDock-Ms-PL.txt`
+- `licenses/ExcelDataReader-MIT.txt`
 - `licenses/SixLabors-ImageSharp.txt`
 
 ImageSharp's license contains different terms depending on the use and license of the consuming

@@ -48,7 +48,9 @@ public sealed class ShellViewModel : ObservableObject
         ThemeService themeService,
         UserSettingsService settingsService,
         EditorWorkspaceViewModel editorWorkspace,
-        IProjectLocationPicker? projectLocationPicker = null)
+        IProjectLocationPicker? projectLocationPicker = null,
+        IAssetGenerationSpreadsheetPicker? assetGenerationSpreadsheetPicker = null,
+        IAssetGenerationSpreadsheetReader? assetGenerationSpreadsheetReader = null)
     {
         _themeService = themeService;
         _settingsService = settingsService;
@@ -265,7 +267,9 @@ public sealed class ShellViewModel : ObservableObject
             _settings.AssetGenerationMaxParallelism,
             _settings.AssetGenerationAutoRetryEnabled,
             _settings.AssetGenerationAutoRetryCount,
-            _settings.AssetGenerationPreferUnifiedStylePrompt);
+            _settings.AssetGenerationPreferUnifiedStylePrompt,
+            spreadsheetPicker: assetGenerationSpreadsheetPicker,
+            spreadsheetReader: assetGenerationSpreadsheetReader);
         AssetGeneration.SettingsChanged += OnAssetGenerationSettingsChanged;
         AssetGeneration.StyleLibraryRequested += OnAssetGenerationStyleLibraryRequested;
         AssetGeneration.AgentConnectionRequested += OnAssetGenerationAgentConnectionRequested;

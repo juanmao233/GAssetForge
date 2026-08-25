@@ -19,6 +19,7 @@
     <ProjectReference Include="..\GAssetForge.Core\GAssetForge.Core.csproj" />
     <PackageReference Include="Dirkster.AvalonDock" Version="4.74.1" />
     <PackageReference Include="Dirkster.AvalonDock.Themes.VS2013" Version="4.74.1" />
+    <PackageReference Include="ExcelDataReader" Version="3.9.0" />
   </ItemGroup>
 
   <ItemGroup>

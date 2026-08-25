@@ -243,6 +243,8 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
     private readonly GenerationReferenceSnapshotService _snapshotService;
     private readonly GenerationRunWorkspaceService _runWorkspaceService;
     private readonly IAssetGenerationOutputPicker _outputPicker;
+    private readonly IAssetGenerationSpreadsheetPicker _spreadsheetPicker;
+    private readonly IAssetGenerationSpreadsheetReader _spreadsheetReader;
     private readonly ArtStyleLibraryViewModel _styleLibrary;
     private readonly TilemapWorkspaceViewModel _tilemap;
     private readonly ProjectBrowserViewModel _projectBrowser;
@@ -257,6 +259,12 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
     private readonly RelayCommand _openOutputDirectoryCommand;
     private readonly RelayCommand _addDraftRowCommand;
     private readonly RelayCommand<AssetGenerationDraftRowViewModel> _removeDraftRowCommand;
+    private readonly AsyncRelayCommand _importDescriptionSpreadsheetCommand;
+    private readonly RelayCommand _selectAllImportedRowsCommand;
+    private readonly RelayCommand _clearImportedRowSelectionCommand;
+    private readonly RelayCommand _appendSelectedImportedRowsCommand;
+    private readonly RelayCommand _replaceDraftRowsWithImportedRowsCommand;
+    private readonly RelayCommand _clearSpreadsheetPreviewCommand;
     private readonly RelayCommand<PublishedGenerationTaskViewModel> _retryFailedTaskCommand;
     private readonly AsyncRelayCommand _createManualRetryBatchCommand;
     private ArtStyleGroupViewModel? _selectedStyleGroup;
@@ -267,6 +275,14 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
     private int _autoRetryCount;
     private bool _preferUnifiedStylePrompt;
     private AssetGenerationDraftRowViewModel? _selectedDraftRow;
+    private AssetGenerationSpreadsheetWorkbook? _importedSpreadsheetWorkbook;
+    private AssetGenerationSpreadsheetSheet? _selectedImportedWorksheet;
+    private AssetGenerationSpreadsheetColumn? _selectedDescriptionColumn;
+    private string? _lastSpreadsheetDirectory;
+    private string _spreadsheetImportStatusText =
+        "尚未导入表格；支持 .xlsx、.xls、.csv 与 .tsv，公式只读取已保存的结果。";
+    private bool _isSpreadsheetImportBusy;
+    private bool _suppressImportedRowSelectionChanged;
     private string _constraintPreview = string.Empty;
     private string _statusText = "确认风格、批量条目和输出目录后可直接开始生成；未连接时也可仅发布本地队列";
     private GenerationTask? _currentTask;
@@ -326,7 +342,9 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         bool autoRetryEnabled = true,
         int autoRetryCount = 3,
         bool preferUnifiedStylePrompt = true,
-        TimeProvider? timeProvider = null)
+        TimeProvider? timeProvider = null,
+        IAssetGenerationSpreadsheetPicker? spreadsheetPicker = null,
+        IAssetGenerationSpreadsheetReader? spreadsheetReader = null)
     {
         _paths = paths ?? throw new ArgumentNullException(nameof(paths));
         _taskStore = taskStore ?? throw new ArgumentNullException(nameof(taskStore));
@@ -335,6 +353,8 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         _projectBrowser = projectBrowser ?? throw new ArgumentNullException(nameof(projectBrowser));
         _agentConnection = agentConnection ?? throw new ArgumentNullException(nameof(agentConnection));
         _outputPicker = outputPicker ?? throw new ArgumentNullException(nameof(outputPicker));
+        _spreadsheetPicker = spreadsheetPicker ?? new DesktopAssetGenerationSpreadsheetPicker();
+        _spreadsheetReader = spreadsheetReader ?? new ExcelAssetGenerationSpreadsheetReader();
         _backgroundRemoval = backgroundRemoval ?? throw new ArgumentNullException(nameof(backgroundRemoval));
         _snapshotService = new GenerationReferenceSnapshotService(paths);
         _runWorkspaceService = new GenerationRunWorkspaceService();
@@ -360,6 +380,24 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         _removeDraftRowCommand = new RelayCommand<AssetGenerationDraftRowViewModel>(
             RemoveDraftRow,
             row => row is not null && DraftRows.Count > 1 && DraftRows.Contains(row));
+        _importDescriptionSpreadsheetCommand = new AsyncRelayCommand(
+            ImportDescriptionSpreadsheetAsync,
+            () => !IsSpreadsheetImportBusy);
+        _selectAllImportedRowsCommand = new RelayCommand(
+            SelectAllImportedRows,
+            () => ImportedRows.Any(row => row.CanImport && !row.IsSelected));
+        _clearImportedRowSelectionCommand = new RelayCommand(
+            ClearImportedRowSelection,
+            () => ImportedRows.Any(row => row.IsSelected));
+        _appendSelectedImportedRowsCommand = new RelayCommand(
+            () => ApplySelectedImportedRows(replaceExistingRows: false),
+            CanAppendSelectedImportedRows);
+        _replaceDraftRowsWithImportedRowsCommand = new RelayCommand(
+            () => ApplySelectedImportedRows(replaceExistingRows: true),
+            CanReplaceDraftRowsWithImportedRows);
+        _clearSpreadsheetPreviewCommand = new RelayCommand(
+            ClearSpreadsheetPreview,
+            () => HasSpreadsheetPreview && !IsSpreadsheetImportBusy);
         _retryFailedTaskCommand = new RelayCommand<PublishedGenerationTaskViewModel>(
             RetryFailedTask,
             CanRetryFailedTask);
@@ -374,6 +412,12 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         UseProjectCurrentDirectoryCommand = new RelayCommand(UseProjectCurrentDirectory);
         AddDraftRowCommand = _addDraftRowCommand;
         RemoveDraftRowCommand = _removeDraftRowCommand;
+        ImportDescriptionSpreadsheetCommand = _importDescriptionSpreadsheetCommand;
+        SelectAllImportedRowsCommand = _selectAllImportedRowsCommand;
+        ClearImportedRowSelectionCommand = _clearImportedRowSelectionCommand;
+        AppendSelectedImportedRowsCommand = _appendSelectedImportedRowsCommand;
+        ReplaceDraftRowsWithImportedRowsCommand = _replaceDraftRowsWithImportedRowsCommand;
+        ClearSpreadsheetPreviewCommand = _clearSpreadsheetPreviewCommand;
         ChooseRowOutputDirectoryCommand = new RelayCommand<AssetGenerationDraftRowViewModel>(ChooseRowOutputDirectory);
         UseProjectCurrentDirectoryForRowCommand = new RelayCommand<AssetGenerationDraftRowViewModel>(
             UseProjectCurrentDirectoryForRow);
@@ -431,6 +475,116 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
     public ObservableCollection<PublishedGenerationTaskViewModel> PublishedTasks { get; } = [];
 
     public ObservableCollection<GeneratedAssetViewModel> GeneratedAssets { get; } = [];
+
+    public ObservableCollection<AssetGenerationSpreadsheetRowViewModel> ImportedRows { get; } = [];
+
+    public IReadOnlyList<AssetGenerationSpreadsheetSheet> ImportedWorksheets =>
+        _importedSpreadsheetWorkbook?.Sheets ?? [];
+
+    public IReadOnlyList<AssetGenerationSpreadsheetColumn> ImportedColumns =>
+        SelectedImportedWorksheet?.Columns ?? [];
+
+    public AssetGenerationSpreadsheetSheet? SelectedImportedWorksheet
+    {
+        get => _selectedImportedWorksheet;
+        set
+        {
+            if (!SetProperty(ref _selectedImportedWorksheet, value))
+            {
+                return;
+            }
+
+            RebuildImportedWorksheetPreview();
+            OnPropertyChanged(nameof(ImportedColumns));
+            OnPropertyChanged(nameof(SpreadsheetPreviewSummaryText));
+        }
+    }
+
+    public AssetGenerationSpreadsheetColumn? SelectedDescriptionColumn
+    {
+        get => _selectedDescriptionColumn;
+        set
+        {
+            if (!SetProperty(ref _selectedDescriptionColumn, value))
+            {
+                return;
+            }
+
+            ApplySelectedDescriptionColumn();
+        }
+    }
+
+    public bool HasSpreadsheetPreview =>
+        _importedSpreadsheetWorkbook is not null && ImportedWorksheets.Count > 0;
+
+    public bool IsSpreadsheetImportBusy
+    {
+        get => _isSpreadsheetImportBusy;
+        private set
+        {
+            if (!SetProperty(ref _isSpreadsheetImportBusy, value))
+            {
+                return;
+            }
+
+            OnPropertyChanged(nameof(SpreadsheetPreviewSummaryText));
+            RaiseSpreadsheetImportCommandStates();
+        }
+    }
+
+    public string ImportedSpreadsheetFileName =>
+        string.IsNullOrWhiteSpace(_importedSpreadsheetWorkbook?.SourcePath)
+            ? "尚未导入表格"
+            : Path.GetFileName(_importedSpreadsheetWorkbook.SourcePath);
+
+    public string SpreadsheetImportStatusText
+    {
+        get => _spreadsheetImportStatusText;
+        private set => SetProperty(ref _spreadsheetImportStatusText, value);
+    }
+
+    public int SelectedImportedRowCount => ImportedRows.Count(row => row.IsSelected && row.CanImport);
+
+    public int ImportableSpreadsheetRowCount => ImportedRows.Count(row => row.CanImport);
+
+    public string SpreadsheetPreviewSummaryText
+    {
+        get
+        {
+            if (IsSpreadsheetImportBusy)
+            {
+                return "正在读取并校验表格…";
+            }
+
+            if (SelectedImportedWorksheet is null)
+            {
+                return "导入表格后可选择工作表、描述列与需要生成的行。";
+            }
+
+            var invalidCount = ImportedRows.Count - ImportableSpreadsheetRowCount;
+            var suffix = invalidCount > 0 ? $" · {invalidCount} 行描述不可用" : string.Empty;
+            return
+                $"{ImportedRows.Count} 行 · {ImportedColumns.Count} 列 · 已选择 {SelectedImportedRowCount} 行{suffix}";
+        }
+    }
+
+    public string SpreadsheetApplyHintText
+    {
+        get
+        {
+            var selectedCount = SelectedImportedRowCount;
+            if (selectedCount == 0)
+            {
+                return "勾选有效行后，可追加到现有任务表或替换任务表。";
+            }
+
+            var appendSlots = Math.Min(
+                MaximumDraftRowCount - DraftRows.Count,
+                MaximumBatchOutputCount - TotalRequestedCount);
+            return
+                $"已选择 {selectedCount} 行；追加还可容纳 {Math.Max(0, appendSlots)} 行，替换模式最多 {MaximumDraftRowCount} 行。";
+        }
+    }
 
     public AssetGenerationDraftRowViewModel? SelectedDraftRow
     {
@@ -1009,6 +1163,18 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
     public ICommand AddDraftRowCommand { get; }
 
     public ICommand RemoveDraftRowCommand { get; }
+
+    public ICommand ImportDescriptionSpreadsheetCommand { get; }
+
+    public ICommand SelectAllImportedRowsCommand { get; }
+
+    public ICommand ClearImportedRowSelectionCommand { get; }
+
+    public ICommand AppendSelectedImportedRowsCommand { get; }
+
+    public ICommand ReplaceDraftRowsWithImportedRowsCommand { get; }
+
+    public ICommand ClearSpreadsheetPreviewCommand { get; }
 
     public ICommand ChooseRowOutputDirectoryCommand { get; }
 
@@ -1719,10 +1885,12 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(DraftRowCount));
         OnPropertyChanged(nameof(CanAddDraftRow));
         OnPropertyChanged(nameof(BatchSummaryText));
+        OnPropertyChanged(nameof(SpreadsheetApplyHintText));
         OnPropertyChanged(nameof(CanCreateTask));
         OnPropertyChanged(nameof(CanStartGeneration));
         ConstraintPreview = BuildConstraintPreview();
         RaiseCommandStates();
+        RaiseSpreadsheetImportCommandStates();
         if (notifySettings)
         {
             NotifySettingsChanged();
@@ -1991,6 +2159,8 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         {
             row.Changed -= OnDraftRowChanged;
         }
+
+        DetachImportedRows();
     }
 
     private async Task StartGenerationAsync()
@@ -3567,6 +3737,313 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             100d,
             "批次完成",
             $"{active.Length} 个任务、{GeneratedImageCount} 个产物已完成并通过本地校验。");
+    }
+
+    private async Task ImportDescriptionSpreadsheetAsync()
+    {
+        string? selectedPath;
+        try
+        {
+            selectedPath = _spreadsheetPicker.SelectSpreadsheet(
+                _lastSpreadsheetDirectory ?? _projectBrowser.CurrentPath);
+        }
+        catch (Exception exception) when (IsExpectedOperationException(exception))
+        {
+            SpreadsheetImportStatusText = $"无法打开表格选择器：{exception.Message}";
+            StatusText = SpreadsheetImportStatusText;
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(selectedPath))
+        {
+            SpreadsheetImportStatusText = HasSpreadsheetPreview
+                ? "已取消导入，当前表格预览保持不变。"
+                : "已取消导入表格。";
+            return;
+        }
+
+        IsSpreadsheetImportBusy = true;
+        SpreadsheetImportStatusText = $"正在读取 {Path.GetFileName(selectedPath)}…";
+        StatusText = SpreadsheetImportStatusText;
+        try
+        {
+            var workbook = await _spreadsheetReader.ReadAsync(selectedPath).ConfigureAwait(true);
+            if (workbook.Sheets.Count == 0)
+            {
+                throw new InvalidDataException("表格中没有可读取的工作表。");
+            }
+
+            _lastSpreadsheetDirectory = Path.GetDirectoryName(workbook.SourcePath);
+            ApplyImportedSpreadsheetWorkbook(workbook);
+            SpreadsheetImportStatusText =
+                $"已读取 {ImportedSpreadsheetFileName}：{ImportedWorksheets.Count} 个工作表。请选择描述列和需要生成的行。";
+            StatusText = SpreadsheetImportStatusText;
+        }
+        catch (Exception exception) when (IsExpectedOperationException(exception))
+        {
+            SpreadsheetImportStatusText = $"表格导入失败：{exception.Message}";
+            StatusText = SpreadsheetImportStatusText;
+        }
+        finally
+        {
+            IsSpreadsheetImportBusy = false;
+        }
+    }
+
+    private void ApplyImportedSpreadsheetWorkbook(AssetGenerationSpreadsheetWorkbook workbook)
+    {
+        DetachImportedRows();
+        ImportedRows.Clear();
+        _importedSpreadsheetWorkbook = workbook;
+        _selectedImportedWorksheet = null;
+        _selectedDescriptionColumn = null;
+        OnPropertyChanged(nameof(ImportedWorksheets));
+        OnPropertyChanged(nameof(HasSpreadsheetPreview));
+        OnPropertyChanged(nameof(ImportedSpreadsheetFileName));
+        OnPropertyChanged(nameof(SelectedImportedWorksheet));
+        OnPropertyChanged(nameof(SelectedDescriptionColumn));
+        SelectedImportedWorksheet = workbook.Sheets[0];
+        RaiseSpreadsheetImportCommandStates();
+    }
+
+    private void RebuildImportedWorksheetPreview()
+    {
+        DetachImportedRows();
+        ImportedRows.Clear();
+        _selectedDescriptionColumn = null;
+        OnPropertyChanged(nameof(SelectedDescriptionColumn));
+
+        if (SelectedImportedWorksheet is null)
+        {
+            OnPropertyChanged(nameof(ImportedColumns));
+            RefreshSpreadsheetSelectionState();
+            return;
+        }
+
+        foreach (var sourceRow in SelectedImportedWorksheet.Rows)
+        {
+            var row = new AssetGenerationSpreadsheetRowViewModel(
+                sourceRow.SourceRowNumber,
+                sourceRow.Cells);
+            row.SelectionChanged += OnImportedRowSelectionChanged;
+            ImportedRows.Add(row);
+        }
+
+        SelectedDescriptionColumn = FindDefaultDescriptionColumn(SelectedImportedWorksheet.Columns);
+        RefreshSpreadsheetSelectionState();
+    }
+
+    private static AssetGenerationSpreadsheetColumn? FindDefaultDescriptionColumn(
+        IReadOnlyList<AssetGenerationSpreadsheetColumn> columns)
+    {
+        if (columns.Count == 0)
+        {
+            return null;
+        }
+
+        string[] exactNames =
+        [
+            "物品描述", "描述", "生成描述", "提示词", "物品", "内容",
+            "description", "prompt", "content", "item description"
+        ];
+        foreach (var name in exactNames)
+        {
+            var exact = columns.FirstOrDefault(column =>
+                string.Equals(column.Header.Trim(), name, StringComparison.OrdinalIgnoreCase));
+            if (exact is not null)
+            {
+                return exact;
+            }
+        }
+
+        string[] containsNames = ["描述", "提示", "description", "prompt", "content"];
+        return columns.FirstOrDefault(column => containsNames.Any(name =>
+                   column.Header.Contains(name, StringComparison.OrdinalIgnoreCase))) ??
+               columns[0];
+    }
+
+    private void ApplySelectedDescriptionColumn()
+    {
+        var columnIndex = SelectedDescriptionColumn?.Index;
+        _suppressImportedRowSelectionChanged = true;
+        try
+        {
+            foreach (var row in ImportedRows)
+            {
+                row.ApplyDescriptionColumn(columnIndex);
+            }
+        }
+        finally
+        {
+            _suppressImportedRowSelectionChanged = false;
+        }
+
+        RefreshSpreadsheetSelectionState();
+    }
+
+    private void OnImportedRowSelectionChanged(object? sender, EventArgs e)
+    {
+        if (!_suppressImportedRowSelectionChanged)
+        {
+            RefreshSpreadsheetSelectionState();
+        }
+    }
+
+    private void SelectAllImportedRows()
+    {
+        SetImportedRowSelection(row => row.CanImport);
+        SpreadsheetImportStatusText = $"已选择 {SelectedImportedRowCount} 行有效描述。";
+    }
+
+    private void ClearImportedRowSelection()
+    {
+        SetImportedRowSelection(_ => false);
+        SpreadsheetImportStatusText = "已清除表格预览中的行选择。";
+    }
+
+    private void SetImportedRowSelection(Func<AssetGenerationSpreadsheetRowViewModel, bool> selector)
+    {
+        _suppressImportedRowSelectionChanged = true;
+        try
+        {
+            foreach (var row in ImportedRows)
+            {
+                row.IsSelected = selector(row);
+            }
+        }
+        finally
+        {
+            _suppressImportedRowSelectionChanged = false;
+        }
+
+        RefreshSpreadsheetSelectionState();
+    }
+
+    private bool CanAppendSelectedImportedRows()
+    {
+        var selectedRows = GetSelectedImportableRows();
+        return !IsSpreadsheetImportBusy &&
+               selectedRows.Length > 0 &&
+               DraftRows.Count + selectedRows.Length <= MaximumDraftRowCount &&
+               TotalRequestedCount + selectedRows.Length <= MaximumBatchOutputCount;
+    }
+
+    private bool CanReplaceDraftRowsWithImportedRows()
+    {
+        var selectedRows = GetSelectedImportableRows();
+        return !IsSpreadsheetImportBusy &&
+               selectedRows.Length is > 0 and <= MaximumDraftRowCount &&
+               selectedRows.Length <= MaximumBatchOutputCount;
+    }
+
+    private AssetGenerationSpreadsheetRowViewModel[] GetSelectedImportableRows() =>
+        ImportedRows.Where(row => row.IsSelected && row.CanImport).ToArray();
+
+    private void ApplySelectedImportedRows(bool replaceExistingRows)
+    {
+        var selectedRows = GetSelectedImportableRows();
+        if (selectedRows.Length == 0)
+        {
+            SpreadsheetImportStatusText = "请先勾选至少一行有效的物品描述。";
+            return;
+        }
+
+        if (replaceExistingRows)
+        {
+            if (!CanReplaceDraftRowsWithImportedRows())
+            {
+                SpreadsheetImportStatusText =
+                    $"替换失败：一次最多导入 {MaximumDraftRowCount} 行、{MaximumBatchOutputCount} 个产物。";
+                return;
+            }
+        }
+        else if (!CanAppendSelectedImportedRows())
+        {
+            SpreadsheetImportStatusText =
+                $"追加失败：现有任务与所选描述合计不能超过 {MaximumDraftRowCount} 行或 {MaximumBatchOutputCount} 个产物。";
+            return;
+        }
+
+        var inheritedOutputDirectory =
+            SelectedDraftRow?.OutputDirectory ??
+            PrimaryDraftRow?.OutputDirectory ??
+            _projectBrowser.CurrentPath;
+        var newRows = selectedRows
+            .Select(row => new AssetGenerationDraftRowViewModel(
+                Guid.NewGuid().ToString("N"),
+                row.ResolvedDescription,
+                1,
+                inheritedOutputDirectory))
+            .ToArray();
+
+        if (replaceExistingRows)
+        {
+            foreach (var row in DraftRows)
+            {
+                row.Changed -= OnDraftRowChanged;
+            }
+
+            DraftRows.Clear();
+        }
+
+        foreach (var row in newRows)
+        {
+            AttachDraftRow(row);
+            DraftRows.Add(row);
+        }
+
+        SelectedDraftRow = newRows[0];
+        RefreshDraftCollectionState();
+        SetImportedRowSelection(row => row.IsSelected && !selectedRows.Contains(row));
+        var action = replaceExistingRows ? "替换" : "追加";
+        SpreadsheetImportStatusText =
+            $"已从 {SelectedImportedWorksheet?.Name ?? "工作表"} {action} {newRows.Length} 条描述；数量默认为 1，输出位置继承当前任务行。";
+        StatusText = SpreadsheetImportStatusText;
+    }
+
+    private void ClearSpreadsheetPreview()
+    {
+        DetachImportedRows();
+        ImportedRows.Clear();
+        _importedSpreadsheetWorkbook = null;
+        _selectedImportedWorksheet = null;
+        _selectedDescriptionColumn = null;
+        OnPropertyChanged(nameof(ImportedWorksheets));
+        OnPropertyChanged(nameof(ImportedColumns));
+        OnPropertyChanged(nameof(SelectedImportedWorksheet));
+        OnPropertyChanged(nameof(SelectedDescriptionColumn));
+        OnPropertyChanged(nameof(HasSpreadsheetPreview));
+        OnPropertyChanged(nameof(ImportedSpreadsheetFileName));
+        SpreadsheetImportStatusText =
+            "已关闭表格预览；已经追加到任务表的描述不会被删除。";
+        RefreshSpreadsheetSelectionState();
+    }
+
+    private void DetachImportedRows()
+    {
+        foreach (var row in ImportedRows)
+        {
+            row.SelectionChanged -= OnImportedRowSelectionChanged;
+        }
+    }
+
+    private void RefreshSpreadsheetSelectionState()
+    {
+        OnPropertyChanged(nameof(SelectedImportedRowCount));
+        OnPropertyChanged(nameof(ImportableSpreadsheetRowCount));
+        OnPropertyChanged(nameof(SpreadsheetPreviewSummaryText));
+        OnPropertyChanged(nameof(SpreadsheetApplyHintText));
+        RaiseSpreadsheetImportCommandStates();
+    }
+
+    private void RaiseSpreadsheetImportCommandStates()
+    {
+        _importDescriptionSpreadsheetCommand?.RaiseCanExecuteChanged();
+        _selectAllImportedRowsCommand?.RaiseCanExecuteChanged();
+        _clearImportedRowSelectionCommand?.RaiseCanExecuteChanged();
+        _appendSelectedImportedRowsCommand?.RaiseCanExecuteChanged();
+        _replaceDraftRowsWithImportedRowsCommand?.RaiseCanExecuteChanged();
+        _clearSpreadsheetPreviewCommand?.RaiseCanExecuteChanged();
     }
 
     private void ChooseOutputDirectory()

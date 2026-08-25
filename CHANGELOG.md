@@ -5,6 +5,36 @@ development track; versioning policy will be finalized before the first public r
 
 ## Unreleased
 
+## 1.0.10t1 - 2026-08-25
+
+### Added
+
+- Added spreadsheet-assisted description entry to Asset Generation step 2. Users can import `.xlsx`,
+  `.xls`, `.csv`, or `.tsv`, preview worksheets in an Excel-style grid, select the description column
+  and individual valid rows, then append them to or atomically replace the current task table.
+- Added bounded spreadsheet parsing through ExcelDataReader without Office/Interop. Formula expressions,
+  macros, external links, hyperlinks, and embedded content are never executed; Excel formulas expose only
+  cached values already stored in the workbook.
+- Added workbook, worksheet, row, column, cell-text, ZIP expansion, shared-string, duplicate-entry, unsafe
+  path, and macro-container limits, plus regression coverage for malformed Open XML and BIFF workbooks.
+
+### Changed
+
+- Imported descriptions default to quantity 1 and inherit the currently selected task row's Assets output
+  directory. Spreadsheet cells cannot redirect generated files outside the active project.
+- Spreadsheet preview state remains session-only, while rows accepted into the task table continue through
+  the existing immediate draft persistence path. The page keeps vertical scrolling at 480 px width and
+  confines wide worksheet columns to the preview grid's own horizontal scrollbar.
+
+### Fixed
+
+- Preserved user-resized and reordered preview columns when switching the matched description column, while
+  still rebuilding columns when the worksheet schema changes.
+- Prevented invalid or empty description rows from being selected or counted, normalized late-added columns
+  across earlier rows, and made append/replace limits reject the whole import without partial mutation.
+- Kept import progress and first-read errors visible inside step 2, wrapped third-party parser failures as
+  actionable UI errors, and fixed narrow-layout clipping/overlap in the step header and preview footer.
+
 ## 1.0.9t1 - 2026-08-25
 
 ### Added

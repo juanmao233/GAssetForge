@@ -105,6 +105,10 @@ internal static class Program
             Console.WriteLine("PASS  素材生成优先复用新鲜统一提示词并在缺失、过期或关闭时回退参考图流程");
             AssetGenerationDockPanelBindsWorkflowAndTracksMenuState();
             Console.WriteLine("PASS  素材生成停靠页、顶部入口、视图开关与生成工作流绑定可用");
+            AssetGenerationSpreadsheetImportSmokeTests.Run();
+            Console.WriteLine("PASS  Excel/CSV/TSV 描述读取具备格式边界、缓存公式与恶意容器预检");
+            AssetGenerationSpreadsheetWorkflowSmokeTests.Run(_temporaryRoot);
+            Console.WriteLine("PASS  Excel 描述预览、列匹配、行选择与任务表追加/替换工作流可用");
             BatchGenerationCoreSmokeTests.RunAllAsync().GetAwaiter().GetResult();
             Console.WriteLine("PASS  批次任务原子创建、数量边界、稳定顺序与旧任务兼容");
             GenerationClaimSafetySmokeTests.RunAllAsync(_temporaryRoot)
@@ -3684,8 +3688,8 @@ internal static class Program
                 "生成设置、当前批次与生成产物必须按顺序从上到下排列");
 
             var compactGenerationView = new AssetGenerationView { DataContext = shell.AssetGeneration };
-            compactGenerationView.Measure(new Size(560, 720));
-            compactGenerationView.Arrange(new Rect(0, 0, 560, 720));
+            compactGenerationView.Measure(new Size(480, 720));
+            compactGenerationView.Arrange(new Rect(0, 0, 480, 720));
             compactGenerationView.UpdateLayout();
             PumpDispatcher();
             var compactGenerationScroller = RequireNamedElement<ScrollViewer>(
@@ -3693,9 +3697,29 @@ internal static class Program
                 "AssetGenerationPageScrollViewer",
                 "紧凑素材生成页缺少页面滚动容器。");
             True(compactGenerationScroller.ScrollableWidth <= 0.5d,
-                "560px 紧凑宽度下整页不应产生横向滚动范围");
+                "480px 紧凑宽度下整页不应产生横向滚动范围");
             True(compactGenerationScroller.ScrollableHeight > 0d,
                 "紧凑高度下素材生成页应通过纵向滚动访问后续区块");
+            var compactImportButton = RequireNamedElement<Button>(
+                compactGenerationView,
+                "ImportGenerationSpreadsheetButton",
+                "紧凑素材生成页缺少 Excel 导入按钮。");
+            var compactAddRowButton = RequireNamedElement<Button>(
+                compactGenerationView,
+                "AddGenerationRowButton",
+                "紧凑素材生成页缺少新建任务行按钮。");
+            var compactImportBounds = compactImportButton.TransformToAncestor(compactGenerationView)
+                .TransformBounds(new Rect(compactImportButton.RenderSize));
+            var compactAddRowBounds = compactAddRowButton.TransformToAncestor(compactGenerationView)
+                .TransformBounds(new Rect(compactAddRowButton.RenderSize));
+            True(compactImportButton.ActualWidth > 0d &&
+                 compactImportBounds.Left >= -0.5d &&
+                 compactImportBounds.Right <= compactGenerationView.ActualWidth + 0.5d,
+                "480px 紧凑宽度下 Excel 导入按钮不得被页面右边界裁切");
+            True(compactAddRowButton.ActualWidth > 0d &&
+                 compactAddRowBounds.Left >= -0.5d &&
+                 compactAddRowBounds.Right <= compactGenerationView.ActualWidth + 0.5d,
+                "480px 紧凑宽度下新建任务行按钮不得被页面右边界裁切");
 
             var styleComboBox = RequireNamedElement<ComboBox>(
                 generationView,
@@ -3711,6 +3735,34 @@ internal static class Program
                 generationView,
                 "AssetGenerationContentPromptTextBox",
                 "素材生成页缺少生成内容输入框。");
+            var importSpreadsheetButton = RequireNamedElement<Button>(
+                generationView,
+                "ImportGenerationSpreadsheetButton",
+                "素材生成页缺少 Excel 描述导入按钮。");
+            var spreadsheetPreviewPanel = RequireNamedElement<Border>(
+                generationView,
+                "AssetGenerationSpreadsheetPreviewPanel",
+                "素材生成页缺少 Excel 风格预览面板。");
+            var workbookSheetComboBox = RequireNamedElement<ComboBox>(
+                generationView,
+                "AssetGenerationWorkbookSheetComboBox",
+                "Excel 预览缺少工作表选择器。");
+            var descriptionColumnComboBox = RequireNamedElement<ComboBox>(
+                generationView,
+                "AssetGenerationDescriptionColumnComboBox",
+                "Excel 预览缺少物品描述列选择器。");
+            var spreadsheetPreviewGrid = RequireNamedElement<DataGrid>(
+                generationView,
+                "AssetGenerationSpreadsheetPreviewGrid",
+                "Excel 预览缺少表格网格。");
+            var appendWorkbookRowsButton = RequireNamedElement<Button>(
+                generationView,
+                "AppendSelectedWorkbookRowsButton",
+                "Excel 预览缺少追加任务条按钮。");
+            var replaceWorkbookRowsButton = RequireNamedElement<Button>(
+                generationView,
+                "ReplaceWithSelectedWorkbookRowsButton",
+                "Excel 预览缺少替换任务表按钮。");
             var negativePromptTextBox = RequireNamedElement<TextBox>(
                 generationView,
                 "AssetGenerationNegativePromptTextBox",
@@ -3813,6 +3865,38 @@ internal static class Program
                 "生成内容输入框绑定路径");
             Equal(BindingMode.TwoWay, contentPromptBinding?.Mode ?? BindingMode.Default,
                 "生成内容输入框绑定模式");
+            Equal(nameof(AssetGenerationViewModel.ImportDescriptionSpreadsheetCommand),
+                BindingOperations.GetBinding(importSpreadsheetButton, Button.CommandProperty)?.Path?.Path,
+                "Excel 导入按钮命令绑定路径");
+            Equal(nameof(AssetGenerationViewModel.HasSpreadsheetPreview),
+                BindingOperations.GetBinding(spreadsheetPreviewPanel, UIElement.VisibilityProperty)?.Path?.Path,
+                "Excel 预览面板可见性绑定路径");
+            Equal(nameof(AssetGenerationViewModel.ImportedWorksheets),
+                BindingOperations.GetBinding(workbookSheetComboBox, ItemsControl.ItemsSourceProperty)?.Path?.Path,
+                "Excel 工作表选择器数据源绑定路径");
+            Equal(nameof(AssetGenerationViewModel.SelectedImportedWorksheet),
+                BindingOperations.GetBinding(workbookSheetComboBox, Selector.SelectedItemProperty)?.Path?.Path,
+                "Excel 工作表选择绑定路径");
+            Equal(nameof(AssetGenerationViewModel.ImportedColumns),
+                BindingOperations.GetBinding(descriptionColumnComboBox, ItemsControl.ItemsSourceProperty)?.Path?.Path,
+                "Excel 描述列选择器数据源绑定路径");
+            Equal(nameof(AssetGenerationViewModel.SelectedDescriptionColumn),
+                BindingOperations.GetBinding(descriptionColumnComboBox, Selector.SelectedItemProperty)?.Path?.Path,
+                "Excel 描述列选择绑定路径");
+            Equal(nameof(AssetGenerationViewModel.ImportedRows),
+                BindingOperations.GetBinding(spreadsheetPreviewGrid, ItemsControl.ItemsSourceProperty)?.Path?.Path,
+                "Excel 预览表格行绑定路径");
+            Equal(ScrollBarVisibility.Auto, spreadsheetPreviewGrid.HorizontalScrollBarVisibility,
+                "Excel 预览横向滚动应限制在表格内部");
+            True(spreadsheetPreviewGrid.CanUserResizeColumns &&
+                 spreadsheetPreviewGrid.GridLinesVisibility == DataGridGridLinesVisibility.All,
+                "Excel 预览应支持拖动列宽并显示完整单元格网格");
+            Equal(nameof(AssetGenerationViewModel.AppendSelectedImportedRowsCommand),
+                BindingOperations.GetBinding(appendWorkbookRowsButton, Button.CommandProperty)?.Path?.Path,
+                "追加 Excel 行命令绑定路径");
+            Equal(nameof(AssetGenerationViewModel.ReplaceDraftRowsWithImportedRowsCommand),
+                BindingOperations.GetBinding(replaceWorkbookRowsButton, Button.CommandProperty)?.Path?.Path,
+                "替换任务表命令绑定路径");
             var negativePromptBinding = BindingOperations.GetBinding(negativePromptTextBox, TextBox.TextProperty);
             Equal(nameof(AssetGenerationViewModel.NegativePrompt), negativePromptBinding?.Path?.Path,
                 "负向提示词输入框绑定路径");
