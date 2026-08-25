@@ -2,7 +2,7 @@
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:conv="clr-namespace:GAssetForge.App.Converters"
-             MinWidth="700"
+             MinWidth="480"
              MinHeight="420">
     <UserControl.Resources>
         <conv:FilePathToImageSourceConverter x:Key="FilePathToImageSourceConverter" />
@@ -207,8 +207,15 @@
                 Background="{DynamicResource App.SurfaceBrush}"
                 BorderBrush="{DynamicResource App.BorderBrush}"
                 BorderThickness="0,0,0,1">
-            <DockPanel LastChildFill="True">
-                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <WrapPanel Grid.Row="1"
+                           Margin="0,10,0,0"
+                           HorizontalAlignment="Right">
                     <Button Command="{Binding ShowBackgroundRemovalCommand}"
                             Style="{StaticResource GenerationToolbarButtonStyle}"
                             ToolTip="打开可独立停靠的背景剔除工具">
@@ -254,9 +261,9 @@
                             <TextBlock VerticalAlignment="Center" Text="{Binding ConnectionStatusText}" />
                         </StackPanel>
                     </Button>
-                </StackPanel>
+                </WrapPanel>
 
-                <StackPanel Orientation="Horizontal">
+                <StackPanel Grid.Row="0" Orientation="Horizontal">
                     <Border Width="38"
                             Height="38"
                             Margin="0,0,11,0"
@@ -283,32 +290,16 @@
                                    Text="组合风格参考、Tilemap 约束与内容描述，在应用内直接调度 Agent 生成素材" />
                     </StackPanel>
                 </StackPanel>
-            </DockPanel>
+            </Grid>
         </Border>
 
-        <ScrollViewer Grid.Row="1"
-                      HorizontalScrollBarVisibility="Auto"
+        <ScrollViewer x:Name="AssetGenerationPageScrollViewer"
+                      Grid.Row="1"
+                      HorizontalScrollBarVisibility="Disabled"
+                      PanningMode="VerticalOnly"
                       VerticalScrollBarVisibility="Auto">
-            <Grid MinWidth="790" Margin="14">
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="5*" MinWidth="420" />
-                    <ColumnDefinition Width="12" />
-                    <ColumnDefinition Width="4*" MinWidth="330" />
-                </Grid.ColumnDefinitions>
-
-                <GridSplitter Grid.Column="1"
-                              Width="5"
-                              Margin="3,0"
-                              HorizontalAlignment="Center"
-                              VerticalAlignment="Stretch"
-                              Background="{DynamicResource App.BorderBrush}"
-                              Cursor="SizeWE"
-                              ResizeBehavior="PreviousAndNext"
-                              ResizeDirection="Columns"
-                              ShowsPreview="True"
-                              ToolTip="拖动调整表格区与任务预览区的宽度" />
-
-                <StackPanel Grid.Column="0">
+            <StackPanel x:Name="AssetGenerationVerticalFlowPanel" Margin="14">
+                <StackPanel x:Name="AssetGenerationSetupSection">
                     <Border Style="{StaticResource GenerationCardStyle}">
                         <Grid>
                                          <Grid.RowDefinitions>
@@ -995,7 +986,7 @@
                     </Border>
                 </StackPanel>
 
-                <StackPanel Grid.Column="2">
+                <StackPanel x:Name="AssetGenerationBatchAndArtifactsSection" Margin="0,2,0,0">
                     <Border Style="{StaticResource GenerationCardStyle}">
                         <Grid>
                             <Grid.RowDefinitions>
@@ -1627,7 +1618,7 @@
                         </Grid>
                     </Border>
                 </StackPanel>
-            </Grid>
+            </StackPanel>
         </ScrollViewer>
 
         <Border Grid.Row="2"

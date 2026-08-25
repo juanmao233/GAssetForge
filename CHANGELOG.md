@@ -5,6 +5,17 @@ development track; versioning policy will be finalized before the first public r
 
 ## Unreleased
 
+## 1.0.7t1 - 2026-08-25
+
+### Changed
+
+- Reworked Asset Generation into one ordered vertical flow: generation setup, task table, publishing
+  controls, current batch diagnostics, Agent feedback, manual recovery, and generated artifacts now
+  appear sequentially from top to bottom instead of being split across left and right columns.
+- Removed the page-level horizontal splitter and bottom horizontal scrollbar. The dock page now supports
+  a 480 px minimum width and uses vertical scrolling for compact layouts, while wide task tables retain
+  their own local horizontal scrolling where necessary.
+
 ## 1.0.6t1 - 2026-08-25
 
 ### Added

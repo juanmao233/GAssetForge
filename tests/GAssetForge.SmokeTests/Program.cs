@@ -3360,8 +3360,47 @@ internal static class Program
             generationView.UpdateLayout();
             True(ReferenceEquals(shell.AssetGeneration, generationView.DataContext),
                 "AssetGenerationView 应绑定 Shell 持有的单实例 ViewModel");
-            True(generationView.MinWidth >= 700d && generationView.MinHeight >= 420d,
-                "素材生成停靠页应具有可用的最小停靠尺寸");
+            Equal(480d, generationView.MinWidth, "素材生成停靠页应允许较窄窗口使用纵向布局");
+            True(generationView.MinHeight >= 420d, "素材生成停靠页应具有可用的最小停靠高度");
+
+            var generationPageScroller = RequireNamedElement<ScrollViewer>(
+                generationView,
+                "AssetGenerationPageScrollViewer",
+                "素材生成页缺少纵向页面滚动容器。");
+            var generationVerticalFlow = RequireNamedElement<StackPanel>(
+                generationView,
+                "AssetGenerationVerticalFlowPanel",
+                "素材生成页缺少纵向内容流。");
+            var generationSetupSection = RequireNamedElement<StackPanel>(
+                generationView,
+                "AssetGenerationSetupSection",
+                "素材生成页缺少生成设置区。");
+            var generationBatchSection = RequireNamedElement<StackPanel>(
+                generationView,
+                "AssetGenerationBatchAndArtifactsSection",
+                "素材生成页缺少批次与产物区。");
+            Equal(ScrollBarVisibility.Disabled, generationPageScroller.HorizontalScrollBarVisibility,
+                "素材生成整页不得依赖底部横向滚动条");
+            Equal(ScrollBarVisibility.Auto, generationPageScroller.VerticalScrollBarVisibility,
+                "素材生成整页应以上下滚动为主");
+            True(generationVerticalFlow.Children.IndexOf(generationSetupSection) >= 0 &&
+                 generationVerticalFlow.Children.IndexOf(generationSetupSection) <
+                 generationVerticalFlow.Children.IndexOf(generationBatchSection),
+                "生成设置、当前批次与生成产物必须按顺序从上到下排列");
+
+            var compactGenerationView = new AssetGenerationView { DataContext = shell.AssetGeneration };
+            compactGenerationView.Measure(new Size(560, 720));
+            compactGenerationView.Arrange(new Rect(0, 0, 560, 720));
+            compactGenerationView.UpdateLayout();
+            PumpDispatcher();
+            var compactGenerationScroller = RequireNamedElement<ScrollViewer>(
+                compactGenerationView,
+                "AssetGenerationPageScrollViewer",
+                "紧凑素材生成页缺少页面滚动容器。");
+            True(compactGenerationScroller.ScrollableWidth <= 0.5d,
+                "560px 紧凑宽度下整页不应产生横向滚动范围");
+            True(compactGenerationScroller.ScrollableHeight > 0d,
+                "紧凑高度下素材生成页应通过纵向滚动访问后续区块");
 
             var styleComboBox = RequireNamedElement<ComboBox>(
                 generationView,
