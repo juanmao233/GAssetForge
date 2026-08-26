@@ -40,7 +40,8 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, FrameworkElement> _sharedPanelViews = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FrameworkElement> _uiPanelViews = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FrameworkElement> _tilemapPanelViews = new(StringComparer.Ordinal);
-    private FrameworkElement _iconDesignPropertiesView = null!;
+    private readonly Dictionary<string, FrameworkElement> _propertiesContextViews = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, FrameworkElement> _emptyPropertiesContextViews = new(StringComparer.Ordinal);
     private BlueprintToolPaletteView _blueprintToolPaletteView = null!;
     private FrameworkElement? _workflowToolPaletteView;
     private string _activeToolContextContentId = CanvasContentId;
@@ -103,7 +104,8 @@ public partial class MainWindow : Window
 
         _uiPanelViews[ToolsContentId] = new ToolPaletteView { DataContext = _viewModel.EditorWorkspace };
         _blueprintToolPaletteView = new BlueprintToolPaletteView { DataContext = _viewModel.Blueprint };
-        _uiPanelViews[PropertiesContentId] = new PropertiesView { DataContext = _viewModel.EditorWorkspace };
+        var uiPropertiesView = new PropertiesView { DataContext = _viewModel.EditorWorkspace };
+        _uiPanelViews[PropertiesContentId] = uiPropertiesView;
         _uiPanelViews[LayersContentId] = new LayersView { DataContext = _viewModel.EditorWorkspace };
         _sharedPanelViews[ProjectContentId] = new ProjectBrowserView { DataContext = _viewModel.ProjectBrowser };
         _sharedPanelViews[StyleLibraryContentId] = new ArtStyleLibraryView
@@ -142,14 +144,18 @@ public partial class MainWindow : Window
         {
             DataContext = _viewModel.CommandConsole
         };
-        _tilemapPanelViews[PropertiesContentId] = new TilemapPropertiesView
+        var tilemapPropertiesView = new TilemapPropertiesView
         {
             DataContext = _viewModel.TilemapWorkspace
         };
-        _iconDesignPropertiesView = new IconDesignPropertiesView
+        _tilemapPanelViews[PropertiesContentId] = tilemapPropertiesView;
+        var iconDesignPropertiesView = new IconDesignPropertiesView
         {
             DataContext = _viewModel.IconDesign
         };
+        _propertiesContextViews[CanvasContentId] = uiPropertiesView;
+        _propertiesContextViews[TilemapWorkspaceContentId] = tilemapPropertiesView;
+        _propertiesContextViews[IconDesignContentId] = iconDesignPropertiesView;
 
         _documentHosts[CanvasContentId].Content = new CanvasDocumentView
         {
@@ -221,28 +227,65 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (string.Equals(
+        if (_propertiesContextViews.TryGetValue(
                 _activePropertiesContextContentId,
-                IconDesignContentId,
-                StringComparison.Ordinal))
+                out var propertiesView))
         {
-            host.Content = _iconDesignPropertiesView;
+            host.Content = propertiesView;
             return;
         }
 
-        if (_viewModel.CurrentWorkflow.Kind == WorkflowKind.UiDesign)
+        host.Content = GetOrCreateEmptyPropertiesPanel(_activePropertiesContextContentId);
+    }
+
+    private FrameworkElement GetOrCreateEmptyPropertiesPanel(string contentId)
+    {
+        if (_emptyPropertiesContextViews.TryGetValue(contentId, out var existing))
         {
-            host.Content = _uiPanelViews[PropertiesContentId];
-            return;
+            return existing;
         }
 
-        if (_viewModel.CurrentWorkflow.Kind == WorkflowKind.Tilemap)
+        var contextTitle = GetPanelTitle(contentId);
+        var title = new TextBlock
         {
-            host.Content = _tilemapPanelViews[PropertiesContentId];
-            return;
-        }
-
-        host.Content = CreateUnavailablePanel(GetPanelTitle(PropertiesContentId));
+            Text = contextTitle,
+            FontSize = 15,
+            FontWeight = FontWeights.SemiBold
+        };
+        title.SetResourceReference(TextBlock.ForegroundProperty, "App.TextPrimaryBrush");
+        var message = new TextBlock
+        {
+            Text = "当前窗口暂无可显示的属性信息。",
+            Margin = new Thickness(0, 10, 0, 0),
+            TextWrapping = TextWrapping.Wrap
+        };
+        message.SetResourceReference(TextBlock.ForegroundProperty, "App.TextSecondaryBrush");
+        var guidance = new TextBlock
+        {
+            Text = "后续为此窗口接入专用属性模块后，会自动在这里显示对应参数。",
+            Margin = new Thickness(0, 6, 0, 0),
+            FontSize = 11,
+            TextWrapping = TextWrapping.Wrap
+        };
+        guidance.SetResourceReference(TextBlock.ForegroundProperty, "App.TextMutedBrush");
+        var border = new Border
+        {
+            Tag = contentId,
+            Padding = new Thickness(18),
+            BorderThickness = new Thickness(0),
+            Child = new StackPanel
+            {
+                Children =
+                {
+                    title,
+                    message,
+                    guidance
+                }
+            }
+        };
+        border.SetResourceReference(BackgroundProperty, "App.SurfaceBrush");
+        _emptyPropertiesContextViews[contentId] = border;
+        return border;
     }
 
     private FrameworkElement CreateUnavailablePanel(string panelName)
@@ -301,8 +344,6 @@ public partial class MainWindow : Window
                 document.ContentId,
                 GetWorkflowDocumentContentId(_viewModel.CurrentWorkflow),
                 StringComparison.Ordinal));
-        activeDocument.IsSelected = true;
-        activeDocument.IsActive = true;
 
         var toolsPane = new LayoutAnchorablePane(tools)
         {
@@ -369,6 +410,9 @@ public partial class MainWindow : Window
         DockManager.Layout = new LayoutRoot { RootPanel = rootPanel };
         ObserveBlueprintVisibility(blueprint);
         agentConnection.Hide();
+        activeDocument.IsSelected = true;
+        activeDocument.IsActive = true;
+        DockManager.ActiveContent = activeDocument.Content;
     }
 
     private LayoutDocument CreateWorkflowDocument(WorkflowDefinition workflow)
@@ -602,13 +646,24 @@ public partial class MainWindow : Window
         if (content is LayoutAnchorable { IsHidden: false, IsVisible: true } visibleAnchorable)
         {
             visibleAnchorable.Hide();
-            if (string.Equals(contentId, IconDesignContentId, StringComparison.Ordinal) &&
-                string.Equals(
+            if (string.Equals(
                     _activePropertiesContextContentId,
-                    IconDesignContentId,
+                    contentId,
                     StringComparison.Ordinal))
             {
-                RestoreWorkflowPropertiesContext();
+                Dispatcher.BeginInvoke(DispatcherPriority.Background, () =>
+                {
+                    if (!string.Equals(
+                            _activePropertiesContextContentId,
+                            contentId,
+                            StringComparison.Ordinal))
+                    {
+                        return;
+                    }
+
+                    SyncActivePropertiesContextFromLayout();
+                    RefreshPropertiesPanel();
+                });
             }
 
             SyncToggleMenuStates();
@@ -636,9 +691,9 @@ public partial class MainWindow : Window
             anchorable.IsVisible = true;
         }
 
-        if (string.Equals(contentId, IconDesignContentId, StringComparison.Ordinal))
+        if (IsPropertiesContextContentId(contentId))
         {
-            _activePropertiesContextContentId = IconDesignContentId;
+            _activePropertiesContextContentId = contentId;
             RefreshPropertiesPanel();
         }
 
@@ -904,35 +959,30 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (string.Equals(contentId, BlueprintContentId, StringComparison.Ordinal))
+        if (string.Equals(contentId, PropertiesContentId, StringComparison.Ordinal))
         {
-            RestoreWorkflowPropertiesContext();
-            _activeToolContextContentId = BlueprintContentId;
-            RefreshActiveToolPalette();
             return;
         }
 
-        if (string.Equals(contentId, IconDesignContentId, StringComparison.Ordinal))
+        if (IsPropertiesContextContentId(contentId))
         {
-            _activePropertiesContextContentId = IconDesignContentId;
+            _activePropertiesContextContentId = contentId!;
             RefreshPropertiesPanel();
+
+            if (string.Equals(contentId, BlueprintContentId, StringComparison.Ordinal))
+            {
+                _activeToolContextContentId = BlueprintContentId;
+                RefreshActiveToolPalette();
+                return;
+            }
+
+            if (contentId is ToolsContentId or LayersContentId or ProjectContentId or CommandConsoleContentId)
+            {
+                return;
+            }
+
             _activeToolContextContentId = GetWorkflowDocumentContentId(_viewModel.CurrentWorkflow);
             RefreshActiveToolPalette();
-            return;
-        }
-
-        if (contentId is StyleLibraryContentId or AssetGenerationContentId or
-            BackgroundRemovalContentId or ImageOutlineContentId or PixelAlignmentContentId or AgentConnectionContentId)
-        {
-            RestoreWorkflowPropertiesContext();
-            _activeToolContextContentId = GetWorkflowDocumentContentId(_viewModel.CurrentWorkflow);
-            RefreshActiveToolPalette();
-            return;
-        }
-
-        if (contentId is ToolsContentId or LayersContentId or ProjectContentId or CommandConsoleContentId)
-        {
-            RestoreWorkflowPropertiesContext();
             return;
         }
 
@@ -1020,20 +1070,39 @@ public partial class MainWindow : Window
     private void SyncActivePropertiesContextFromLayout()
     {
         var contentId = DockManager.Layout.ActiveContent?.ContentId;
-        if (string.Equals(contentId, IconDesignContentId, StringComparison.Ordinal))
+        if (string.Equals(contentId, PropertiesContentId, StringComparison.Ordinal) &&
+            IsVisiblePropertiesContext(_activePropertiesContextContentId))
         {
-            _activePropertiesContextContentId = IconDesignContentId;
             return;
         }
 
-        if (TryGetWorkflowForDocument(contentId, out _))
+        if (IsPropertiesContextContentId(contentId) && IsVisiblePropertiesContext(contentId!))
         {
             _activePropertiesContextContentId = contentId!;
             return;
         }
 
+        var selectedContent = DockManager.Layout.Descendents()
+            .OfType<LayoutContent>()
+            .FirstOrDefault(candidate =>
+                candidate.IsSelected &&
+                IsPropertiesContextContentId(candidate.ContentId) &&
+                IsVisiblePropertiesContext(candidate.ContentId));
+        if (selectedContent is not null)
+        {
+            _activePropertiesContextContentId = selectedContent.ContentId;
+            return;
+        }
+
         RestoreWorkflowPropertiesContext(refresh: false);
     }
+
+    private bool IsVisiblePropertiesContext(string contentId) => FindContent(contentId) switch
+    {
+        LayoutAnchorable anchorable => anchorable.IsVisible && !anchorable.IsHidden,
+        LayoutDocument => true,
+        _ => false
+    };
 
     private void RestoreWorkflowPropertiesContext(bool refresh = true)
     {
@@ -1151,6 +1220,10 @@ public partial class MainWindow : Window
 
     private static bool IsKnownPanel(string? contentId) => contentId is
         ToolsContentId or PropertiesContentId or LayersContentId or ProjectContentId or StyleLibraryContentId or AssetGenerationContentId or BackgroundRemovalContentId or ImageOutlineContentId or IconDesignContentId or PixelAlignmentContentId or BlueprintContentId or AgentConnectionContentId or CommandConsoleContentId;
+
+    private static bool IsPropertiesContextContentId(string? contentId) =>
+        !string.Equals(contentId, PropertiesContentId, StringComparison.Ordinal) &&
+        (IsKnownPanel(contentId) || IsWorkflowDocument(contentId));
 
     private void FocusNewProjectDialog()
     {

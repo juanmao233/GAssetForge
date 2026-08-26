@@ -1126,9 +1126,27 @@ internal static class Program
             Equal(IconPerspectiveSurfaceViewKind.CameraFrame, iconCameraFrameSurface.ViewKind,
                 "Icon 右侧主视图类型");
 
-            shell.ShowPanelCommand.Execute(MainWindow.AssetGenerationContentId);
-            True(propertiesHost.Content is PropertiesView,
-                "从 Icon 切到其它共享工具页后应恢复当前 UI 工作流属性栏");
+            foreach (var emptyPropertiesContext in new[]
+                     {
+                         (ContentId: MainWindow.StyleLibraryContentId, Title: "美术风格素材库"),
+                         (ContentId: MainWindow.AssetGenerationContentId, Title: "素材生成")
+                     })
+            {
+                shell.ShowPanelCommand.Execute(emptyPropertiesContext.ContentId);
+                var emptyPropertiesPanel = propertiesHost.Content as Border
+                    ?? throw new SmokeTestException(
+                        $"激活{emptyPropertiesContext.Title}后，属性栏不应继续显示业务制作项属性。");
+                Equal(emptyPropertiesContext.ContentId, emptyPropertiesPanel.Tag as string,
+                    $"{emptyPropertiesContext.Title}空属性页上下文 ContentId");
+                var emptyPropertyTexts = VisualDescendants<TextBlock>(emptyPropertiesPanel)
+                    .Select(text => text.Text)
+                    .ToArray();
+                True(emptyPropertyTexts.Contains(emptyPropertiesContext.Title, StringComparer.Ordinal),
+                    $"{emptyPropertiesContext.Title}空属性页应显示当前窗口名称");
+                True(emptyPropertyTexts.Contains("当前窗口暂无可显示的属性信息。", StringComparer.Ordinal),
+                    $"{emptyPropertiesContext.Title}空属性页应显示统一默认提示");
+            }
+
             shell.ShowPanelCommand.Execute(MainWindow.IconDesignContentId);
             True(ReferenceEquals(iconPropertiesView, propertiesHost.Content),
                 "再次激活 Icon 时应恢复同一个 Icon 属性视图实例");
@@ -2028,6 +2046,8 @@ internal static class Program
             Equal("Tilemap 制作", canvas.Title, "Tilemap 中央文档标题");
             True(canvas.IsSelected && canvas.IsActive,
                 "启动时应根据当前业务上下文选中 Tilemap 文档标签");
+            Equal(MainWindow.TilemapWorkspaceContentId, manager.Layout.ActiveContent?.ContentId,
+                "默认布局装载后 AvalonDock 全局活动内容应保持为 Tilemap 文档");
 
             var host = canvas.Content as ContentControl
                 ?? throw new SmokeTestException("Tilemap 中央文档内容必须由 ContentControl 承载。");
@@ -2346,11 +2366,15 @@ internal static class Program
             True(uiHost.Content is CanvasDocumentView, "页面 UI 文档应保持独立 UI 画布");
             True(ReferenceEquals(tilemapView, host.Content),
                 "切换活动业务上下文不得替换 Tilemap 文档内容");
+            Equal(MainWindow.CanvasContentId, manager.Layout.ActiveContent?.ContentId,
+                "选择 UI 工作流应同步激活对应的 UI 文档窗口");
             True(propertiesHost.Content is PropertiesView, "切回 UI 工作流应恢复 UI 属性面板");
             uiZoomToolbar.UpdateLayout();
             Equal(Visibility.Visible, uiZoomToolbar.Visibility,
                 "UI 工作流应显示顶部 UI 编辑器缩放工具栏");
             shell.SelectWorkflow("tilemap");
+            Equal(MainWindow.TilemapWorkspaceContentId, manager.Layout.ActiveContent?.ContentId,
+                "选择 Tilemap 工作流应同步激活对应的 Tilemap 文档窗口");
             True(ReferenceEquals(tilemapView, host.Content), "再次进入 Tilemap 应复用独立网格工作区实例");
             True(ReferenceEquals(tilemapPropertiesView, propertiesHost.Content),
                 "再次进入 Tilemap 应复用参数属性面板实例");

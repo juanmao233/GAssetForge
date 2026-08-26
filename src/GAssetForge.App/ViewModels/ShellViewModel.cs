@@ -515,9 +515,13 @@ public sealed class ShellViewModel : ObservableObject
     public ICommand UiZoomOutCommand { get; }
     public ICommand UiResetZoomCommand { get; }
 
-    public void SelectWorkflow(string key) => ActivateWorkspaceDocument(WorkflowCatalog.FindDockable(key));
+    public void SelectWorkflow(string key) => SelectWorkflow(WorkflowCatalog.FindDockable(key));
 
-    public void SelectWorkflow(WorkflowDefinition workflow) => ActivateWorkspaceDocument(workflow);
+    public void SelectWorkflow(WorkflowDefinition workflow)
+    {
+        ActivateWorkspaceDocument(workflow);
+        WorkflowDocumentRequested?.Invoke(workflow);
+    }
 
     public void ActivateWorkspaceDocument(WorkflowDefinition workflow)
     {

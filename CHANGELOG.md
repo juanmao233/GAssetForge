@@ -5,6 +5,26 @@ development track; versioning policy will be finalized before the first public r
 
 ## Unreleased
 
+## 1.0.12t1 - 2026-08-26
+
+### Changed
+
+- Made the right-side Properties panel follow the currently active AvalonDock window instead of the
+  previously selected business workflow. UI Design, Tilemap, and Icon Design retain their dedicated
+  property modules, while Style Library, Asset Generation, Blueprint, project tools, and other windows
+  without a property module show a stable context-specific empty state.
+- Kept Properties-panel context independent from the Blueprint tool-palette context so selecting a dock
+  page changes only the side panel that belongs to that context.
+- Made workflow selection focus the corresponding dock document, keeping the selected tab, shell workflow,
+  tool palette, and Properties panel synchronized.
+
+### Fixed
+
+- Prevented Style Library and other tool pages from falling back to UI or Tilemap properties after they
+  become active.
+- Preserved the intended active workflow document after AvalonDock installs or resets the default layout,
+  avoiding startup-time selection of an unrelated anchorable as the Properties context.
+
 ## 1.0.11t1 - 2026-08-26
 
 ### Added
