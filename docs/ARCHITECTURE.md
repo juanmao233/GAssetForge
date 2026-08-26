@@ -51,7 +51,7 @@ AvalonDock 的模块接口只承担面板拓扑、大小、停靠位置、隐藏
 | `workflow-blueprint` | Agent 与工具工作流蓝图 | 与 Project 共用画布下方标签停靠区 |
 | `mcp-agent-connection` | MCP Agent 连接管理 | 默认隐藏；拉起后位于宽底部区域 |
 
-`MainWindow` 维护面板注册表。布局恢复时，`AvalonDockLayoutService` 仅根据 `ContentId` 把真实 WPF View 重新挂接到布局模型；恢复失败则重建默认布局。工具栏上下文和属性栏上下文相互独立：激活 `icon-design` 时，稳定的 `ui-properties` host 装载单实例 `IconDesignPropertiesView`；激活 UI 或 Tilemap 工作流文档时再恢复各自属性视图，因此无需为 Icon 创建第二个属性 ContentId，也不会改变已保存布局结构。
+`MainWindow` 维护面板注册表。布局恢复时，`AvalonDockLayoutService` 仅根据 `ContentId` 把真实 WPF View 重新挂接到布局模型；恢复失败则重建默认布局。工具栏上下文和属性栏上下文相互独立：稳定的 `ui-properties` host 根据当前活动 dock 页装载单实例属性模块。UI、Tilemap、Icon、背景剔除、图片描边和像素对齐分别使用自己的 Properties View；无专用属性的页面显示稳定空状态。因此属性切换不需要创建第二个属性 ContentId，也不会改变已保存布局结构。
 
 ### 独立状态生命周期
 
@@ -85,13 +85,22 @@ domain separation 的稳定 SHA-256。重命名风格组不会令样本过期；
 或媒体类型会改变当前指纹，使旧样本保留但标记为 stale。分析完成时 ViewModel 会再次核对当前指纹并原子
 保存；分析期间发生编辑、保存失败、取消或 Agent 错误都不会覆盖旧样本。
 
-### 共享取色器与单图预览发布边界
+### 共享取色器、预览导航与单图发布边界
 
 颜色换算位于 Core 的 `RgbColor`、`HsvColor` 与 `ColorConversion`，只描述不透明 sRGB、HSV 和规范化
 `#RRGGBB`，不依赖 WPF。App 层的 `IColorPickerService` / `DesktopColorPickerService` 打开共享模态窗口：
 `HsvSaturationValueSurface` 提供二维饱和度/明度选择，`HueSpectrumSlider` 提供 Hue 色条，ViewModel 负责保持
 HSV、RGB 与 Hex 双向同步并保留灰色状态下最近有效 Hue。窗口同时展示原色和新色；只有确认才返回结果，取消返回
 `null`，调用方不会收到临时编辑。当前描边颜色、背景剔除自定义色和棋盘格 A/B 色使用同一服务。
+
+普通源图/结果预览通过 `ImagePreviewControl` 与 `ImageViewportSurface` 共享 `ImageViewportState`。滚轮缩放以
+鼠标所在图片坐标为锚点，中键拖拽改变平移量，右键或双击恢复 fit-to-view；缩放范围与视口边界统一约束。
+`PixelAlignmentSurface` 使用同一 viewport 状态，同时保留裁切线、透视顶点和采样网格交互。假透明棋盘格叠加由
+`CheckerGridRenderer` 使用同一个缩放和平移变换绘制，避免预览移动后网格相位与底图错位。
+
+图像工具 dock 文档只承载紧凑标题、参数编辑（像素对齐的几何/采样参数）和图像预览；文件选择、输出路径、
+刷新/保存、预览缓存位置和批处理队列属于活动工具的 Properties 模块。这一职责划分让窄窗口仍保留足够预览空间，
+并保证属性页始终跟随当前活动 dock 页。
 
 `IImageProcessingPreviewCache` 把背景剔除、图片描边和像素对齐单图模式的渲染结果与正式项目输出分离。ViewModel
 向 `Workspace/ImageProcessingPreviews/<tool-id>` 申请唯一 `.png` 路径，再调用现有 Core ImageSharp 服务直接
@@ -102,7 +111,8 @@ HSV、RGB 与 Hex 双向同步并保留灰色状态下最近有效 Hue。窗口�
 像素结果过期。保存通过目标目录内临时文件复制并原子重命名，发布的是同一缓存 PNG 的原始字节，不重新调用 Core
 算法；这也保证像素工具的 Palette PNG 不会在保存阶段被二次编码。缓存服务校验受管目录并完整解码 PNG；每个
 ViewModel 会 pin 当前采用或正在渲染的缓存路径，按年龄、数量和总容量执行的机会式清理会跳过这些活动预览，替换、
-切换输入或主动释放时再解除保护。批量描边与批量像素对齐仍由现有 App 队列逐项直接写入正式目录，不经过单图人工确认。
+切换输入或主动释放时再解除保护。批量背景剔除、批量描边与批量像素对齐均由 App 队列逐项直接写入正式目录，
+不经过单图人工确认。
 
 ### 像素对齐与批处理边界
 
@@ -141,6 +151,10 @@ expansion 防止外描边被裁切。
 批量清单属于会话瞬态状态，不进入用户设置；描边种类、宽度、颜色、Alpha threshold、扩画布开关和最近目录即时
 持久化。单图刷新把同一个 Core 服务的输出写入预览缓存，确认保存时仅发布缓存；批量继续直接调用 Core 服务写入
 正式目录。Core 服务不依赖 AvalonDock、项目 Schema、Agent 或 MCP。
+
+`BackgroundRemovalViewModel` 使用同样的 App 层批处理边界：批次开始时冻结当前色键/棋盘格与边缘设置，逐项规划
+不覆盖现有文件的输出路径并调用单图 Core 服务。每项独立记录 Pending / Processing / Completed / Failed；单项
+失败只进入该项诊断并继续后续文件。批处理选择器允许多选输入和独立输出目录，队列与进度只属于当前桌面会话。
 
 ### Icon 指定角度投影边界
 

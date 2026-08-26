@@ -3,6 +3,7 @@ using GAssetForge.App.Services;
 using GAssetForge.Core.Generation;
 using GAssetForge.Core.Imaging;
 using SixLabors.ImageSharp;
+using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
 using System.Windows.Input;
@@ -45,9 +46,146 @@ public sealed class BackgroundRemovalSettingsChangedEventArgs(
     public BackgroundRemovalToolSettingsSnapshot Settings { get; } = settings;
 }
 
+public enum BackgroundRemovalBatchItemStatus
+{
+    Pending,
+    Processing,
+    Completed,
+    Failed
+}
+
+public sealed class BackgroundRemovalBatchItemViewModel : ObservableObject
+{
+    private string _outputPath = string.Empty;
+    private BackgroundRemovalBatchItemStatus _status = BackgroundRemovalBatchItemStatus.Pending;
+    private string _message = "等待处理";
+    private double _progressPercent;
+
+    public BackgroundRemovalBatchItemViewModel(string sourcePath)
+    {
+        SourcePath = Path.GetFullPath(sourcePath);
+        SourceSizeText = InspectSourceSize(SourcePath);
+    }
+
+    public string SourcePath { get; }
+
+    public string FileName => Path.GetFileName(SourcePath);
+
+    public string SourceSizeText { get; }
+
+    public string OutputPath
+    {
+        get => _outputPath;
+        private set
+        {
+            if (SetProperty(ref _outputPath, value))
+            {
+                OnPropertyChanged(nameof(OutputFileName));
+            }
+        }
+    }
+
+    public string OutputFileName => string.IsNullOrWhiteSpace(OutputPath)
+        ? "—"
+        : Path.GetFileName(OutputPath);
+
+    public BackgroundRemovalBatchItemStatus Status
+    {
+        get => _status;
+        private set
+        {
+            if (SetProperty(ref _status, value))
+            {
+                OnPropertyChanged(nameof(StatusDisplayText));
+                OnPropertyChanged(nameof(StatusText));
+                OnPropertyChanged(nameof(IsCompleted));
+                OnPropertyChanged(nameof(IsFailed));
+            }
+        }
+    }
+
+    public string StatusDisplayText => Status switch
+    {
+        BackgroundRemovalBatchItemStatus.Pending => "等待处理",
+        BackgroundRemovalBatchItemStatus.Processing => "处理中",
+        BackgroundRemovalBatchItemStatus.Completed => "已完成",
+        BackgroundRemovalBatchItemStatus.Failed => "失败",
+        _ => Status.ToString()
+    };
+
+    public string StatusText => StatusDisplayText;
+
+    public string Message
+    {
+        get => _message;
+        private set => SetProperty(ref _message, value);
+    }
+
+    public double ProgressPercent
+    {
+        get => _progressPercent;
+        private set => SetProperty(ref _progressPercent, Math.Clamp(value, 0d, 100d));
+    }
+
+    public bool IsCompleted => Status == BackgroundRemovalBatchItemStatus.Completed;
+
+    public bool IsFailed => Status == BackgroundRemovalBatchItemStatus.Failed;
+
+    internal void Reset(string outputPath)
+    {
+        OutputPath = outputPath;
+        Status = BackgroundRemovalBatchItemStatus.Pending;
+        Message = "等待处理";
+        ProgressPercent = 0d;
+    }
+
+    internal void MarkProcessing()
+    {
+        Status = BackgroundRemovalBatchItemStatus.Processing;
+        Message = "正在剔除背景…";
+        ProgressPercent = 10d;
+    }
+
+    internal void MarkCompleted(BackgroundRemovalResult result)
+    {
+        OutputPath = Path.GetFullPath(result.OutputPath);
+        Status = BackgroundRemovalBatchItemStatus.Completed;
+        Message = $"已输出 {result.Width}×{result.Height} PNG · 剔除 {result.RemovedPixelCount:N0} 像素";
+        ProgressPercent = 100d;
+    }
+
+    internal void MarkFailed(string message)
+    {
+        Status = BackgroundRemovalBatchItemStatus.Failed;
+        Message = message;
+        ProgressPercent = 100d;
+    }
+
+    private static string InspectSourceSize(string sourcePath)
+    {
+        try
+        {
+            using var stream = new FileStream(
+                sourcePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete);
+            var imageInfo = Image.Identify(stream);
+            return imageInfo is null || imageInfo.Width <= 0 || imageInfo.Height <= 0
+                ? "无法读取"
+                : $"{imageInfo.Width} × {imageInfo.Height}";
+        }
+        catch (Exception)
+        {
+            return "无法读取";
+        }
+    }
+}
+
 public sealed class BackgroundRemovalViewModel : ObservableObject
 {
     private const string LogSource = "BackgroundRemoval";
+    public const int MaximumBatchItemCount = 256;
 
     private static readonly IReadOnlyList<BackgroundRemovalPresetOption> SupportedPresets =
     [
@@ -80,6 +218,11 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
     private readonly RelayCommand _chooseCustomColorCommand;
     private readonly RelayCommand _chooseCheckerColorACommand;
     private readonly RelayCommand _chooseCheckerColorBCommand;
+    private readonly RelayCommand _chooseBatchInputsCommand;
+    private readonly RelayCommand _chooseBatchOutputDirectoryCommand;
+    private readonly AsyncRelayCommand _processBatchCommand;
+    private readonly RelayCommand _clearBatchCommand;
+    private readonly RelayCommand _removeSelectedBatchItemCommand;
     private BackgroundRemovalPresetOption _selectedPreset;
     private string _customColorHex;
     private double _transparentThreshold;
@@ -110,6 +253,15 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
     private string _statusText = "选择一张纯色背景图片，然后设置透明 PNG 的保存位置。";
     private string _resultSummary = "尚未处理图片";
     private bool _isBusy;
+    private string _batchOutputDirectory = string.Empty;
+    private string _batchStatusText = "尚未选择批处理图片";
+    private bool _isBatchRunning;
+    private bool _isBatchMode;
+    private BackgroundRemovalBatchItemViewModel? _selectedBatchItem;
+    private string _batchCurrentFileName = string.Empty;
+    private int _batchCompletedCount;
+    private int _batchSucceededCount;
+    private int _batchFailedCount;
     private bool _suppressSettingsChanged = true;
 
     public BackgroundRemovalViewModel(
@@ -174,6 +326,17 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         _chooseCustomColorCommand = new RelayCommand(ChooseCustomColor, () => !IsBusy);
         _chooseCheckerColorACommand = new RelayCommand(ChooseCheckerColorA, () => !IsBusy);
         _chooseCheckerColorBCommand = new RelayCommand(ChooseCheckerColorB, () => !IsBusy);
+        _chooseBatchInputsCommand = new RelayCommand(
+            ChooseBatchInputs,
+            () => !IsBusy && !IsBatchRunning && BatchItems.Count < MaximumBatchItemCount);
+        _chooseBatchOutputDirectoryCommand = new RelayCommand(
+            ChooseBatchOutputDirectory,
+            () => !IsBusy && !IsBatchRunning && HasBatchItems);
+        _processBatchCommand = new AsyncRelayCommand(ProcessBatchAsync, () => CanProcessBatch);
+        _clearBatchCommand = new RelayCommand(ClearBatch, () => !IsBusy && !IsBatchRunning && HasBatchItems);
+        _removeSelectedBatchItemCommand = new RelayCommand(
+            RemoveSelectedBatchItem,
+            () => !IsBusy && !IsBatchRunning && SelectedBatchItem is not null);
         ChooseInputCommand = _chooseInputCommand;
         ChooseOutputCommand = _chooseOutputCommand;
         ProcessCommand = _processCommand;
@@ -184,12 +347,19 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         ChooseCustomColorCommand = _chooseCustomColorCommand;
         ChooseCheckerColorACommand = _chooseCheckerColorACommand;
         ChooseCheckerColorBCommand = _chooseCheckerColorBCommand;
+        ChooseBatchInputsCommand = _chooseBatchInputsCommand;
+        ChooseBatchOutputDirectoryCommand = _chooseBatchOutputDirectoryCommand;
+        ProcessBatchCommand = _processBatchCommand;
+        ClearBatchCommand = _clearBatchCommand;
+        RemoveSelectedBatchItemCommand = _removeSelectedBatchItemCommand;
         _suppressSettingsChanged = false;
     }
 
     public event EventHandler<BackgroundRemovalSettingsChangedEventArgs>? SettingsChanged;
 
     public IReadOnlyList<BackgroundRemovalPresetOption> PresetOptions => SupportedPresets;
+
+    public ObservableCollection<BackgroundRemovalBatchItemViewModel> BatchItems { get; } = [];
 
     public IReadOnlyList<int> EdgeContractOptions { get; } = [0, 1, 2, 3];
 
@@ -635,6 +805,127 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         private set => SetProperty(ref _resultSummary, value);
     }
 
+    public string BatchOutputDirectory
+    {
+        get => _batchOutputDirectory;
+        private set
+        {
+            if (!SetProperty(ref _batchOutputDirectory, value))
+            {
+                return;
+            }
+
+            OnPropertyChanged(nameof(HasBatchOutputDirectory));
+            OnPropertyChanged(nameof(CanProcessBatch));
+            RaiseCommandStates();
+        }
+    }
+
+    public bool HasBatchOutputDirectory => !string.IsNullOrWhiteSpace(BatchOutputDirectory);
+
+    public string BatchStatusText
+    {
+        get => _batchStatusText;
+        private set => SetProperty(ref _batchStatusText, value);
+    }
+
+    public bool IsBatchMode
+    {
+        get => _isBatchMode;
+        set => SetProperty(ref _isBatchMode, value);
+    }
+
+    public BackgroundRemovalBatchItemViewModel? SelectedBatchItem
+    {
+        get => _selectedBatchItem;
+        set
+        {
+            if (SetProperty(ref _selectedBatchItem, value))
+            {
+                _removeSelectedBatchItemCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
+
+    public string BatchCurrentFileName
+    {
+        get => _batchCurrentFileName;
+        private set => SetProperty(ref _batchCurrentFileName, value);
+    }
+
+    public bool IsBatchRunning
+    {
+        get => _isBatchRunning;
+        private set
+        {
+            if (!SetProperty(ref _isBatchRunning, value))
+            {
+                return;
+            }
+
+            OnPropertyChanged(nameof(CanProcessBatch));
+            RaiseCommandStates();
+        }
+    }
+
+    public int BatchTotalCount => BatchItems.Count;
+
+    public int BatchCompletedCount
+    {
+        get => _batchCompletedCount;
+        private set
+        {
+            if (SetProperty(ref _batchCompletedCount, value))
+            {
+                OnPropertyChanged(nameof(BatchPendingCount));
+                OnPropertyChanged(nameof(BatchProgressPercent));
+                OnPropertyChanged(nameof(BatchProgress));
+                OnPropertyChanged(nameof(BatchProgressText));
+            }
+        }
+    }
+
+    public int BatchSucceededCount
+    {
+        get => _batchSucceededCount;
+        private set
+        {
+            if (SetProperty(ref _batchSucceededCount, value))
+            {
+                OnPropertyChanged(nameof(BatchProgressText));
+            }
+        }
+    }
+
+    public int BatchFailedCount
+    {
+        get => _batchFailedCount;
+        private set
+        {
+            if (SetProperty(ref _batchFailedCount, value))
+            {
+                OnPropertyChanged(nameof(HasBatchFailures));
+                OnPropertyChanged(nameof(BatchProgressText));
+            }
+        }
+    }
+
+    public int BatchPendingCount => Math.Max(0, BatchTotalCount - BatchCompletedCount);
+
+    public double BatchProgressPercent => BatchTotalCount == 0
+        ? 0d
+        : BatchCompletedCount * 100d / BatchTotalCount;
+
+    public double BatchProgress => BatchProgressPercent;
+
+    public string BatchProgressText => BatchTotalCount == 0
+        ? "0 / 0"
+        : $"{BatchCompletedCount} / {BatchTotalCount} · 成功 {BatchSucceededCount} · 失败 {BatchFailedCount}";
+
+    public bool HasBatchItems => BatchItems.Count > 0;
+
+    public bool HasBatchFailures => BatchFailedCount > 0;
+
     public bool IsBusy
     {
         get => _isBusy;
@@ -648,6 +939,7 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             OnPropertyChanged(nameof(CanProcess));
             OnPropertyChanged(nameof(CanRefreshPreview));
             OnPropertyChanged(nameof(CanSaveResult));
+            OnPropertyChanged(nameof(CanProcessBatch));
             RaiseCommandStates();
         }
     }
@@ -661,6 +953,9 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
     public bool CanProcess => CanRefreshPreview &&
                               !string.IsNullOrWhiteSpace(OutputPath) &&
                               !PathsEqual(InputPath, OutputPath);
+
+    public bool CanProcessBatch => !IsBusy && !IsBatchRunning && HasBatchItems &&
+                                   HasBatchOutputDirectory && IsConfigurationValid;
 
     public bool IsConfigurationValid => TryBuildSettings(out _, out _);
 
@@ -695,6 +990,18 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
     public ICommand ChooseCheckerColorACommand { get; }
 
     public ICommand ChooseCheckerColorBCommand { get; }
+
+    public ICommand ChooseBatchInputsCommand { get; }
+
+    public ICommand ChooseBatchOutputDirectoryCommand { get; }
+
+    public ICommand ProcessBatchCommand { get; }
+
+    public ICommand ClearBatchCommand { get; }
+
+    public ICommand ClearBatchItemsCommand => ClearBatchCommand;
+
+    public ICommand RemoveSelectedBatchItemCommand { get; }
 
     private void ChooseInput()
     {
@@ -794,6 +1101,342 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         {
             StatusText = $"无法选择输出位置：{exception.Message}";
         }
+    }
+
+    private void ChooseBatchInputs()
+    {
+        try
+        {
+            var selectedPaths = _inputPicker.SelectInputFiles(_lastInputDirectory);
+            if (selectedPaths.Count == 0)
+            {
+                return;
+            }
+
+            var normalizedPaths = new List<string>(selectedPaths.Count);
+            var remainingCapacity = Math.Max(0, MaximumBatchItemCount - BatchItems.Count);
+            var seenPaths = new HashSet<string>(
+                OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+            foreach (var existingItem in BatchItems)
+            {
+                seenPaths.Add(existingItem.SourcePath);
+            }
+
+            var rejectedCount = 0;
+            var capacityRejectedCount = 0;
+            foreach (var selectedPath in selectedPaths)
+            {
+                if (normalizedPaths.Count >= remainingCapacity)
+                {
+                    capacityRejectedCount++;
+                    continue;
+                }
+
+                try
+                {
+                    var normalized = Path.GetFullPath(selectedPath);
+                    if (!File.Exists(normalized) ||
+                        !SupportedInputExtensions.Contains(Path.GetExtension(normalized)) ||
+                        !seenPaths.Add(normalized))
+                    {
+                        rejectedCount++;
+                        continue;
+                    }
+
+                    normalizedPaths.Add(normalized);
+                }
+                catch (Exception exception) when (IsExpectedOperationException(exception))
+                {
+                    rejectedCount++;
+                }
+            }
+
+            if (normalizedPaths.Count == 0)
+            {
+                BatchStatusText = remainingCapacity == 0
+                    ? $"批处理队列已达到 {MaximumBatchItemCount} 项上限。"
+                    : "没有选中可处理的图片；原批处理队列保持不变。";
+                StatusText = BatchStatusText;
+                return;
+            }
+
+            BackgroundRemovalBatchItemViewModel? firstAddedItem = null;
+            foreach (var normalizedPath in normalizedPaths)
+            {
+                var item = new BackgroundRemovalBatchItemViewModel(normalizedPath);
+                BatchItems.Add(item);
+                firstAddedItem ??= item;
+            }
+
+            _lastInputDirectory = Path.GetDirectoryName(normalizedPaths[0]);
+            RecalculateBatchProgressFromItems();
+            SelectedBatchItem = firstAddedItem;
+            IsBatchMode = true;
+            NotifyBatchCollectionChanged();
+            var ignoredReasons = new List<string>(2);
+            if (rejectedCount > 0)
+            {
+                ignoredReasons.Add($"{rejectedCount} 个重复或无效文件");
+            }
+
+            if (capacityRejectedCount > 0)
+            {
+                ignoredReasons.Add($"{capacityRejectedCount} 个超出 {MaximumBatchItemCount} 项上限的文件");
+            }
+
+            BatchStatusText = ignoredReasons.Count == 0
+                ? $"已加入 {normalizedPaths.Count} 张图片；队列共 {BatchTotalCount} 项。"
+                : $"已加入 {normalizedPaths.Count} 张图片；忽略 {string.Join("、", ignoredReasons)}。";
+            StatusText = BatchStatusText;
+            NotifySettingsChanged();
+        }
+        catch (Exception exception) when (IsExpectedOperationException(exception))
+        {
+            BatchStatusText = $"无法选择批处理图片：{exception.Message}";
+            StatusText = BatchStatusText;
+        }
+    }
+
+    private void ChooseBatchOutputDirectory()
+    {
+        if (!HasBatchItems)
+        {
+            BatchStatusText = "请先选择需要批量处理的图片。";
+            StatusText = BatchStatusText;
+            return;
+        }
+
+        try
+        {
+            var firstInputDirectory = Path.GetDirectoryName(BatchItems[0].SourcePath);
+            var selectedDirectory = _outputPicker.SelectOutputDirectory(
+                _lastOutputDirectory ?? firstInputDirectory);
+            if (string.IsNullOrWhiteSpace(selectedDirectory))
+            {
+                return;
+            }
+
+            var normalized = Path.GetFullPath(selectedDirectory);
+            Directory.CreateDirectory(normalized);
+            BatchOutputDirectory = normalized;
+            _lastOutputDirectory = normalized;
+            BatchStatusText = $"批处理输出目录：{normalized}";
+            StatusText = BatchStatusText;
+            NotifySettingsChanged();
+        }
+        catch (Exception exception) when (IsExpectedOperationException(exception))
+        {
+            BatchStatusText = $"无法设置批处理输出目录：{exception.Message}";
+            StatusText = BatchStatusText;
+        }
+    }
+
+    private void ClearBatch()
+    {
+        BatchItems.Clear();
+        SelectedBatchItem = null;
+        BatchCurrentFileName = string.Empty;
+        ResetBatchProgress();
+        NotifyBatchCollectionChanged();
+        BatchStatusText = "批处理队列已清空";
+        StatusText = BatchStatusText;
+    }
+
+    private void RemoveSelectedBatchItem()
+    {
+        var selectedItem = SelectedBatchItem;
+        if (selectedItem is null)
+        {
+            return;
+        }
+
+        var removedIndex = BatchItems.IndexOf(selectedItem);
+        if (removedIndex < 0)
+        {
+            SelectedBatchItem = null;
+            return;
+        }
+
+        BatchItems.RemoveAt(removedIndex);
+        SelectedBatchItem = BatchItems.Count == 0
+            ? null
+            : BatchItems[Math.Min(removedIndex, BatchItems.Count - 1)];
+        RecalculateBatchProgressFromItems();
+        NotifyBatchCollectionChanged();
+        BatchStatusText = $"已从批处理队列移除 {selectedItem.FileName}；剩余 {BatchTotalCount} 项。";
+        StatusText = BatchStatusText;
+    }
+
+    private async Task ProcessBatchAsync()
+    {
+        if (!TryBuildSettings(out var settings, out var reason) || !CanProcessBatch)
+        {
+            BatchStatusText = string.IsNullOrWhiteSpace(reason)
+                ? "批处理输入、输出目录或参数尚未就绪。"
+                : reason;
+            StatusText = BatchStatusText;
+            return;
+        }
+
+        var outputDirectory = Path.GetFullPath(BatchOutputDirectory);
+        try
+        {
+            Directory.CreateDirectory(outputDirectory);
+        }
+        catch (Exception exception) when (IsExpectedOperationException(exception))
+        {
+            BatchStatusText = $"无法创建批处理输出目录：{exception.Message}";
+            StatusText = BatchStatusText;
+            return;
+        }
+
+        var reservedOutputPaths = new HashSet<string>(
+            OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
+        foreach (var item in BatchItems)
+        {
+            item.Reset(string.Empty);
+        }
+
+        ResetBatchProgress();
+        IsBatchRunning = true;
+        IsBusy = true;
+        IsBatchMode = true;
+        BatchCurrentFileName = string.Empty;
+        BatchStatusText = $"正在批量处理 0 / {BatchTotalCount}…";
+        StatusText = BatchStatusText;
+        _workbenchLogSink?.Write(
+            WorkbenchLogLevel.Information,
+            LogSource,
+            $"开始批量背景剔除：{BatchTotalCount} 项 · 输出目录 {outputDirectory}");
+
+        string? lastSuccessfulOutput = null;
+        try
+        {
+            foreach (var item in BatchItems)
+            {
+                BatchCurrentFileName = item.FileName;
+                BatchStatusText =
+                    $"正在处理 {BatchCompletedCount + 1} / {BatchTotalCount}：{item.FileName}";
+                StatusText = BatchStatusText;
+
+                try
+                {
+                    item.Reset(ReserveBatchOutputPath(
+                        outputDirectory,
+                        item.SourcePath,
+                        reservedOutputPaths));
+                    item.MarkProcessing();
+                    var result = await Task.Run(() =>
+                            _backgroundRemovalService.RemoveToPng(
+                                item.SourcePath,
+                                item.OutputPath,
+                                settings,
+                                overwrite: false))
+                        .ConfigureAwait(true);
+                    var renderedOutputPath = Path.GetFullPath(result.OutputPath);
+                    if (!File.Exists(renderedOutputPath))
+                    {
+                        throw new IOException("背景剔除服务没有生成预期的输出 PNG。");
+                    }
+
+                    item.MarkCompleted(result);
+                    BatchSucceededCount++;
+                    lastSuccessfulOutput = renderedOutputPath;
+                    _workbenchLogSink?.Write(
+                        WorkbenchLogLevel.Success,
+                        LogSource,
+                        $"批量背景剔除完成：{item.FileName} -> {renderedOutputPath}");
+                }
+                catch (Exception exception)
+                {
+                    var errorMessage = GetOperationErrorMessage(exception);
+                    item.MarkFailed(errorMessage);
+                    BatchFailedCount++;
+                    _workbenchLogSink?.Write(
+                        WorkbenchLogLevel.Error,
+                        LogSource,
+                        $"批量背景剔除单项失败，继续处理后续图片：{item.FileName} · {errorMessage}",
+                        exception: exception);
+                }
+
+                BatchCompletedCount++;
+            }
+
+            if (!string.IsNullOrWhiteSpace(lastSuccessfulOutput))
+            {
+                LastSavedOutputPath = lastSuccessfulOutput;
+            }
+
+            BatchStatusText = BatchFailedCount == 0
+                ? $"批处理完成：{BatchSucceededCount} 张图片已输出到 {outputDirectory}"
+                : $"批处理完成：成功 {BatchSucceededCount} 张，失败 {BatchFailedCount} 张；失败项已保留在队列中。";
+            StatusText = BatchStatusText;
+            _workbenchLogSink?.Write(
+                BatchFailedCount == 0 ? WorkbenchLogLevel.Success : WorkbenchLogLevel.Warning,
+                LogSource,
+                BatchStatusText);
+        }
+        finally
+        {
+            BatchCurrentFileName = string.Empty;
+            IsBatchRunning = false;
+            IsBusy = false;
+        }
+    }
+
+    private static string ReserveBatchOutputPath(
+        string outputDirectory,
+        string sourcePath,
+        ISet<string> reservedOutputPaths)
+    {
+        var sourceName = Path.GetFileNameWithoutExtension(sourcePath);
+        if (string.IsNullOrWhiteSpace(sourceName))
+        {
+            sourceName = "image";
+        }
+
+        var baseName = $"{sourceName}_transparent";
+        var suffix = 1;
+        while (true)
+        {
+            var fileName = suffix == 1 ? $"{baseName}.png" : $"{baseName}_{suffix}.png";
+            var candidate = Path.GetFullPath(Path.Combine(outputDirectory, fileName));
+            if (!File.Exists(candidate) &&
+                !PathsEqual(candidate, sourcePath) &&
+                reservedOutputPaths.Add(candidate))
+            {
+                return candidate;
+            }
+
+            suffix++;
+        }
+    }
+
+    private void ResetBatchProgress()
+    {
+        BatchCompletedCount = 0;
+        BatchSucceededCount = 0;
+        BatchFailedCount = 0;
+    }
+
+    private void RecalculateBatchProgressFromItems()
+    {
+        BatchCurrentFileName = string.Empty;
+        BatchSucceededCount = BatchItems.Count(item => item.Status == BackgroundRemovalBatchItemStatus.Completed);
+        BatchFailedCount = BatchItems.Count(item => item.Status == BackgroundRemovalBatchItemStatus.Failed);
+        BatchCompletedCount = BatchSucceededCount + BatchFailedCount;
+    }
+
+    private void NotifyBatchCollectionChanged()
+    {
+        OnPropertyChanged(nameof(BatchTotalCount));
+        OnPropertyChanged(nameof(BatchPendingCount));
+        OnPropertyChanged(nameof(BatchProgressPercent));
+        OnPropertyChanged(nameof(BatchProgress));
+        OnPropertyChanged(nameof(BatchProgressText));
+        OnPropertyChanged(nameof(HasBatchItems));
+        OnPropertyChanged(nameof(CanProcessBatch));
+        RaiseCommandStates();
     }
 
     private async Task RefreshPreviewAsync()
@@ -1171,6 +1814,7 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         OnPropertyChanged(nameof(CanProcess));
         OnPropertyChanged(nameof(CanRefreshPreview));
         OnPropertyChanged(nameof(CanSaveResult));
+        OnPropertyChanged(nameof(CanProcessBatch));
         RaiseCommandStates();
     }
 
@@ -1186,6 +1830,11 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         _chooseCustomColorCommand.RaiseCanExecuteChanged();
         _chooseCheckerColorACommand.RaiseCanExecuteChanged();
         _chooseCheckerColorBCommand.RaiseCanExecuteChanged();
+        _chooseBatchInputsCommand.RaiseCanExecuteChanged();
+        _chooseBatchOutputDirectoryCommand.RaiseCanExecuteChanged();
+        _processBatchCommand.RaiseCanExecuteChanged();
+        _clearBatchCommand.RaiseCanExecuteChanged();
+        _removeSelectedBatchItemCommand.RaiseCanExecuteChanged();
     }
 
     private void NotifySettingsChanged()

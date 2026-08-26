@@ -16,6 +16,11 @@ perspective, geometry, style, size, and delivery constraints.
   validated and frozen into versioned execution plans before a run is published.
 - **Style library** — reusable groups of reference images plus human and AI-oriented style
   descriptions.
+- **Image processing workspace** — a dock document for deterministic raster inspection and editing;
+  its canvas owns previews while the shared Properties panel owns file, output, publication, and
+  batch operations for the active tool.
+- **Image viewport** — the reusable preview-navigation contract shared by image tools: wheel zooms
+  around the pointer, middle-button drag pans, and right-click or double-click resets the view.
 - **Generation task** — one durable, single-image unit with frozen constraints, ownership, lease,
   status, workspace, and final target.
 - **Batch** — an ordered group of generation tasks expanded from the generation table.
@@ -37,6 +42,8 @@ perspective, geometry, style, size, and delivery constraints.
 - The harness performs deterministic work; the image model performs only the creative raster step.
 - A task cannot escape its frozen project `Assets` root or be completed by a different claimant.
 - `90°` control angle plus `0°` rotation means an axis-aligned square, not a 45° diamond.
+- Activating an image-processing dock page must switch the shared Properties panel to the matching
+  operation module without duplicating those controls in the document header.
 - Product renames must preserve readable legacy state until an explicit migration removes support.
 
 ## Architecture sources

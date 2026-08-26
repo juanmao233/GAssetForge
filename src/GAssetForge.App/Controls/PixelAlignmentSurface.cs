@@ -7,14 +7,12 @@ using System.Windows.Media.Imaging;
 
 namespace GAssetForge.App.Controls;
 
-public sealed class PixelAlignmentSurface : FrameworkElement
+public sealed class PixelAlignmentSurface : ImageViewportSurface
 {
     private const double RulerThickness = 24d;
     private const double EdgeHitTolerance = 7d;
     private const double PerspectiveHandleRadius = 6d;
     private const double PerspectiveHitTolerance = 11d;
-    private const double MinimumZoom = 0.25d;
-    private const double MaximumZoom = 32d;
     private const int MaximumRenderedGridLines = 512;
 
     public static readonly DependencyProperty SourcePathProperty = DependencyProperty.Register(
@@ -63,9 +61,6 @@ public sealed class PixelAlignmentSurface : FrameworkElement
 
     private BitmapSource? _bitmap;
     private DragMode _dragMode;
-    private Point _lastPanPoint;
-    private double _zoom = 1d;
-    private Vector _pan;
 
     public PixelAlignmentSurface()
     {
@@ -181,6 +176,23 @@ public sealed class PixelAlignmentSurface : FrameworkElement
 
     public int LoadedSourcePixelHeight => _bitmap?.PixelHeight ?? 0;
 
+    protected override bool HasViewportContent =>
+        _bitmap is { PixelWidth: > 0, PixelHeight: > 0 };
+
+    protected override Size ViewportContentSize => _bitmap is null
+        ? Size.Empty
+        : new Size(_bitmap.PixelWidth, _bitmap.PixelHeight);
+
+    protected override Rect ViewportBounds
+    {
+        get
+        {
+            var availableWidth = Math.Max(1d, ActualWidth - RulerThickness - 16d);
+            var availableHeight = Math.Max(1d, ActualHeight - RulerThickness - 16d);
+            return new Rect(RulerThickness, RulerThickness, availableWidth, availableHeight);
+        }
+    }
+
     protected override void OnRender(DrawingContext drawingContext)
     {
         base.OnRender(drawingContext);
@@ -222,16 +234,14 @@ public sealed class PixelAlignmentSurface : FrameworkElement
     protected override void OnMouseLeftButtonDown(MouseButtonEventArgs e)
     {
         base.OnMouseLeftButtonDown(e);
-        Focus();
-        if (_bitmap is null)
+        if (e.Handled)
         {
             return;
         }
 
-        if (e.ClickCount >= 2)
+        Focus();
+        if (_bitmap is null)
         {
-            ResetView();
-            e.Handled = true;
             return;
         }
 
@@ -251,42 +261,15 @@ public sealed class PixelAlignmentSurface : FrameworkElement
         e.Handled = true;
     }
 
-    protected override void OnMouseRightButtonDown(MouseButtonEventArgs e)
-    {
-        base.OnMouseRightButtonDown(e);
-        ResetView();
-        e.Handled = true;
-    }
-
-    protected override void OnMouseDown(MouseButtonEventArgs e)
-    {
-        base.OnMouseDown(e);
-        if (e.ChangedButton != MouseButton.Middle || _bitmap is null)
-        {
-            return;
-        }
-
-        _dragMode = DragMode.Pan;
-        _lastPanPoint = e.GetPosition(this);
-        CaptureMouse();
-        Cursor = Cursors.Hand;
-        e.Handled = true;
-    }
-
     protected override void OnMouseMove(MouseEventArgs e)
     {
         base.OnMouseMove(e);
-        var point = e.GetPosition(this);
-        if (_dragMode == DragMode.Pan && IsMouseCaptured)
+        if (e.Handled)
         {
-            var delta = point - _lastPanPoint;
-            _pan += delta;
-            _lastPanPoint = point;
-            InvalidateVisual();
-            e.Handled = true;
             return;
         }
 
+        var point = e.GetPosition(this);
         if (_dragMode != DragMode.None && IsMouseCaptured)
         {
             if (IsPerspectiveDragMode(_dragMode))
@@ -314,6 +297,11 @@ public sealed class PixelAlignmentSurface : FrameworkElement
     protected override void OnMouseUp(MouseButtonEventArgs e)
     {
         base.OnMouseUp(e);
+        if (e.Handled)
+        {
+            return;
+        }
+
         if (_dragMode == DragMode.None)
         {
             return;
@@ -326,28 +314,6 @@ public sealed class PixelAlignmentSurface : FrameworkElement
         }
 
         Cursor = Cursors.Arrow;
-        e.Handled = true;
-    }
-
-    protected override void OnMouseWheel(MouseWheelEventArgs e)
-    {
-        base.OnMouseWheel(e);
-        if (_bitmap is null)
-        {
-            return;
-        }
-
-        var oldRect = GetImageRect();
-        var pointer = e.GetPosition(this);
-        var sourceX = (pointer.X - oldRect.X) / Math.Max(oldRect.Width, 0.0001d);
-        var sourceY = (pointer.Y - oldRect.Y) / Math.Max(oldRect.Height, 0.0001d);
-        var factor = e.Delta > 0 ? 1.2d : 1d / 1.2d;
-        _zoom = Math.Clamp(_zoom * factor, MinimumZoom, MaximumZoom);
-        var newRect = GetImageRect();
-        _pan += new Vector(
-            pointer.X - (newRect.X + sourceX * newRect.Width),
-            pointer.Y - (newRect.Y + sourceY * newRect.Height));
-        InvalidateVisual();
         e.Handled = true;
     }
 
@@ -443,25 +409,7 @@ public sealed class PixelAlignmentSurface : FrameworkElement
         return bitmap;
     }
 
-    private Rect GetImageRect()
-    {
-        if (_bitmap is null)
-        {
-            return Rect.Empty;
-        }
-
-        var availableWidth = Math.Max(1d, ActualWidth - RulerThickness - 16d);
-        var availableHeight = Math.Max(1d, ActualHeight - RulerThickness - 16d);
-        var fitScale = Math.Min(
-            availableWidth / _bitmap.PixelWidth,
-            availableHeight / _bitmap.PixelHeight);
-        var scale = Math.Max(0.0001d, fitScale * _zoom);
-        var width = _bitmap.PixelWidth * scale;
-        var height = _bitmap.PixelHeight * scale;
-        var x = RulerThickness + (availableWidth - width) / 2d + _pan.X;
-        var y = RulerThickness + (availableHeight - height) / 2d + _pan.Y;
-        return new Rect(x, y, width, height);
-    }
+    private Rect GetImageRect() => GetViewportContentRect();
 
     private Rect GetCropRect(Rect imageRect)
     {
@@ -779,16 +727,8 @@ public sealed class PixelAlignmentSurface : FrameworkElement
         DragMode.Top or DragMode.Bottom => Cursors.SizeNS,
         DragMode.PerspectiveTopLeft or DragMode.PerspectiveTopRight or
             DragMode.PerspectiveBottomRight or DragMode.PerspectiveBottomLeft => Cursors.SizeAll,
-        DragMode.Pan => Cursors.Hand,
         _ => Cursors.Arrow
     };
-
-    private void ResetView()
-    {
-        _zoom = 1d;
-        _pan = default;
-        InvalidateVisual();
-    }
 
     private static Brush ResolveBrush(string resourceKey, Color fallback)
     {
@@ -854,8 +794,7 @@ public sealed class PixelAlignmentSurface : FrameworkElement
         PerspectiveTopLeft,
         PerspectiveTopRight,
         PerspectiveBottomRight,
-        PerspectiveBottomLeft,
-        Pan
+        PerspectiveBottomLeft
     }
 
     private readonly record struct PerspectiveScreenPoints(

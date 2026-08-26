@@ -37,6 +37,7 @@ internal static class PixelAlignmentSmokeTests
 
         try
         {
+            SharedImageViewportNavigationKeepsAnchorsAndOverlaysAligned(testRoot);
             PlanUsesTheSmallestUniformGridCompatibleScale();
             NearestNeighborUpscaleKeepsExactPixelBlocks(testRoot);
             AspectRatioCorrectionRebuildsGeometryAndExportsTheCorrectedWorkingImage(testRoot);
@@ -66,6 +67,111 @@ internal static class PixelAlignmentSmokeTests
                 Directory.Delete(testRoot, recursive: true);
             }
         }
+    }
+
+    private static void SharedImageViewportNavigationKeepsAnchorsAndOverlaysAligned(string testRoot)
+    {
+        var viewportBounds = new Rect(0d, 0d, 200d, 200d);
+        var contentSize = new System.Windows.Size(100d, 50d);
+        var state = new ImageViewportState();
+        var fitted = state.CalculateContentRect(viewportBounds, contentSize);
+        Near(0d, fitted.X, 0.0001d, "共享视口初始适配 X");
+        Near(50d, fitted.Y, 0.0001d, "共享视口初始适配 Y");
+        Near(200d, fitted.Width, 0.0001d, "共享视口初始适配宽度");
+        Near(100d, fitted.Height, 0.0001d, "共享视口初始适配高度");
+
+        var anchor = new System.Windows.Point(50d, 75d);
+        var normalizedX = (anchor.X - fitted.X) / fitted.Width;
+        var normalizedY = (anchor.Y - fitted.Y) / fitted.Height;
+        True(state.ZoomAt(anchor, 2d, viewportBounds, contentSize), "共享视口应接受锚点缩放");
+        var zoomed = state.CalculateContentRect(viewportBounds, contentSize);
+        Near(anchor.X, zoomed.X + normalizedX * zoomed.Width, 0.0001d,
+            "缩放后指针应锁定同一源图 X");
+        Near(anchor.Y, zoomed.Y + normalizedY * zoomed.Height, 0.0001d,
+            "缩放后指针应锁定同一源图 Y");
+        True(state.PanBy(new Vector(12d, -8d)), "共享视口应接受平移增量");
+        var panned = state.CalculateContentRect(viewportBounds, contentSize);
+        Near(zoomed.X + 12d, panned.X, 0.0001d, "共享平移 X");
+        Near(zoomed.Y - 8d, panned.Y, 0.0001d, "共享平移 Y");
+        True(state.Reset(), "共享视口应可复位");
+        Equal(1d, state.Zoom, "复位缩放");
+        Equal(default(Vector), state.Pan, "复位平移");
+
+        var pixels = new byte[100 * 50 * 4];
+        var bitmap = System.Windows.Media.Imaging.BitmapSource.Create(
+            100,
+            50,
+            96d,
+            96d,
+            System.Windows.Media.PixelFormats.Bgra32,
+            null,
+            pixels,
+            100 * 4);
+        bitmap.Freeze();
+
+        var preview = new ImagePreviewControl
+        {
+            Source = bitmap,
+            ViewportPadding = new Thickness(10d)
+        };
+        preview.Measure(new System.Windows.Size(220d, 220d));
+        preview.Arrange(new Rect(0d, 0d, 220d, 220d));
+        var previewRect = preview.ViewportContentRect;
+        Near(10d, previewRect.X, 0.0001d, "通用预览应尊重左侧 padding");
+        Near(60d, previewRect.Y, 0.0001d, "通用预览应在可用区域垂直居中");
+        True(preview.ZoomAt(new System.Windows.Point(60d, 85d), 2d), "通用预览应暴露共享锚点缩放 API");
+        True(preview.PanBy(new Vector(5d, 7d)), "通用预览应暴露共享平移 API");
+        True(preview.ResetView(), "通用预览应暴露复位 API");
+
+        var checkerPreview = new CheckerGridImagePreviewControl
+        {
+            Source = bitmap,
+            ShowGrid = true,
+            SourcePixelWidth = 100,
+            SourcePixelHeight = 50,
+            CellSize = 10,
+            OffsetX = 3,
+            OffsetY = 4
+        };
+        checkerPreview.Measure(new System.Windows.Size(200d, 200d));
+        checkerPreview.Arrange(new Rect(0d, 0d, 200d, 200d));
+        var checkerInitialRect = checkerPreview.ViewportContentRect;
+        True(checkerPreview.ZoomAt(new System.Windows.Point(50d, 75d), 2d),
+            "网格预览应使用与图片相同的共享缩放状态");
+        True(checkerPreview.PanBy(new Vector(9d, -6d)),
+            "网格预览应使用与图片相同的共享平移状态");
+        var checkerMovedRect = checkerPreview.ViewportContentRect;
+        True(checkerMovedRect != checkerInitialRect,
+            "网格绘制 seam 的 ViewportContentRect 应随缩放和平移变化");
+        var renderTarget = new System.Windows.Media.Imaging.RenderTargetBitmap(
+            200,
+            200,
+            96d,
+            96d,
+            System.Windows.Media.PixelFormats.Pbgra32);
+        renderTarget.Render(checkerPreview);
+
+        var surfacePath = Path.Combine(testRoot, "shared-viewport-surface.png");
+        using (var source = new Image<Rgba32>(100, 50, new Rgba32(40, 120, 220, 255)))
+        {
+            source.Save(surfacePath, new PngEncoder { ColorType = PngColorType.RgbWithAlpha });
+        }
+
+        var surface = new PixelAlignmentSurface { SourcePath = surfacePath };
+        surface.Measure(new System.Windows.Size(240d, 240d));
+        surface.Arrange(new Rect(0d, 0d, 240d, 240d));
+        True(surface is ImageViewportSurface,
+            "PixelAlignmentSurface 必须复用通用图像视口输入与状态基类");
+        var surfaceInitialRect = surface.ViewportContentRect;
+        True(surface.ZoomAt(surfaceInitialRect.TopLeft + new Vector(20d, 20d), 2d),
+            "PixelAlignmentSurface 应复用共享锚点缩放数学");
+        True(surface.PanBy(new Vector(8d, 4d)),
+            "PixelAlignmentSurface 应复用共享平移数学");
+        True(surface.ResetView(), "PixelAlignmentSurface 应复用共享复位逻辑");
+        Near(surfaceInitialRect.X, surface.ViewportContentRect.X, 0.0001d,
+            "PixelAlignmentSurface 复位后 X 应恢复");
+        Near(surfaceInitialRect.Y, surface.ViewportContentRect.Y, 0.0001d,
+            "PixelAlignmentSurface 复位后 Y 应恢复");
     }
 
     private static void PlanUsesTheSmallestUniformGridCompatibleScale()
@@ -1272,31 +1378,35 @@ internal static class PixelAlignmentSmokeTests
             new FixedOutputPicker(Path.Combine(testRoot, "unused-output.png")));
         viewModel.ChooseInputCommand.Execute(null);
         var view = new PixelAlignmentView { DataContext = viewModel };
+        var propertiesView = new PixelAlignmentPropertiesView { DataContext = viewModel };
         view.Measure(new System.Windows.Size(1280, 760));
         view.Arrange(new Rect(0, 0, 1280, 760));
+        propertiesView.Measure(new System.Windows.Size(320, 760));
+        propertiesView.Arrange(new Rect(0, 0, 320, 760));
         view.UpdateLayout();
+        propertiesView.UpdateLayout();
         PumpDispatcher();
 
-        var chooseInput = RequireElement<Button>(view, "ChoosePixelAlignmentInputButton");
-        var chooseOutput = RequireElement<Button>(view, "ChoosePixelAlignmentOutputButton");
-        var refreshPreview = RequireElement<Button>(view, "RefreshPixelAlignmentPreviewButton");
-        var saveResult = RequireElement<Button>(view, "SavePixelAlignmentResultButton");
+        var chooseInput = RequireElement<Button>(propertiesView, "PixelAlignmentPropertiesChooseInputButton");
+        var chooseOutput = RequireElement<Button>(propertiesView, "PixelAlignmentPropertiesChooseOutputButton");
+        var refreshPreview = RequireElement<Button>(propertiesView, "PixelAlignmentPropertiesRefreshPreviewButton");
+        var saveResult = RequireElement<Button>(propertiesView, "PixelAlignmentPropertiesSaveResultButton");
         var previewStatus = RequireElement<TextBlock>(view, "PixelAlignmentPreviewStatusText");
-        var exportWorking = RequireElement<Button>(view, "ExportPixelAlignmentWorkingButton");
+        var exportWorking = RequireElement<Button>(propertiesView, "PixelAlignmentPropertiesExportWorkingImageButton");
         var surface = RequireElement<PixelAlignmentSurface>(view, "PixelAlignmentSurface");
-        var outputPreview = RequireElement<System.Windows.Controls.Image>(view, "PixelAlignmentOutputPreview");
+        var outputPreview = RequireElement<ImagePreviewControl>(view, "PixelAlignmentOutputPreview");
         var status = RequireElement<TextBlock>(view, "PixelAlignmentStatusText");
         var columns = RequireElement<TextBox>(view, "PixelAlignmentColumnsTextBox");
         var rows = RequireElement<TextBox>(view, "PixelAlignmentRowsTextBox");
         var sampling = RequireElement<ComboBox>(view, "PixelAlignmentSamplingModeComboBox");
         var colorIndex = RequireElement<CheckBox>(view, "PixelAlignmentColorIndexCheckBox");
         var maximumColors = RequireElement<TextBox>(view, "PixelAlignmentMaximumColorsTextBox");
-        var batchMode = RequireElement<CheckBox>(view, "PixelAlignmentBatchModeCheckBox");
-        var chooseBatchInputs = RequireElement<Button>(view, "ChoosePixelAlignmentBatchInputsButton");
-        var chooseBatchOutput = RequireElement<Button>(view, "ChoosePixelAlignmentBatchOutputButton");
-        var processBatch = RequireElement<Button>(view, "ProcessPixelAlignmentBatchButton");
-        var batchItems = RequireElement<ListBox>(view, "PixelAlignmentBatchItemsListBox");
-        var batchProgress = RequireElement<ProgressBar>(view, "PixelAlignmentBatchProgressBar");
+        var batchMode = RequireElement<CheckBox>(propertiesView, "PixelAlignmentPropertiesBatchModeCheckBox");
+        var chooseBatchInputs = RequireElement<Button>(propertiesView, "PixelAlignmentPropertiesChooseBatchInputsButton");
+        var chooseBatchOutput = RequireElement<Button>(propertiesView, "PixelAlignmentPropertiesChooseBatchOutputButton");
+        var processBatch = RequireElement<Button>(propertiesView, "PixelAlignmentPropertiesProcessBatchButton");
+        var batchItems = RequireElement<ListBox>(propertiesView, "PixelAlignmentPropertiesBatchQueue");
+        var batchProgress = RequireElement<ProgressBar>(propertiesView, "PixelAlignmentPropertiesBatchProgressBar");
         var syncAspect = RequireElement<Button>(view, "PixelAlignmentSyncGridAspectButton");
         var rotation = RequireElement<TextBox>(view, "PixelAlignmentRotationDegreesTextBox");
         var targetAngle = RequireElement<TextBox>(view, "PixelAlignmentTargetEdgeAngleTextBox");
@@ -1382,7 +1492,7 @@ internal static class PixelAlignmentSmokeTests
         Equal("PerspectiveBottomLeftY",
             RequireBindingPath(surface, PixelAlignmentSurface.PerspectiveBottomLeftYProperty, "透视 BL Y"),
             "透视 BL Y 双向绑定");
-        Equal("OutputPreviewPath", RequireBindingPath(outputPreview, System.Windows.Controls.Image.SourceProperty, "输出预览"),
+        Equal("OutputPreviewPath", RequireBindingPath(outputPreview, ImagePreviewControl.SourceProperty, "输出预览"),
             "输出预览绑定");
         Equal("StatusText", RequireBindingPath(status, TextBlock.TextProperty, "状态文本"),
             "状态文本绑定");
@@ -1441,6 +1551,7 @@ internal static class PixelAlignmentSmokeTests
         Equal(1, webpSurface.LoadedSourcePixelHeight, "WebP 预览高度");
 
         view.DataContext = null;
+        propertiesView.DataContext = null;
     }
 
     private static void AssertBlock(
@@ -1513,6 +1624,15 @@ internal static class PixelAlignmentSmokeTests
         if (!EqualityComparer<T>.Default.Equals(expected, actual))
         {
             throw new InvalidOperationException($"{message}：预期 {expected}，实际 {actual}。");
+        }
+    }
+
+    private static void Near(double expected, double actual, double tolerance, string message)
+    {
+        if (!double.IsFinite(actual) || Math.Abs(expected - actual) > tolerance)
+        {
+            throw new InvalidOperationException(
+                $"{message}：预期 {expected}±{tolerance}，实际 {actual}。");
         }
     }
 

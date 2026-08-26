@@ -1,0 +1,256 @@
+<UserControl x:Class="GAssetForge.App.Views.PixelAlignmentPropertiesView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             MinWidth="260">
+    <UserControl.Resources>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
+        <Style x:Key="PixelAlignmentPropertyLabelStyle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource App.TextSecondaryBrush}" />
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+        <Style x:Key="PixelAlignmentPropertyButtonStyle"
+               TargetType="Button"
+               BasedOn="{StaticResource App.ButtonStyle}">
+            <Setter Property="MinHeight" Value="28" />
+            <Setter Property="Padding" Value="8,3" />
+            <Setter Property="FontSize" Value="10" />
+        </Style>
+        <Style x:Key="PixelAlignmentSingleModePanelStyle" TargetType="StackPanel">
+            <Setter Property="Visibility" Value="Visible" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsBatchMode}" Value="True">
+                    <Setter Property="Visibility" Value="Collapsed" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+    </UserControl.Resources>
+
+    <Grid Background="{DynamicResource App.SurfaceBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="42" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Border Padding="12,0"
+                Background="{DynamicResource App.SurfaceRaisedBrush}"
+                BorderBrush="{DynamicResource App.BorderBrush}"
+                BorderThickness="0,0,0,1">
+            <DockPanel LastChildFill="True">
+                <TextBlock VerticalAlignment="Center"
+                           Style="{DynamicResource App.PanelHeaderStyle}"
+                           Text="像素对齐属性" />
+                <TextBlock Margin="10,0,0,0"
+                           VerticalAlignment="Center"
+                           Foreground="{DynamicResource App.TextMutedBrush}"
+                           FontSize="11"
+                           Text="文件、缓存与保存" />
+            </DockPanel>
+        </Border>
+
+        <ScrollViewer Grid.Row="1"
+                      HorizontalScrollBarVisibility="Disabled"
+                      VerticalScrollBarVisibility="Auto">
+            <StackPanel Margin="12">
+                <Border Style="{DynamicResource App.CardStyle}">
+                    <StackPanel>
+                        <TextBlock Style="{DynamicResource App.SectionTitleStyle}"
+                                   Text="处理入口" />
+                        <CheckBox x:Name="PixelAlignmentPropertiesBatchModeCheckBox"
+                                  Margin="0,11,0,0"
+                                  IsChecked="{Binding IsBatchMode, Mode=TwoWay}"
+                                  Content="批量处理模式"
+                                  Style="{DynamicResource App.CheckBoxStyle}" />
+
+                        <StackPanel Margin="0,10,0,0"
+                                    Style="{StaticResource PixelAlignmentSingleModePanelStyle}">
+                            <WrapPanel>
+                                <Button x:Name="PixelAlignmentPropertiesChooseInputButton"
+                                        Margin="0,0,6,6"
+                                        Command="{Binding ChooseInputCommand}"
+                                        Content="选择图片…"
+                                        Style="{StaticResource PixelAlignmentPropertyButtonStyle}" />
+                                <Button x:Name="PixelAlignmentPropertiesChooseOutputButton"
+                                        Margin="0,0,0,6"
+                                        Command="{Binding ChooseOutputCommand}"
+                                        Content="设置输出…"
+                                        Style="{StaticResource PixelAlignmentPropertyButtonStyle}" />
+                            </WrapPanel>
+                            <WrapPanel>
+                                <Button x:Name="PixelAlignmentPropertiesRefreshPreviewButton"
+                                        Margin="0,0,6,6"
+                                        Command="{Binding RefreshPreviewCommand}"
+                                        Content="刷新预览"
+                                        Style="{StaticResource PixelAlignmentPropertyButtonStyle}" />
+                                <Button x:Name="PixelAlignmentPropertiesSaveResultButton"
+                                        Margin="0,0,0,6"
+                                        Command="{Binding SaveResultCommand}"
+                                        Content="保存结果"
+                                        Style="{StaticResource PixelAlignmentPropertyButtonStyle}" />
+                            </WrapPanel>
+                            <Button x:Name="PixelAlignmentPropertiesExportWorkingImageButton"
+                                    HorizontalAlignment="Stretch"
+                                    Command="{Binding ExportWorkingImageCommand}"
+                                    Content="导出最近邻工作图"
+                                    Style="{StaticResource PixelAlignmentPropertyButtonStyle}" />
+                        </StackPanel>
+
+                        <StackPanel Margin="0,10,0,0"
+                                    Visibility="{Binding IsBatchMode, Converter={StaticResource BooleanToVisibilityConverter}}">
+                            <WrapPanel>
+                                <Button x:Name="PixelAlignmentPropertiesChooseBatchInputsButton"
+                                        Margin="0,0,6,6"
+                                        Command="{Binding ChooseBatchInputsCommand}"
+                                        Content="添加图片…"
+                                        Style="{StaticResource PixelAlignmentPropertyButtonStyle}" />
+                                <Button x:Name="PixelAlignmentPropertiesChooseBatchOutputButton"
+                                        Margin="0,0,0,6"
+                                        Command="{Binding ChooseBatchOutputDirectoryCommand}"
+                                        Content="输出目录…"
+                                        Style="{StaticResource PixelAlignmentPropertyButtonStyle}" />
+                            </WrapPanel>
+                            <Button x:Name="PixelAlignmentPropertiesProcessBatchButton"
+                                    HorizontalAlignment="Stretch"
+                                    Command="{Binding ProcessBatchCommand}"
+                                    Content="开始批量对齐"
+                                    Style="{StaticResource PixelAlignmentPropertyButtonStyle}" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Margin="0,10,0,0"
+                        Style="{DynamicResource App.CardStyle}">
+                    <StackPanel>
+                        <TextBlock Style="{DynamicResource App.SectionTitleStyle}"
+                                   Text="图片与最终输出" />
+                        <TextBlock Margin="0,10,0,2"
+                                   Style="{StaticResource PixelAlignmentPropertyLabelStyle}"
+                                   Text="输入图片" />
+                        <TextBlock Text="{Binding InputFileName}"
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTip="{Binding InputPath}" />
+                        <TextBlock Margin="0,2,0,0"
+                                   Foreground="{DynamicResource App.TextMutedBrush}"
+                                   FontSize="10"
+                                   Text="{Binding SourceSizeText}" />
+                        <TextBlock Margin="0,9,0,2"
+                                   Style="{StaticResource PixelAlignmentPropertyLabelStyle}"
+                                   Text="最终输出 PNG" />
+                        <TextBlock Text="{Binding OutputFileName}"
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTip="{Binding OutputPath}" />
+                        <TextBlock Margin="0,4,0,0"
+                                   FontFamily="Consolas"
+                                   Foreground="{DynamicResource App.TextMutedBrush}"
+                                   FontSize="9"
+                                   Text="{Binding OutputPath}"
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTip="{Binding OutputPath}" />
+                    </StackPanel>
+                </Border>
+
+                <Border Margin="0,10,0,0"
+                        Style="{DynamicResource App.CardStyle}">
+                    <StackPanel>
+                        <TextBlock Style="{DynamicResource App.SectionTitleStyle}"
+                                   Text="预览缓存与保存位置" />
+                        <TextBlock Margin="0,10,0,2"
+                                   Style="{StaticResource PixelAlignmentPropertyLabelStyle}"
+                                   Text="当前预览缓存" />
+                        <TextBlock FontFamily="Consolas"
+                                   FontSize="10"
+                                   Text="{Binding OutputPreviewPath, TargetNullValue=尚未生成预览}"
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTip="{Binding OutputPreviewPath}" />
+                        <TextBlock Margin="0,7,0,0"
+                                   Foreground="{DynamicResource App.TextMutedBrush}"
+                                   FontSize="10"
+                                   Text="{Binding PreviewStatusText}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Margin="0,5,0,0"
+                                   Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                   FontSize="10"
+                                   Text="{Binding ResultSummary}"
+                                   TextWrapping="Wrap" />
+                        <Separator Margin="0,10,0,8" />
+                        <TextBlock Style="{StaticResource PixelAlignmentPropertyLabelStyle}"
+                                   Text="最近保存位置" />
+                        <TextBlock Margin="0,4,0,0"
+                                   FontFamily="Consolas"
+                                   FontSize="10"
+                                   Text="{Binding LastSavedOutputPath, TargetNullValue=尚未保存}"
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTip="{Binding LastSavedOutputPath}" />
+                        <Button Margin="0,9,0,0"
+                                Command="{Binding OpenOutputDirectoryCommand}"
+                                Content="打开输出目录"
+                                Style="{StaticResource PixelAlignmentPropertyButtonStyle}" />
+                    </StackPanel>
+                </Border>
+
+                <Border Margin="0,10,0,0"
+                        Style="{DynamicResource App.CardStyle}"
+                        Visibility="{Binding IsBatchMode, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <StackPanel>
+                        <TextBlock Style="{DynamicResource App.SectionTitleStyle}"
+                                   Text="批处理队列" />
+                        <TextBlock Margin="0,9,0,2"
+                                   Style="{StaticResource PixelAlignmentPropertyLabelStyle}"
+                                   Text="输出目录" />
+                        <TextBlock FontSize="10"
+                                   Text="{Binding BatchOutputDirectoryDisplay}"
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTip="{Binding BatchOutputDirectory}" />
+                        <ListBox x:Name="PixelAlignmentPropertiesBatchQueue"
+                                 MinHeight="96"
+                                 MaxHeight="220"
+                                 Margin="0,9,0,0"
+                                 ItemsSource="{Binding BatchItems}"
+                                 SelectedItem="{Binding SelectedBatchItem, Mode=TwoWay}"
+                                 ScrollViewer.VerticalScrollBarVisibility="Auto">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <StackPanel Margin="2,3">
+                                        <TextBlock Text="{Binding FileName}"
+                                                   TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Foreground="{DynamicResource App.TextMutedBrush}"
+                                                   FontSize="9"
+                                                   Text="{Binding Message}"
+                                                   TextTrimming="CharacterEllipsis" />
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                        <WrapPanel Margin="0,8,0,0">
+                            <Button Margin="0,0,6,6"
+                                    Command="{Binding RemoveSelectedBatchItemCommand}"
+                                    Content="移除所选"
+                                    Style="{StaticResource PixelAlignmentPropertyButtonStyle}" />
+                            <Button Margin="0,0,0,6"
+                                    Command="{Binding ClearBatchItemsCommand}"
+                                    Content="清空队列"
+                                    Style="{StaticResource PixelAlignmentPropertyButtonStyle}" />
+                        </WrapPanel>
+                        <ProgressBar x:Name="PixelAlignmentPropertiesBatchProgressBar"
+                                     Height="6"
+                                     Margin="0,3,0,0"
+                                     Minimum="0"
+                                     Maximum="100"
+                                     Value="{Binding BatchProgressPercent, Mode=OneWay}" />
+                        <TextBlock Margin="0,6,0,0"
+                                   Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                   FontSize="10"
+                                   Text="{Binding BatchProgressText}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+
+                <TextBlock Margin="2,10,2,12"
+                           Foreground="{DynamicResource App.TextSecondaryBrush}"
+                           FontSize="10"
+                           Text="{Binding StatusText}"
+                           TextWrapping="Wrap" />
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</UserControl>

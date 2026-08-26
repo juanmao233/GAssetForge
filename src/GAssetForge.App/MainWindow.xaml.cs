@@ -153,9 +153,24 @@ public partial class MainWindow : Window
         {
             DataContext = _viewModel.IconDesign
         };
+        var backgroundRemovalPropertiesView = new BackgroundRemovalPropertiesView
+        {
+            DataContext = _viewModel.BackgroundRemoval
+        };
+        var imageOutlinePropertiesView = new ImageOutlinePropertiesView
+        {
+            DataContext = _viewModel.ImageOutline
+        };
+        var pixelAlignmentPropertiesView = new PixelAlignmentPropertiesView
+        {
+            DataContext = _viewModel.PixelAlignment
+        };
         _propertiesContextViews[CanvasContentId] = uiPropertiesView;
         _propertiesContextViews[TilemapWorkspaceContentId] = tilemapPropertiesView;
         _propertiesContextViews[IconDesignContentId] = iconDesignPropertiesView;
+        _propertiesContextViews[BackgroundRemovalContentId] = backgroundRemovalPropertiesView;
+        _propertiesContextViews[ImageOutlineContentId] = imageOutlinePropertiesView;
+        _propertiesContextViews[PixelAlignmentContentId] = pixelAlignmentPropertiesView;
 
         _documentHosts[CanvasContentId].Content = new CanvasDocumentView
         {

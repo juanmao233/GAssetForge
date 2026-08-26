@@ -114,68 +114,13 @@ public sealed class CheckerGridOverlay : FrameworkElement
         var renderHeight = sourcePixelHeight * scale;
         var left = (ActualWidth - renderWidth) / 2d;
         var top = (ActualHeight - renderHeight) / 2d;
-        var imageBounds = new Rect(left, top, renderWidth, renderHeight);
-        drawingContext.PushClip(new RectangleGeometry(imageBounds));
-
-        var shadowPen = new Pen(new SolidColorBrush(Color.FromArgb(155, 0, 0, 0)), 2d)
-        {
-            DashStyle = DashStyles.Dash
-        };
-        var guidePen = new Pen(new SolidColorBrush(Color.FromArgb(230, 255, 255, 255)), 1d)
-        {
-            DashStyle = DashStyles.Dash
-        };
-        shadowPen.Freeze();
-        guidePen.Freeze();
-
-        var normalizedOffsetX = PositiveModulo(OffsetX, cellSize);
-        var normalizedOffsetY = PositiveModulo(OffsetY, cellSize);
-        var firstX = normalizedOffsetX;
-        while (firstX > 0)
-        {
-            firstX -= cellSize;
-        }
-
-        for (var pixelX = firstX; pixelX <= sourcePixelWidth; pixelX += cellSize)
-        {
-            var x = left + pixelX * scale;
-            DrawGuideLine(drawingContext, shadowPen, guidePen, new Point(x, top), new Point(x, top + renderHeight));
-        }
-
-        var firstY = normalizedOffsetY;
-        while (firstY > 0)
-        {
-            firstY -= cellSize;
-        }
-
-        for (var pixelY = firstY; pixelY <= sourcePixelHeight; pixelY += cellSize)
-        {
-            var y = top + pixelY * scale;
-            DrawGuideLine(drawingContext, shadowPen, guidePen, new Point(left, y), new Point(left + renderWidth, y));
-        }
-
-        var originX = left + normalizedOffsetX * scale;
-        var originY = top + normalizedOffsetY * scale;
-        var originPen = new Pen(new SolidColorBrush(Color.FromArgb(245, 0, 210, 255)), 2d);
-        originPen.Freeze();
-        drawingContext.DrawEllipse(null, originPen, new Point(originX, originY), 4d, 4d);
-        drawingContext.Pop();
-    }
-
-    private static void DrawGuideLine(
-        DrawingContext context,
-        Pen shadowPen,
-        Pen guidePen,
-        Point start,
-        Point end)
-    {
-        context.DrawLine(shadowPen, start, end);
-        context.DrawLine(guidePen, start, end);
-    }
-
-    private static int PositiveModulo(int value, int divisor)
-    {
-        var remainder = value % divisor;
-        return remainder < 0 ? remainder + divisor : remainder;
+        CheckerGridRenderer.Draw(
+            drawingContext,
+            new Rect(left, top, renderWidth, renderHeight),
+            sourcePixelWidth,
+            sourcePixelHeight,
+            cellSize,
+            OffsetX,
+            OffsetY);
     }
 }

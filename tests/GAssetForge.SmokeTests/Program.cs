@@ -915,6 +915,11 @@ internal static class Program
                     $"{contentId} 应成为当前活动内容");
             }
 
+            var properties = FindDockContent(manager, MainWindow.PropertiesContentId) as LayoutAnchorable
+                ?? throw new SmokeTestException("停靠交互测试未找到属性面板。");
+            var propertiesHost = properties.Content as ContentControl
+                ?? throw new SmokeTestException("属性面板必须由 ContentControl 承载。");
+
             var styleLibrary = FindDockContent(manager, MainWindow.StyleLibraryContentId) as LayoutAnchorable
                 ?? throw new SmokeTestException("停靠交互测试未找到美术风格素材库。");
             True(styleLibrary.IsVisible && !styleLibrary.IsHidden,
@@ -981,42 +986,55 @@ internal static class Program
                 ?? throw new SmokeTestException("图片描边工具 host 未承载 ImageOutlineView。");
             True(ReferenceEquals(shell.ImageOutline, imageOutlineView.DataContext),
                 "图片描边工具应绑定 Shell 持有的单实例 ViewModel");
+            var imageOutlinePropertiesView = propertiesHost.Content as ImageOutlinePropertiesView
+                ?? throw new SmokeTestException("激活图片描边工具后属性栏未切换为 ImageOutlinePropertiesView。");
+            True(ReferenceEquals(shell.ImageOutline, imageOutlinePropertiesView.DataContext),
+                "图片描边属性页与预览主视图必须共享同一个 ViewModel");
             var outlineModeComboBox = RequireNamedElement<ComboBox>(
-                imageOutlineView,
-                "ImageOutlineModeComboBox",
-                "图片描边工具缺少描边种类下拉框。");
+                imageOutlinePropertiesView,
+                "ImageOutlinePropertiesModeComboBox",
+                "图片描边属性页缺少描边种类下拉框。");
             var outlineWidthSlider = RequireNamedElement<Slider>(
-                imageOutlineView,
-                "ImageOutlineWidthSlider",
-                "图片描边工具缺少描边宽度控件。");
+                imageOutlinePropertiesView,
+                "ImageOutlinePropertiesWidthSlider",
+                "图片描边属性页缺少描边宽度控件。");
             var outlineColorTextBox = RequireNamedElement<TextBox>(
-                imageOutlineView,
-                "ImageOutlineColorTextBox",
-                "图片描边工具缺少描边颜色输入框。");
+                imageOutlinePropertiesView,
+                "ImageOutlinePropertiesColorTextBox",
+                "图片描边属性页缺少描边颜色输入框。");
             var outlineBatchDataGrid = RequireNamedElement<DataGrid>(
                 imageOutlineView,
                 "ImageOutlineBatchDataGrid",
-                "图片描边工具缺少批处理队列。");
+                "图片描边预览页缺少批处理结果队列。");
+            var outlineBatchQueue = RequireNamedElement<ListBox>(
+                imageOutlinePropertiesView,
+                "ImageOutlinePropertiesBatchQueue",
+                "图片描边属性页缺少批处理操作队列。");
             var outlineProcessButton = RequireNamedElement<Button>(
-                imageOutlineView,
-                "ProcessImageOutlineButton",
-                "图片描边工具缺少单图执行按钮。");
+                imageOutlinePropertiesView,
+                "ImageOutlinePropertiesRefreshPreviewButton",
+                "图片描边属性页缺少单图预览刷新按钮。");
             var outlineColorPickerButton = RequireNamedElement<Button>(
-                imageOutlineView,
-                "ImageOutlineColorPickerButton",
-                "图片描边工具缺少共享取色器入口。");
-            var outlineResultRefreshButton = RequireNamedElement<Button>(
-                imageOutlineView,
-                "RefreshImageOutlineResultPreviewButton",
-                "图片描边结果区缺少刷新预览按钮。");
+                imageOutlinePropertiesView,
+                "ImageOutlinePropertiesColorPickerButton",
+                "图片描边属性页缺少共享取色器入口。");
             var outlineResultSaveButton = RequireNamedElement<Button>(
-                imageOutlineView,
-                "SaveImageOutlineResultButton",
-                "图片描边结果区缺少保存结果按钮。");
+                imageOutlinePropertiesView,
+                "ImageOutlinePropertiesSaveResultButton",
+                "图片描边属性页缺少保存结果按钮。");
             var outlineBatchProcessButton = RequireNamedElement<Button>(
+                imageOutlinePropertiesView,
+                "ImageOutlinePropertiesProcessBatchButton",
+                "图片描边属性页缺少批量执行按钮。");
+            var outlineInputPreview = RequireNamedElement<ImagePreviewControl>(
                 imageOutlineView,
-                "ProcessImageOutlineBatchButton",
-                "图片描边工具缺少批量执行按钮。");
+                "ImageOutlineInputPreview",
+                "图片描边主视图缺少通用源图预览。");
+            var outlineOutputPreview = RequireNamedElement<ImagePreviewControl>(
+                imageOutlineView,
+                "ImageOutlineOutputPreview",
+                "图片描边主视图缺少通用结果预览。");
+            outlineModeComboBox.GetBindingExpression(ItemsControl.ItemsSourceProperty)?.UpdateTarget();
             True(ReferenceEquals(shell.ImageOutline.ModeOptions, outlineModeComboBox.ItemsSource),
                 "描边种类下拉框应使用 ViewModel 稳定选项");
             Equal(1d, outlineWidthSlider.Minimum, "描边宽度最小值");
@@ -1025,17 +1043,23 @@ internal static class Program
                 BindingOperations.GetBindingExpression(outlineColorTextBox, TextBox.TextProperty)?.ParentBinding.Path.Path,
                 "描边颜色输入绑定");
             True(ReferenceEquals(shell.ImageOutline.BatchItems, outlineBatchDataGrid.ItemsSource),
-                "批处理表格应绑定图片描边队列");
+                "主视图批处理表格应绑定图片描边队列");
+            True(ReferenceEquals(shell.ImageOutline.BatchItems, outlineBatchQueue.ItemsSource),
+                "属性页批处理队列应绑定图片描边队列");
             True(ReferenceEquals(shell.ImageOutline.RefreshPreviewCommand, outlineProcessButton.Command),
-                "单图入口按钮应绑定图片描边预览刷新命令");
+                "属性页单图入口按钮应绑定图片描边预览刷新命令");
             True(ReferenceEquals(shell.ImageOutline.ChooseOutlineColorCommand, outlineColorPickerButton.Command),
                 "描边色块应绑定共享取色器命令");
-            True(ReferenceEquals(shell.ImageOutline.RefreshPreviewCommand, outlineResultRefreshButton.Command),
-                "描边结果区应绑定刷新缓存预览命令");
             True(ReferenceEquals(shell.ImageOutline.SaveResultCommand, outlineResultSaveButton.Command),
-                "描边结果区应绑定确认保存命令");
+                "属性页应绑定确认保存命令");
             True(ReferenceEquals(shell.ImageOutline.ProcessBatchCommand, outlineBatchProcessButton.Command),
                 "批量执行按钮应绑定批量描边命令");
+            Equal(BitmapScalingMode.HighQuality, outlineInputPreview.BitmapScalingMode,
+                "描边源图预览缩放质量");
+            Equal(BitmapScalingMode.HighQuality, outlineOutputPreview.BitmapScalingMode,
+                "描边结果预览缩放质量");
+            True(imageOutlineView.FindName("ImageOutlinePropertiesModeComboBox") is null,
+                "图片描边主视图不应重复承载属性操作控件");
 
             var iconDesign = FindDockContent(manager, MainWindow.IconDesignContentId) as LayoutAnchorable
                 ?? throw new SmokeTestException("停靠交互测试未找到 Icon 图标制作面板。");
@@ -1059,10 +1083,6 @@ internal static class Program
             True(ReferenceEquals(shell.IconDesign, iconDesignView.DataContext),
                 "Icon 图标制作应绑定 Shell 持有的单实例 ViewModel");
 
-            var properties = FindDockContent(manager, MainWindow.PropertiesContentId) as LayoutAnchorable
-                ?? throw new SmokeTestException("停靠交互测试未找到属性面板。");
-            var propertiesHost = properties.Content as ContentControl
-                ?? throw new SmokeTestException("属性面板必须由 ContentControl 承载。");
             var iconPropertiesView = propertiesHost.Content as IconDesignPropertiesView
                 ?? throw new SmokeTestException("激活 Icon 图标制作后属性栏未切换为 IconDesignPropertiesView。");
             True(ReferenceEquals(shell.IconDesign, iconPropertiesView.DataContext),
@@ -1171,34 +1191,61 @@ internal static class Program
             True(ReferenceEquals(iconPropertiesView, propertiesHost.Content),
                 "再次激活 Icon 时应恢复同一个 Icon 属性视图实例");
 
+            shell.ShowPanelCommand.Execute(MainWindow.BackgroundRemovalContentId);
             var backgroundRemovalHost = backgroundRemoval.Content as ContentControl
                 ?? throw new SmokeTestException("背景剔除工具缺少稳定 ContentControl host。");
             var backgroundRemovalView = backgroundRemovalHost.Content as BackgroundRemovalView
                 ?? throw new SmokeTestException("背景剔除工具 host 未承载 BackgroundRemovalView。");
+            var backgroundRemovalPropertiesView = propertiesHost.Content as BackgroundRemovalPropertiesView
+                ?? throw new SmokeTestException("激活背景剔除工具后属性栏未切换为 BackgroundRemovalPropertiesView。");
+            True(ReferenceEquals(shell.BackgroundRemoval, backgroundRemovalView.DataContext),
+                "背景剔除主视图应绑定 Shell 持有的单实例 ViewModel");
+            True(ReferenceEquals(shell.BackgroundRemoval, backgroundRemovalPropertiesView.DataContext),
+                "背景剔除属性页与预览主视图必须共享同一个 ViewModel");
             var fakeTransparencyCheckBox = RequireNamedElement<CheckBox>(
-                backgroundRemovalView,
-                "BackgroundRemovalFakeTransparencyCheckBox",
-                "背景剔除工具缺少假透明网格开关。");
+                backgroundRemovalPropertiesView,
+                "BackgroundRemovalPropertiesFakeTransparencyCheckBox",
+                "背景剔除属性页缺少假透明网格开关。");
             var checkerColorA = RequireNamedElement<TextBox>(
-                backgroundRemovalView,
-                "BackgroundRemovalCheckerColorATextBox",
-                "背景剔除工具缺少网格颜色 A。");
+                backgroundRemovalPropertiesView,
+                "BackgroundRemovalPropertiesCheckerColorATextBox",
+                "背景剔除属性页缺少网格颜色 A。");
             var checkerColorB = RequireNamedElement<TextBox>(
+                backgroundRemovalPropertiesView,
+                "BackgroundRemovalPropertiesCheckerColorBTextBox",
+                "背景剔除属性页缺少网格颜色 B。");
+            var checkerPreview = RequireNamedElement<CheckerGridImagePreviewControl>(
                 backgroundRemovalView,
-                "BackgroundRemovalCheckerColorBTextBox",
-                "背景剔除工具缺少网格颜色 B。");
-            var checkerOverlay = RequireNamedElement<CheckerGridOverlay>(
+                "BackgroundRemovalInputPreview",
+                "背景剔除工具缺少可导航的网格源图预览。");
+            var backgroundOutputPreview = RequireNamedElement<ImagePreviewControl>(
                 backgroundRemovalView,
-                "BackgroundRemovalCheckerGridOverlay",
-                "背景剔除工具缺少可视网格对齐叠加层。");
+                "BackgroundRemovalOutputPreview",
+                "背景剔除工具缺少可导航的结果预览。");
             var backgroundResultRefreshButton = RequireNamedElement<Button>(
-                backgroundRemovalView,
-                "RefreshBackgroundRemovalResultPreviewButton",
-                "背景剔除结果区缺少刷新预览按钮。");
+                backgroundRemovalPropertiesView,
+                "BackgroundRemovalPropertiesRefreshPreviewButton",
+                "背景剔除属性页缺少刷新预览按钮。");
             var backgroundResultSaveButton = RequireNamedElement<Button>(
+                backgroundRemovalPropertiesView,
+                "BackgroundRemovalPropertiesSaveResultButton",
+                "背景剔除属性页缺少保存结果按钮。");
+            var backgroundBatchModeCheckBox = RequireNamedElement<CheckBox>(
+                backgroundRemovalPropertiesView,
+                "BackgroundRemovalPropertiesBatchModeCheckBox",
+                "背景剔除属性页缺少批处理开关。");
+            var backgroundBatchQueue = RequireNamedElement<ListBox>(
+                backgroundRemovalPropertiesView,
+                "BackgroundRemovalPropertiesBatchQueue",
+                "背景剔除属性页缺少批处理队列。");
+            var backgroundBatchDataGrid = RequireNamedElement<DataGrid>(
                 backgroundRemovalView,
-                "SaveBackgroundRemovalResultButton",
-                "背景剔除结果区缺少保存结果按钮。");
+                "BackgroundRemovalBatchDataGrid",
+                "背景剔除主视图缺少批处理结果队列。");
+            var backgroundBatchProcessButton = RequireNamedElement<Button>(
+                backgroundRemovalPropertiesView,
+                "BackgroundRemovalPropertiesProcessBatchButton",
+                "背景剔除属性页缺少批量执行按钮。");
             Equal(nameof(BackgroundRemovalViewModel.UseFakeTransparencyGrid),
                 BindingOperations.GetBindingExpression(fakeTransparencyCheckBox, ToggleButton.IsCheckedProperty)?.ParentBinding.Path.Path,
                 "假透明网格开关绑定");
@@ -1209,18 +1256,95 @@ internal static class Program
                 BindingOperations.GetBindingExpression(checkerColorB, TextBox.TextProperty)?.ParentBinding.Path.Path,
                 "网格颜色 B 绑定");
             Equal(nameof(BackgroundRemovalViewModel.CheckerCellSize),
-                BindingOperations.GetBindingExpression(checkerOverlay, CheckerGridOverlay.CellSizeProperty)?.ParentBinding.Path.Path,
-                "网格对齐叠加层尺寸绑定");
+                BindingOperations.GetBindingExpression(checkerPreview, CheckerGridImagePreviewControl.CellSizeProperty)?.ParentBinding.Path.Path,
+                "网格源图预览尺寸绑定");
             Equal(nameof(BackgroundRemovalViewModel.SourcePixelWidth),
-                BindingOperations.GetBindingExpression(checkerOverlay, CheckerGridOverlay.SourcePixelWidthProperty)?.ParentBinding.Path.Path,
-                "网格对齐叠加层源图宽度绑定");
+                BindingOperations.GetBindingExpression(checkerPreview, CheckerGridImagePreviewControl.SourcePixelWidthProperty)?.ParentBinding.Path.Path,
+                "网格源图预览源图宽度绑定");
             Equal(nameof(BackgroundRemovalViewModel.SourcePixelHeight),
-                BindingOperations.GetBindingExpression(checkerOverlay, CheckerGridOverlay.SourcePixelHeightProperty)?.ParentBinding.Path.Path,
-                "网格对齐叠加层源图高度绑定");
+                BindingOperations.GetBindingExpression(checkerPreview, CheckerGridImagePreviewControl.SourcePixelHeightProperty)?.ParentBinding.Path.Path,
+                "网格源图预览源图高度绑定");
             True(ReferenceEquals(shell.BackgroundRemoval.RefreshPreviewCommand, backgroundResultRefreshButton.Command),
-                "背景剔除结果区应绑定刷新缓存预览命令");
+                "背景剔除属性页应绑定刷新缓存预览命令");
             True(ReferenceEquals(shell.BackgroundRemoval.SaveResultCommand, backgroundResultSaveButton.Command),
-                "背景剔除结果区应绑定确认保存命令");
+                "背景剔除属性页应绑定确认保存命令");
+            Equal(nameof(BackgroundRemovalViewModel.IsBatchMode),
+                BindingOperations.GetBindingExpression(backgroundBatchModeCheckBox, ToggleButton.IsCheckedProperty)?.ParentBinding.Path.Path,
+                "背景剔除批处理模式绑定");
+            True(ReferenceEquals(shell.BackgroundRemoval.BatchItems, backgroundBatchQueue.ItemsSource),
+                "背景剔除属性页批处理队列绑定");
+            True(ReferenceEquals(shell.BackgroundRemoval.BatchItems, backgroundBatchDataGrid.ItemsSource),
+                "背景剔除主视图批处理结果队列绑定");
+            True(ReferenceEquals(shell.BackgroundRemoval.ProcessBatchCommand, backgroundBatchProcessButton.Command),
+                "背景剔除批量执行按钮绑定");
+            Equal(BitmapScalingMode.HighQuality, checkerPreview.BitmapScalingMode,
+                "背景剔除源图预览缩放质量");
+            Equal(BitmapScalingMode.HighQuality, backgroundOutputPreview.BitmapScalingMode,
+                "背景剔除结果预览缩放质量");
+            True(backgroundRemovalView.FindName("BackgroundRemovalPropertiesFakeTransparencyCheckBox") is null,
+                "背景剔除主视图不应重复承载属性操作控件");
+
+            shell.ShowPanelCommand.Execute(MainWindow.PixelAlignmentContentId);
+            var pixelAlignment = FindDockContent(manager, MainWindow.PixelAlignmentContentId) as LayoutAnchorable
+                ?? throw new SmokeTestException("停靠交互测试未找到像素点对齐工具面板。");
+            var pixelAlignmentHost = pixelAlignment.Content as ContentControl
+                ?? throw new SmokeTestException("像素点对齐工具缺少稳定 ContentControl host。");
+            var pixelAlignmentView = pixelAlignmentHost.Content as PixelAlignmentView
+                ?? throw new SmokeTestException("像素点对齐工具 host 未承载 PixelAlignmentView。");
+            var pixelAlignmentPropertiesView = propertiesHost.Content as PixelAlignmentPropertiesView
+                ?? throw new SmokeTestException("激活像素点对齐工具后属性栏未切换为 PixelAlignmentPropertiesView。");
+            True(ReferenceEquals(shell.PixelAlignment, pixelAlignmentView.DataContext),
+                "像素点对齐主视图应绑定 Shell 持有的单实例 ViewModel");
+            True(ReferenceEquals(shell.PixelAlignment, pixelAlignmentPropertiesView.DataContext),
+                "像素点对齐属性页与预览主视图必须共享同一个 ViewModel");
+            var pixelSurface = RequireNamedElement<PixelAlignmentSurface>(
+                pixelAlignmentView,
+                "PixelAlignmentSurface",
+                "像素点对齐主视图缺少源图标尺预览。");
+            var pixelOutputPreview = RequireNamedElement<ImagePreviewControl>(
+                pixelAlignmentView,
+                "PixelAlignmentOutputPreview",
+                "像素点对齐主视图缺少通用结果预览。");
+            var pixelChooseInputButton = RequireNamedElement<Button>(
+                pixelAlignmentPropertiesView,
+                "PixelAlignmentPropertiesChooseInputButton",
+                "像素点对齐属性页缺少选择图片按钮。");
+            var pixelRefreshPreviewButton = RequireNamedElement<Button>(
+                pixelAlignmentPropertiesView,
+                "PixelAlignmentPropertiesRefreshPreviewButton",
+                "像素点对齐属性页缺少刷新预览按钮。");
+            var pixelSaveButton = RequireNamedElement<Button>(
+                pixelAlignmentPropertiesView,
+                "PixelAlignmentPropertiesSaveResultButton",
+                "像素点对齐属性页缺少保存按钮。");
+            var pixelBatchQueue = RequireNamedElement<ListBox>(
+                pixelAlignmentPropertiesView,
+                "PixelAlignmentPropertiesBatchQueue",
+                "像素点对齐属性页缺少批处理队列。");
+            var pixelBatchProcessButton = RequireNamedElement<Button>(
+                pixelAlignmentPropertiesView,
+                "PixelAlignmentPropertiesProcessBatchButton",
+                "像素点对齐属性页缺少批量执行按钮。");
+            True(pixelSurface is ImageViewportSurface,
+                "像素点对齐源图必须复用通用图像视口导航基类");
+            Equal(BitmapScalingMode.NearestNeighbor, pixelOutputPreview.BitmapScalingMode,
+                "像素点对齐结果预览必须使用最近邻缩放");
+            True(ReferenceEquals(shell.PixelAlignment.ChooseInputCommand, pixelChooseInputButton.Command),
+                "像素点对齐属性页选择图片命令绑定");
+            True(ReferenceEquals(shell.PixelAlignment.RefreshPreviewCommand, pixelRefreshPreviewButton.Command),
+                "像素点对齐属性页刷新预览命令绑定");
+            True(ReferenceEquals(shell.PixelAlignment.SaveResultCommand, pixelSaveButton.Command),
+                "像素点对齐属性页保存结果命令绑定");
+            True(ReferenceEquals(shell.PixelAlignment.BatchItems, pixelBatchQueue.ItemsSource),
+                "像素点对齐属性页批处理队列绑定");
+            True(ReferenceEquals(shell.PixelAlignment.ProcessBatchCommand, pixelBatchProcessButton.Command),
+                "像素点对齐属性页批量执行命令绑定");
+            True(pixelAlignmentView.FindName("ChoosePixelAlignmentInputButton") is null,
+                "像素点对齐主视图不应保留文件操作按钮");
+            True(pixelAlignmentView.FindName("PixelAlignmentBatchQueueCard") is null,
+                "像素点对齐主视图不应保留批处理操作队列");
+            True(pixelAlignmentView.FindName("OpenPixelAlignmentOutputButton") is null,
+                "像素点对齐主视图不应保留输出目录操作按钮");
 
             var commandConsole = FindDockContent(manager, MainWindow.CommandConsoleContentId) as LayoutAnchorable
                 ?? throw new SmokeTestException("停靠交互测试未找到指令日志面板。");

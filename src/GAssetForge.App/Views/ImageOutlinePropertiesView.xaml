@@ -1,0 +1,324 @@
+<UserControl x:Class="GAssetForge.App.Views.ImageOutlinePropertiesView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:conv="clr-namespace:GAssetForge.App.Converters"
+             MinWidth="260">
+    <UserControl.Resources>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
+        <conv:StringToBrushConverter x:Key="StringToBrushConverter" />
+        <Style x:Key="ImageOutlinePropertyLabelStyle" TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource App.TextSecondaryBrush}" />
+            <Setter Property="FontSize" Value="11" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+        <Style x:Key="ImageOutlinePropertyButtonStyle"
+               TargetType="Button"
+               BasedOn="{StaticResource App.ButtonStyle}">
+            <Setter Property="MinHeight" Value="28" />
+            <Setter Property="Padding" Value="8,3" />
+            <Setter Property="FontSize" Value="10" />
+        </Style>
+    </UserControl.Resources>
+
+    <Grid Background="{DynamicResource App.SurfaceBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="42" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <Border Padding="12,0"
+                Background="{DynamicResource App.SurfaceRaisedBrush}"
+                BorderBrush="{DynamicResource App.BorderBrush}"
+                BorderThickness="0,0,0,1">
+            <DockPanel LastChildFill="True">
+                <TextBlock VerticalAlignment="Center"
+                           Style="{DynamicResource App.PanelHeaderStyle}"
+                           Text="图片描边属性" />
+                <TextBlock Margin="10,0,0,0"
+                           VerticalAlignment="Center"
+                           Foreground="{DynamicResource App.TextMutedBrush}"
+                           FontSize="11"
+                           Text="Alpha 轮廓与批处理" />
+            </DockPanel>
+        </Border>
+
+        <ScrollViewer Grid.Row="1"
+                      HorizontalScrollBarVisibility="Disabled"
+                      VerticalScrollBarVisibility="Auto">
+            <StackPanel Margin="12">
+                <Border Style="{DynamicResource App.CardStyle}">
+                    <StackPanel>
+                        <TextBlock Style="{DynamicResource App.SectionTitleStyle}"
+                                   Text="处理模式" />
+                        <CheckBox x:Name="ImageOutlinePropertiesBatchModeCheckBox"
+                                  Margin="0,11,0,0"
+                                  IsChecked="{Binding IsBatchMode, Mode=TwoWay}"
+                                  Content="批量处理模式"
+                                  Style="{DynamicResource App.CheckBoxStyle}" />
+                        <TextBlock Margin="0,11,0,4"
+                                   Style="{StaticResource ImageOutlinePropertyLabelStyle}"
+                                   Text="描边种类" />
+                        <ComboBox x:Name="ImageOutlinePropertiesModeComboBox"
+                                  ItemsSource="{Binding ModeOptions}"
+                                  SelectedItem="{Binding SelectedMode, Mode=TwoWay}"
+                                  DisplayMemberPath="DisplayName"
+                                  Style="{DynamicResource App.ComboBoxStyle}" />
+                        <TextBlock Margin="0,7,0,0"
+                                   Foreground="{DynamicResource App.TextMutedBrush}"
+                                   FontSize="10"
+                                   Text="{Binding ModeDescription}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+
+                <Border Margin="0,10,0,0"
+                        Style="{DynamicResource App.CardStyle}">
+                    <StackPanel>
+                        <TextBlock Style="{DynamicResource App.SectionTitleStyle}"
+                                   Text="描边参数" />
+
+                        <TextBlock Margin="0,11,0,4"
+                                   Style="{StaticResource ImageOutlinePropertyLabelStyle}"
+                                   Text="描边宽度" />
+                        <DockPanel>
+                            <TextBlock DockPanel.Dock="Right"
+                                       Width="52"
+                                       TextAlignment="Right"
+                                       Text="{Binding OutlineWidth, StringFormat={}{0} px}" />
+                            <Slider x:Name="ImageOutlinePropertiesWidthSlider"
+                                    Minimum="1"
+                                    Maximum="128"
+                                    TickFrequency="1"
+                                    IsSnapToTickEnabled="True"
+                                    Value="{Binding OutlineWidth, Mode=TwoWay}"
+                                    Style="{DynamicResource App.SliderStyle}" />
+                        </DockPanel>
+
+                        <TextBlock Margin="0,12,0,4"
+                                   Style="{StaticResource ImageOutlinePropertyLabelStyle}"
+                                   Text="描边颜色（#RRGGBB）" />
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="34" />
+                                <ColumnDefinition Width="8" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Button x:Name="ImageOutlinePropertiesColorPickerButton"
+                                    Width="32"
+                                    Height="30"
+                                    Padding="0"
+                                    Background="{Binding EffectiveColorHex, Converter={StaticResource StringToBrushConverter}}"
+                                    BorderBrush="{DynamicResource App.BorderStrongBrush}"
+                                    BorderThickness="1"
+                                    Command="{Binding ChooseOutlineColorCommand}"
+                                    ToolTip="打开 HSV / RGB 取色器" />
+                            <TextBox x:Name="ImageOutlinePropertiesColorTextBox"
+                                     Grid.Column="2"
+                                     FontFamily="Consolas"
+                                     Text="{Binding OutlineColorHex, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                     Style="{DynamicResource App.TextBoxStyle}" />
+                        </Grid>
+
+                        <TextBlock Margin="0,12,0,4"
+                                   Style="{StaticResource ImageOutlinePropertyLabelStyle}"
+                                   Text="主体 Alpha 阈值" />
+                        <DockPanel>
+                            <TextBlock DockPanel.Dock="Right"
+                                       Width="40"
+                                       TextAlignment="Right"
+                                       Text="{Binding AlphaThreshold}" />
+                            <Slider x:Name="ImageOutlinePropertiesAlphaThresholdSlider"
+                                    Minimum="1"
+                                    Maximum="254"
+                                    TickFrequency="1"
+                                    IsSnapToTickEnabled="True"
+                                    Value="{Binding AlphaThreshold, Mode=TwoWay}"
+                                    Style="{DynamicResource App.SliderStyle}" />
+                        </DockPanel>
+                        <TextBlock Margin="0,5,0,0"
+                                   Foreground="{DynamicResource App.TextMutedBrush}"
+                                   FontSize="10"
+                                   Text="低于阈值的像素不会被视为主体，可用于忽略弱透明噪点。"
+                                   TextWrapping="Wrap" />
+
+                        <CheckBox x:Name="ImageOutlinePropertiesExpandCanvasCheckBox"
+                                  Margin="0,11,0,0"
+                                  IsChecked="{Binding ExpandCanvas, Mode=TwoWay}"
+                                  Content="扩展画布以保留外侧描边"
+                                  Style="{DynamicResource App.CheckBoxStyle}" />
+                        <TextBlock Margin="22,5,0,0"
+                                   Foreground="{DynamicResource App.TextMutedBrush}"
+                                   FontSize="10"
+                                   Text="{Binding CanvasBehaviorText}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Margin="0,10,0,0"
+                                   Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                   FontSize="10"
+                                   Text="{Binding ConfigurationValidationText}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+
+                <Border Margin="0,10,0,0"
+                        Style="{DynamicResource App.CardStyle}"
+                        Visibility="{Binding IsSingleMode, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <StackPanel>
+                        <TextBlock Style="{DynamicResource App.SectionTitleStyle}"
+                                   Text="单图操作" />
+                        <WrapPanel Margin="0,10,0,0">
+                            <Button x:Name="ImageOutlinePropertiesChooseInputButton"
+                                    Margin="0,0,6,6"
+                                    Command="{Binding ChooseInputCommand}"
+                                    Content="选择图片…"
+                                    Style="{StaticResource ImageOutlinePropertyButtonStyle}" />
+                            <Button x:Name="ImageOutlinePropertiesChooseOutputButton"
+                                    Margin="0,0,0,6"
+                                    Command="{Binding ChooseOutputCommand}"
+                                    Content="设置输出…"
+                                    Style="{StaticResource ImageOutlinePropertyButtonStyle}" />
+                        </WrapPanel>
+                        <WrapPanel>
+                            <Button x:Name="ImageOutlinePropertiesRefreshPreviewButton"
+                                    Margin="0,0,6,6"
+                                    Command="{Binding RefreshPreviewCommand}"
+                                    Content="刷新预览"
+                                    Style="{StaticResource ImageOutlinePropertyButtonStyle}" />
+                            <Button x:Name="ImageOutlinePropertiesSaveResultButton"
+                                    Margin="0,0,0,6"
+                                    Command="{Binding SaveResultCommand}"
+                                    Content="保存结果"
+                                    Style="{StaticResource ImageOutlinePropertyButtonStyle}" />
+                        </WrapPanel>
+
+                        <TextBlock Margin="0,5,0,2"
+                                   Style="{StaticResource ImageOutlinePropertyLabelStyle}"
+                                   Text="输入" />
+                        <TextBlock Text="{Binding InputFileName}"
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTip="{Binding InputPath}" />
+                        <TextBlock Margin="0,2,0,0"
+                                   Foreground="{DynamicResource App.TextMutedBrush}"
+                                   FontSize="10"
+                                   Text="{Binding InputSizeText}" />
+                        <TextBlock Margin="0,8,0,2"
+                                   Style="{StaticResource ImageOutlinePropertyLabelStyle}"
+                                   Text="最终输出" />
+                        <TextBlock Text="{Binding OutputFileName}"
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTip="{Binding OutputPath}" />
+                        <TextBlock Margin="0,8,0,2"
+                                   Style="{StaticResource ImageOutlinePropertyLabelStyle}"
+                                   Text="预览缓存" />
+                        <TextBlock FontFamily="Consolas"
+                                   FontSize="10"
+                                   Text="{Binding OutputPreviewPath, TargetNullValue=尚未生成}"
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTip="{Binding OutputPreviewPath}" />
+                        <TextBlock Margin="0,7,0,0"
+                                   Foreground="{DynamicResource App.TextMutedBrush}"
+                                   FontSize="10"
+                                   Text="{Binding PreviewStatusText}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Margin="0,5,0,0"
+                                   Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                   FontSize="10"
+                                   Text="{Binding ResultSummary}"
+                                   TextWrapping="Wrap" />
+                        <Button Margin="0,9,0,0"
+                                Command="{Binding OpenOutputDirectoryCommand}"
+                                Content="打开最新输出目录"
+                                Style="{StaticResource ImageOutlinePropertyButtonStyle}" />
+                    </StackPanel>
+                </Border>
+
+                <Border Margin="0,10,0,0"
+                        Style="{DynamicResource App.CardStyle}"
+                        Visibility="{Binding IsBatchMode, Converter={StaticResource BooleanToVisibilityConverter}}">
+                    <StackPanel>
+                        <TextBlock Style="{DynamicResource App.SectionTitleStyle}"
+                                   Text="批量操作" />
+                        <WrapPanel Margin="0,10,0,0">
+                            <Button x:Name="ImageOutlinePropertiesChooseBatchInputsButton"
+                                    Margin="0,0,6,6"
+                                    Command="{Binding ChooseBatchInputsCommand}"
+                                    Content="添加图片…"
+                                    Style="{StaticResource ImageOutlinePropertyButtonStyle}" />
+                            <Button x:Name="ImageOutlinePropertiesChooseBatchOutputButton"
+                                    Margin="0,0,0,6"
+                                    Command="{Binding ChooseBatchOutputDirectoryCommand}"
+                                    Content="输出目录…"
+                                    Style="{StaticResource ImageOutlinePropertyButtonStyle}" />
+                        </WrapPanel>
+                        <TextBlock Margin="0,3,0,2"
+                                   Style="{StaticResource ImageOutlinePropertyLabelStyle}"
+                                   Text="批量输出目录" />
+                        <TextBlock FontSize="10"
+                                   Text="{Binding BatchOutputDirectory, TargetNullValue=尚未选择}"
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTip="{Binding BatchOutputDirectory}" />
+                        <ListBox x:Name="ImageOutlinePropertiesBatchQueue"
+                                 MinHeight="92"
+                                 MaxHeight="210"
+                                 Margin="0,9,0,0"
+                                 ItemsSource="{Binding BatchItems}"
+                                 SelectedItem="{Binding SelectedBatchItem, Mode=TwoWay}"
+                                 ScrollViewer.VerticalScrollBarVisibility="Auto">
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <StackPanel Margin="2,3">
+                                        <TextBlock Text="{Binding FileName}"
+                                                   TextTrimming="CharacterEllipsis" />
+                                        <TextBlock Foreground="{DynamicResource App.TextMutedBrush}"
+                                                   FontSize="9"
+                                                   Text="{Binding Message}"
+                                                   TextTrimming="CharacterEllipsis" />
+                                    </StackPanel>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                        <WrapPanel Margin="0,8,0,0">
+                            <Button Margin="0,0,6,6"
+                                    Command="{Binding RemoveSelectedBatchItemCommand}"
+                                    Content="移除所选"
+                                    Style="{StaticResource ImageOutlinePropertyButtonStyle}" />
+                            <Button Margin="0,0,0,6"
+                                    Command="{Binding ClearBatchItemsCommand}"
+                                    Content="清空队列"
+                                    Style="{StaticResource ImageOutlinePropertyButtonStyle}" />
+                        </WrapPanel>
+                        <ProgressBar Height="6"
+                                     Margin="0,3,0,0"
+                                     Minimum="0"
+                                     Maximum="100"
+                                     Value="{Binding BatchProgress, Mode=OneWay}" />
+                        <TextBlock Margin="0,6,0,0"
+                                   Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                   FontSize="10"
+                                   Text="{Binding BatchProgressText}"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Margin="0,3,0,0"
+                                   Foreground="{DynamicResource App.TextMutedBrush}"
+                                   FontSize="10"
+                                   Text="{Binding BatchCurrentFileName, StringFormat=当前：{0}}"
+                                   TextTrimming="CharacterEllipsis" />
+                        <Button x:Name="ImageOutlinePropertiesProcessBatchButton"
+                                Margin="0,9,0,0"
+                                Command="{Binding ProcessBatchCommand}"
+                                Content="执行批量描边"
+                                Style="{StaticResource ImageOutlinePropertyButtonStyle}" />
+                        <Button Margin="0,7,0,0"
+                                Command="{Binding OpenOutputDirectoryCommand}"
+                                Content="打开最新输出目录"
+                                Style="{StaticResource ImageOutlinePropertyButtonStyle}" />
+                    </StackPanel>
+                </Border>
+
+                <TextBlock Margin="2,10,2,12"
+                           Foreground="{DynamicResource App.TextSecondaryBrush}"
+                           FontSize="10"
+                           Text="{Binding StatusText}"
+                           TextWrapping="Wrap" />
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</UserControl>

@@ -5,6 +5,26 @@ development track; versioning policy will be finalized before the first public r
 
 ## Unreleased
 
+## 1.0.16t1 - 2026-08-26
+
+### Added
+
+- Added dedicated Properties-panel workspaces for Background Removal, Image Outline, and Pixel
+  Alignment, including file selection, preview publication, output locations, and batch controls.
+- Added real Background Removal batch processing with per-item status, progress, isolated failures,
+  and deterministic output-path planning alongside the existing outline and pixel batch workflows.
+- Added a reusable image viewport module shared by the three image-processing tools, with cursor-
+  anchored wheel zoom, middle-button panning, and right-click or double-click reset.
+
+### Changed
+
+- Moved image-tool operations out of the document headers and into the context-sensitive Properties
+  panel. Tool documents now use compact headers and devote their workspace to source/result previews.
+- Moved Pixel Alignment preview-cache, save-location, single-image, and batch-queue operations into
+  its Properties view while retaining its detailed sampling and correction controls in the document.
+- Kept fake-transparency checker overlays synchronized with the shared viewport transform so grid
+  alignment remains visually accurate while zooming and panning.
+
 ## 1.0.15t1 - 2026-08-26
 
 ### Added

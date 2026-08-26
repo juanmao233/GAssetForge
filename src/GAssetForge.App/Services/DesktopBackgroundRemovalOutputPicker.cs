@@ -20,4 +20,16 @@ public sealed class DesktopBackgroundRemovalOutputPicker : IBackgroundRemovalOut
 
         return dialog.ShowDialog() == true ? dialog.FileName : null;
     }
+
+    public string? SelectOutputDirectory(string? initialDirectory)
+    {
+        var dialog = new OpenFolderDialog
+        {
+            Title = "选择批量背景剔除输出目录",
+            InitialDirectory = Directory.Exists(initialDirectory) ? initialDirectory : string.Empty,
+            Multiselect = false
+        };
+
+        return dialog.ShowDialog() == true ? dialog.FolderName : null;
+    }
 }

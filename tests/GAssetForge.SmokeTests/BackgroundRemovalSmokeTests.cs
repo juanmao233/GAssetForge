@@ -52,6 +52,7 @@ internal static class BackgroundRemovalSmokeTests
             CheckerGridOverlayUsesOriginalPixelDimensions();
             InvalidImagesAreReportedByTheViewModel(testRoot);
             OutputIsAtomicallyReplacedWithoutTemporaryResidue(testRoot);
+            BatchProcessingUsesUniqueOutputsAndContinuesAfterFailures(testRoot);
         }
         finally
         {
@@ -751,6 +752,109 @@ internal static class BackgroundRemovalSmokeTests
             "成功输出后不得残留临时文件");
     }
 
+    private static void BatchProcessingUsesUniqueOutputsAndContinuesAfterFailures(string testRoot)
+    {
+        Equal(256, BackgroundRemovalViewModel.MaximumBatchItemCount,
+            "背景剔除批处理上限应与描边和像素对齐工具一致");
+        var batchRoot = Path.Combine(testRoot, "batch-processing");
+        var firstInputDirectory = Path.Combine(batchRoot, "input-a");
+        var secondInputDirectory = Path.Combine(batchRoot, "input-b");
+        var outputDirectory = Path.Combine(batchRoot, "output");
+        Directory.CreateDirectory(firstInputDirectory);
+        Directory.CreateDirectory(secondInputDirectory);
+        Directory.CreateDirectory(outputDirectory);
+
+        var firstInputPath = Path.Combine(firstInputDirectory, "shared-name.png");
+        var invalidInputPath = Path.Combine(firstInputDirectory, "broken.png");
+        var secondInputPath = Path.Combine(secondInputDirectory, "shared-name.png");
+        SaveFixture(
+            firstInputPath,
+            4,
+            3,
+            ParseHex("#FF00FF"),
+            image => image[1, 1] = new Rgba32(20, 140, 230, 255));
+        File.WriteAllText(invalidInputPath, "not-an-image");
+        SaveFixture(
+            secondInputPath,
+            5,
+            2,
+            ParseHex("#FF00FF"),
+            image => image[2, 1] = new Rgba32(240, 130, 20, 255));
+
+        var preexistingOutputPath = Path.Combine(outputDirectory, "shared-name_transparent.png");
+        File.WriteAllText(preexistingOutputPath, "existing-output-must-be-preserved");
+        var viewModel = new BackgroundRemovalViewModel(
+            Service,
+            new FixedBatchInputPicker([firstInputPath, invalidInputPath, secondInputPath]),
+            new FixedBatchOutputPicker(outputDirectory));
+        var progressChangeCount = 0;
+        var currentFileNames = new ConcurrentQueue<string>();
+        viewModel.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(BackgroundRemovalViewModel.BatchProgressPercent))
+            {
+                Interlocked.Increment(ref progressChangeCount);
+            }
+
+            if (args.PropertyName == nameof(BackgroundRemovalViewModel.BatchCurrentFileName) &&
+                !string.IsNullOrWhiteSpace(viewModel.BatchCurrentFileName))
+            {
+                currentFileNames.Enqueue(viewModel.BatchCurrentFileName);
+            }
+        };
+
+        viewModel.ChooseBatchInputsCommand.Execute(null);
+        Equal(3, viewModel.BatchTotalCount, "批量输入选择应创建可观察任务队列");
+        True(viewModel.IsBatchMode, "选择批量输入后应切换到批处理队列视图");
+        Equal("4 × 3", viewModel.BatchItems[0].SourceSizeText, "队列项应暴露可读源尺寸");
+        Equal("无法读取", viewModel.BatchItems[1].SourceSizeText, "损坏图片的尺寸检查应安全降级");
+        viewModel.ChooseBatchInputsCommand.Execute(null);
+        Equal(3, viewModel.BatchTotalCount, "重复添加相同图片不得清空或重复现有队列");
+        viewModel.ChooseBatchOutputDirectoryCommand.Execute(null);
+        Equal(Path.GetFullPath(outputDirectory), viewModel.BatchOutputDirectory,
+            "批量输出目录应使用文件夹选择结果");
+        True(viewModel.ProcessBatchCommand.CanExecute(null), "输入、输出和参数就绪后应允许启动批处理");
+
+        viewModel.ProcessBatchCommand.Execute(null);
+        WaitUntil(
+            () => !viewModel.IsBatchRunning && !viewModel.IsBusy && viewModel.BatchCompletedCount == 3,
+            TimeSpan.FromSeconds(10),
+            "背景剔除批处理应在单项失败后继续完成剩余任务");
+
+        Equal(2, viewModel.BatchSucceededCount, "批处理应统计两个成功项");
+        Equal(1, viewModel.BatchFailedCount, "批处理应隔离并统计单个失败项");
+        Equal(0, viewModel.BatchPendingCount, "批处理完成后不应残留等待项");
+        Equal(100d, viewModel.BatchProgressPercent, "批处理总体进度应达到 100%");
+        Equal(100d, viewModel.BatchProgress, "界面预留的总体进度别名应同步更新");
+        True(progressChangeCount > 0, "总体进度应通过属性通知实时更新");
+        True(currentFileNames.Count >= 3, "批处理应逐项回报当前文件名");
+        Equal(BackgroundRemovalBatchItemStatus.Completed, viewModel.BatchItems[0].Status,
+            "第一张有效图片应完成");
+        Equal(BackgroundRemovalBatchItemStatus.Failed, viewModel.BatchItems[1].Status,
+            "损坏图片只应标记自身失败");
+        Equal(BackgroundRemovalBatchItemStatus.Completed, viewModel.BatchItems[2].Status,
+            "失败项之后的有效图片仍应继续完成");
+        True(File.Exists(viewModel.BatchItems[0].OutputPath), "第一张有效图片应真实输出 PNG");
+        True(File.Exists(viewModel.BatchItems[2].OutputPath), "后续有效图片应真实输出 PNG");
+        False(
+            string.Equals(
+                viewModel.BatchItems[0].OutputPath,
+                viewModel.BatchItems[2].OutputPath,
+                StringComparison.OrdinalIgnoreCase),
+            "同名输入必须分配不同输出文件名");
+        Equal(
+            "existing-output-must-be-preserved",
+            File.ReadAllText(preexistingOutputPath),
+            "批处理唯一命名不得覆盖输出目录中的既有文件");
+
+        viewModel.SelectedBatchItem = viewModel.BatchItems[1];
+        True(viewModel.RemoveSelectedBatchItemCommand.CanExecute(null), "选择队列项后应允许单项移除");
+        viewModel.RemoveSelectedBatchItemCommand.Execute(null);
+        Equal(2, viewModel.BatchTotalCount, "移除所选只应删除一个队列项");
+        viewModel.ClearBatchItemsCommand.Execute(null);
+        Equal(0, viewModel.BatchTotalCount, "清空队列别名命令应移除全部队列项");
+    }
+
     private static BackgroundRemovalSettings CreateExactKeySettings(
         string keyColorHex,
         bool edgeConnectedOnly) => new()
@@ -948,6 +1052,22 @@ internal static class BackgroundRemovalSmokeTests
     private sealed class FixedOutputPicker(string outputPath) : IBackgroundRemovalOutputPicker
     {
         public string? SelectOutputFile(string? initialDirectory, string suggestedFileName) => outputPath;
+    }
+
+    private sealed class FixedBatchInputPicker(IReadOnlyList<string> inputPaths)
+        : IBackgroundRemovalInputPicker
+    {
+        public string? SelectInputFile(string? initialDirectory) => inputPaths.FirstOrDefault();
+
+        public IReadOnlyList<string> SelectInputFiles(string? initialDirectory) => inputPaths;
+    }
+
+    private sealed class FixedBatchOutputPicker(string outputDirectory)
+        : IBackgroundRemovalOutputPicker
+    {
+        public string? SelectOutputFile(string? initialDirectory, string suggestedFileName) => null;
+
+        public string? SelectOutputDirectory(string? initialDirectory) => outputDirectory;
     }
 
     private sealed class RecordingLogSink : IWorkbenchLogSink
