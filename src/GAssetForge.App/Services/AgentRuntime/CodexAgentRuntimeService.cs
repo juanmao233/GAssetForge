@@ -313,6 +313,37 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
         }
     }
 
+    public async Task<AgentThreadResult> StartFreshThreadAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        await _sessionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            var transport = RequireCapability(
+                AgentTransportCapabilities.ExplicitThreadStart,
+                "创建独立线程");
+            if (!IsConnected || transport.State == AgentSessionTransportState.RunningTurn)
+            {
+                throw new InvalidOperationException(
+                    "Codex Agent Runtime 尚未处于可创建独立线程的 Ready 状态。");
+            }
+
+            var result = await transport.StartThreadAsync(cancellationToken).ConfigureAwait(false);
+            LastError = null;
+            return result;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            LastError = Sanitize(exception.Message);
+            throw;
+        }
+        finally
+        {
+            _sessionGate.Release();
+        }
+    }
+
     public async Task<AgentAccountState> RefreshAccountAsync(
         CancellationToken cancellationToken = default)
     {

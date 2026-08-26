@@ -48,7 +48,7 @@ public static partial class GenerationFailureClassifier
                 Message = failureMessage,
                 Code = "agent_turn_incomplete",
                 Stage = "agent.dispatch",
-                Retryable = true
+                Retryable = false
             };
         }
 
@@ -70,6 +70,10 @@ public static partial class GenerationFailureClassifier
         message.Contains("HTTP 429", StringComparison.OrdinalIgnoreCase) ||
         message.Contains("HTTP 5", StringComparison.OrdinalIgnoreCase) ||
         message.Contains("temporarily unavailable", StringComparison.OrdinalIgnoreCase);
+
+    public static bool IsAgentInfrastructureFailureCode(string? failureCode) =>
+        string.Equals(failureCode, "agent_turn_incomplete", StringComparison.OrdinalIgnoreCase) ||
+        failureCode?.StartsWith("agent_transport_", StringComparison.OrdinalIgnoreCase) == true;
 
     [GeneratedRegex(@"(?:errorCode|failureCode)\s*[=:]\s*([a-z0-9][a-z0-9._-]{0,127})", RegexOptions.IgnoreCase)]
     private static partial Regex ErrorCodeRegex();

@@ -259,10 +259,12 @@ public sealed class JsonGenerationTaskStore : IGenerationTaskStore
                         $"任务 {parent.Id} 的自动重做已阻断，需要人工接管后才能创建后继任务。");
                 }
 
-                if (parent.FailureRetryable != true && !safeRequest.ManualOverride)
+                if ((parent.FailureRetryable != true ||
+                     GenerationFailureClassifier.IsAgentInfrastructureFailureCode(parent.FailureCode)) &&
+                    !safeRequest.ManualOverride)
                 {
                     throw new InvalidOperationException(
-                        $"任务 {parent.Id} 的失败需要人工介入，不能自动创建重试任务。");
+                        $"任务 {parent.Id} 的失败属于不可自动重做范围，不能创建自动重试任务。");
                 }
             }
 

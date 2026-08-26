@@ -1303,6 +1303,27 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         StatusText = $"批次 {ShortId(batchId)} 已成功发布到本地队列，但自动调度失败：{detail}";
     }
 
+    public void ReportDispatchInterrupted(string batchId, string? detail = null)
+    {
+        var normalizedDetail = string.IsNullOrWhiteSpace(detail)
+            ? "上游模型响应流中断，当前未认领任务尚未进入图片生成阶段。"
+            : detail.Trim();
+        EnsureDispatchBatch(batchId);
+        ApplyDispatchProgress(
+            batchId,
+            GenerationBatchDispatchStage.Interrupted,
+            DispatchProgress,
+            "保留原 Pending 任务并停止后续 Turn 分块",
+            normalizedDetail,
+            _currentDispatchStage == GenerationBatchDispatchStage.Interrupted
+                ? null
+                : _currentDispatchStage,
+            normalizedDetail);
+        StatusText =
+            $"批次 {ShortId(batchId)} 的上游模型响应流中断；已完成项保持完成，" +
+            "原 Pending 任务已保留，请检查模型网关后继续。";
+    }
+
     public void ReportDispatchCanceled(string? batchId, string? detail = null)
     {
         if (!string.IsNullOrWhiteSpace(batchId))
@@ -1384,6 +1405,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                 task.Status == GenerationTaskStatus.Failed &&
                 task.DispatchIntent?.Requested == true &&
                 task.FailureRetryable == true &&
+                !GenerationFailureClassifier.IsAgentInfrastructureFailureCode(task.FailureCode) &&
                 string.IsNullOrWhiteSpace(task.AutomaticRetryBlockedReason) &&
                 string.IsNullOrWhiteSpace(task.SupersededByTaskId) &&
                 task.RetryLineage is { } lineage &&
@@ -1515,6 +1537,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                     string.IsNullOrWhiteSpace(task.AutomaticRetryBlockedReason) &&
                     task.DispatchIntent?.Requested == true &&
                     task.FailureRetryable == true &&
+                    !GenerationFailureClassifier.IsAgentInfrastructureFailureCode(task.FailureCode) &&
                     task.RetryLineage is { } lineage &&
                     lineage.AttemptNumber < lineage.MaxAttempts)
                 .OrderBy(task => task.BatchItemIndex)
@@ -2108,6 +2131,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             : failureMessage.Trim();
         IsDispatching = stage is not GenerationBatchDispatchStage.Idle and
             not GenerationBatchDispatchStage.Completed and
+            not GenerationBatchDispatchStage.Interrupted and
             not GenerationBatchDispatchStage.Failed and
             not GenerationBatchDispatchStage.Canceled;
 
@@ -2130,6 +2154,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         GenerationBatchDispatchStage.GeneratingAssets => "生成美术资产",
         GenerationBatchDispatchStage.VerifyingOutputs => "校验生成产物",
         GenerationBatchDispatchStage.Completed => "批次已完成",
+        GenerationBatchDispatchStage.Interrupted => "上游响应流中断",
         GenerationBatchDispatchStage.Failed => "批次执行失败",
         GenerationBatchDispatchStage.Canceled => "批次调度已取消",
         _ => "尚未开始"
@@ -3256,6 +3281,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
     {
         if (_disposed || !HasDispatchProgress ||
             _currentDispatchStage is GenerationBatchDispatchStage.Completed or
+                GenerationBatchDispatchStage.Interrupted or
                 GenerationBatchDispatchStage.Failed or
                 GenerationBatchDispatchStage.Canceled)
         {
@@ -3347,6 +3373,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
     {
         var active = HasDispatchProgress &&
                      _currentDispatchStage is not GenerationBatchDispatchStage.Completed and
+                         not GenerationBatchDispatchStage.Interrupted and
                          not GenerationBatchDispatchStage.Failed and
                          not GenerationBatchDispatchStage.Canceled;
         var oldestClaimActivityUtc = PublishedTasks

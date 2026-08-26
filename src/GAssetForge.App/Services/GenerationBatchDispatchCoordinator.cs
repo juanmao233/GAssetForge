@@ -1,5 +1,6 @@
 using GAssetForge.App.Services.AgentRuntime;
 using GAssetForge.Core.Generation;
+using System.Diagnostics;
 using System.IO;
 using System.Threading.Channels;
 
@@ -9,6 +10,13 @@ internal sealed record GenerationBatchDispatchRequest(
     string BatchId,
     IReadOnlyList<string> TaskIds,
     bool IsRetry);
+
+internal enum GenerationBatchDispatchEnqueueResult
+{
+    Enqueued,
+    AlreadyScheduled,
+    QueueStopped
+}
 
 internal enum GenerationBatchDispatchStage
 {
@@ -23,6 +31,7 @@ internal enum GenerationBatchDispatchStage
     GeneratingAssets,
     VerifyingOutputs,
     Completed,
+    Interrupted,
     Failed,
     Canceled
 }
@@ -34,10 +43,16 @@ internal sealed record GenerationBatchDispatchProgressSnapshot(
     string Instruction,
     string Detail,
     GenerationBatchDispatchStage? FailureStage = null,
-    string? FailureMessage = null)
+    string? FailureMessage = null,
+    int? ChunkIndex = null,
+    int? ChunkCount = null,
+    int? ChunkTaskCount = null,
+    long? ElapsedMilliseconds = null,
+    string? FailureCode = null)
 {
     public bool IsTerminal => Stage is
         GenerationBatchDispatchStage.Completed or
+        GenerationBatchDispatchStage.Interrupted or
         GenerationBatchDispatchStage.Failed or
         GenerationBatchDispatchStage.Canceled;
 }
@@ -69,8 +84,9 @@ internal sealed class GenerationBatchDispatchCompletedEventArgs(
 /// </summary>
 internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
 {
+    internal const int MaximumTasksPerTurn = 5;
+
     private const double BuildingInstructionProgress = 45d;
-    private const double StartingTurnProgress = 50d;
     private const double WaitingForClaimProgress = 55d;
     private static readonly TimeSpan DefaultClaimHeartbeatInterval = TimeSpan.FromMinutes(5);
 
@@ -82,6 +98,7 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
             AllowSynchronousContinuations = false
         });
     private readonly Func<string, CancellationToken, Task<AgentTurnResult>> _runTurn;
+    private readonly Func<GenerationBatchDispatchRequest, CancellationToken, Task>? _prepareBatch;
     private readonly IGenerationTaskStore? _taskStore;
     private readonly IImageDeliveryPreflight? _imageDeliveryPreflight;
     private readonly TimeSpan _claimHeartbeatInterval;
@@ -97,9 +114,11 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
         IGenerationTaskStore? taskStore = null,
         IImageDeliveryPreflight? imageDeliveryPreflight = null,
         TimeSpan? claimHeartbeatInterval = null,
-        Func<TimeSpan, CancellationToken, Task>? heartbeatDelay = null)
+        Func<TimeSpan, CancellationToken, Task>? heartbeatDelay = null,
+        Func<GenerationBatchDispatchRequest, CancellationToken, Task>? prepareBatch = null)
     {
         _runTurn = runTurn ?? throw new ArgumentNullException(nameof(runTurn));
+        _prepareBatch = prepareBatch;
         _taskStore = taskStore;
         _imageDeliveryPreflight = imageDeliveryPreflight;
         _claimHeartbeatInterval = claimHeartbeatInterval ?? DefaultClaimHeartbeatInterval;
@@ -118,9 +137,11 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
 
     public event EventHandler<GenerationBatchDispatchProgressChangedEventArgs>? DispatchProgressChanged;
 
-    public bool TryEnqueue(string batchId, IReadOnlyList<string> taskIds, bool isRetry)
+    public GenerationBatchDispatchEnqueueResult TryEnqueue(
+        string batchId,
+        IReadOnlyList<string> taskIds,
+        bool isRetry)
     {
-        ObjectDisposedException.ThrowIf(Volatile.Read(ref _disposed) != 0, this);
         ArgumentException.ThrowIfNullOrWhiteSpace(batchId);
         ArgumentNullException.ThrowIfNull(taskIds);
         var normalizedTaskIds = taskIds
@@ -134,21 +155,31 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
         }
 
         var normalizedBatchId = batchId.Trim();
+        if (Volatile.Read(ref _disposed) != 0)
+        {
+            return GenerationBatchDispatchEnqueueResult.QueueStopped;
+        }
+
         lock (_scheduledBatchLock)
         {
+            if (Volatile.Read(ref _disposed) != 0)
+            {
+                return GenerationBatchDispatchEnqueueResult.QueueStopped;
+            }
+
             if (!_scheduledBatchIds.Add(normalizedBatchId))
             {
-                return true;
+                return GenerationBatchDispatchEnqueueResult.AlreadyScheduled;
             }
 
             if (_requests.Writer.TryWrite(
                     new GenerationBatchDispatchRequest(normalizedBatchId, normalizedTaskIds, isRetry)))
             {
-                return true;
+                return GenerationBatchDispatchEnqueueResult.Enqueued;
             }
 
             _scheduledBatchIds.Remove(normalizedBatchId);
-            return false;
+            return GenerationBatchDispatchEnqueueResult.QueueStopped;
         }
     }
 
@@ -189,6 +220,10 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
         AgentTurnResult? result = null;
         string? failureMessage = null;
         GenerationBatchDispatchProgressSnapshot? lastProgress = null;
+        long? activeTurnStartedTimestamp = null;
+        int? activeChunkIndex = null;
+        int? activeChunkCount = null;
+        int? activeChunkTaskCount = null;
         try
         {
             var preflight = ImageDeliveryPreflightResult.NotChecked;
@@ -219,47 +254,112 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
                 }
             }
 
-            lastProgress = ReportProgress(
-                request,
-                GenerationBatchDispatchStage.BuildingAgentInstruction,
-                BuildingInstructionProgress,
-                "GenerationAgentPromptBuilder.Build(taskIds)",
-                !preflightPerformed
-                    ? $"正在为 {request.TaskIds.Count} 个任务构建 Agent 批次指令。"
-                    : $"{preflight.StatusText} 正在为 {request.TaskIds.Count} 个任务构建 Agent 批次指令。");
-            var prompt = preflightPerformed
-                ? GenerationAgentPromptBuilder.Build(request.TaskIds, preflight)
-                : GenerationAgentPromptBuilder.Build(request.TaskIds);
-            lastProgress = ReportProgress(
-                request,
-                GenerationBatchDispatchStage.StartingAgentTurn,
-                StartingTurnProgress,
-                "AgentConnection.RunTurnAsync(prompt)",
-                "正在把批次指令提交到当前 Agent 会话。");
-            using var turnCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            var turnTask = _runTurn(prompt, turnCancellation.Token);
-            lastProgress = ReportProgress(
-                request,
-                GenerationBatchDispatchStage.WaitingForTaskClaim,
-                WaitingForClaimProgress,
-                "gasset_forge.claim_generation_task(taskId)",
-                "Agent Turn 已提交，等待任务通过 MCP 被认领。");
-            result = await AwaitTurnWithClaimHeartbeatAsync(
-                    request,
-                    turnTask,
-                    turnCancellation,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            if (!result.IsSuccess)
+            var chunks = request.TaskIds
+                .Chunk(MaximumTasksPerTurn)
+                .Select(chunk => (IReadOnlyList<string>)chunk)
+                .ToArray();
+            if (_prepareBatch is not null)
             {
+                lastProgress = ReportProgress(
+                    request,
+                    GenerationBatchDispatchStage.BuildingAgentInstruction,
+                    42d,
+                    "AgentConnection.PrepareGenerationBatchAsync(batchId)",
+                    $"正在为本批次准备独立 Agent thread；随后 {chunks.Length} 个 Turn 分块将共用该 thread。");
+                await _prepareBatch(request, cancellationToken).ConfigureAwait(false);
+            }
+
+            var chunkProgressSpan =
+                (WaitingForClaimProgress - BuildingInstructionProgress) / chunks.Length;
+            for (var chunkIndex = 0; chunkIndex < chunks.Length; chunkIndex++)
+            {
+                var chunkTaskIds = chunks[chunkIndex];
+                var chunkRequest = request with { TaskIds = chunkTaskIds };
+                var chunkNumber = chunkIndex + 1;
+                var buildingProgress = BuildingInstructionProgress + chunkProgressSpan * chunkIndex;
+                var startingProgress = buildingProgress + chunkProgressSpan * 0.5d;
+                var waitingProgress = buildingProgress + chunkProgressSpan;
+                var chunkLabel = $"Turn 分块 {chunkNumber}/{chunks.Length} · {chunkTaskIds.Count} 个任务";
+
+                lastProgress = ReportProgress(
+                    chunkRequest,
+                    GenerationBatchDispatchStage.BuildingAgentInstruction,
+                    buildingProgress,
+                    "GenerationAgentPromptBuilder.Build(chunkTaskIds)",
+                    !preflightPerformed
+                        ? $"正在构建 {chunkLabel} 的 Agent 指令。"
+                        : $"{preflight.StatusText} 正在构建 {chunkLabel} 的 Agent 指令。");
+                var prompt = preflightPerformed
+                    ? GenerationAgentPromptBuilder.Build(chunkTaskIds, preflight)
+                    : GenerationAgentPromptBuilder.Build(chunkTaskIds);
+                lastProgress = ReportProgress(
+                    chunkRequest,
+                    GenerationBatchDispatchStage.StartingAgentTurn,
+                    startingProgress,
+                    "AgentConnection.RunTurnAsync(prompt)",
+                    $"正在提交 {chunkLabel}；本批后续分块会等待当前 Turn 收束后再启动。");
+                using var turnCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+                activeTurnStartedTimestamp = Stopwatch.GetTimestamp();
+                activeChunkIndex = chunkNumber;
+                activeChunkCount = chunks.Length;
+                activeChunkTaskCount = chunkTaskIds.Count;
+                var turnTask = _runTurn(prompt, turnCancellation.Token);
+                lastProgress = ReportProgress(
+                    chunkRequest,
+                    GenerationBatchDispatchStage.WaitingForTaskClaim,
+                    waitingProgress,
+                    "gasset_forge.claim_generation_task(taskId)",
+                    $"{chunkLabel} 已提交，等待这些任务通过 MCP 被认领。");
+                result = await AwaitTurnWithClaimHeartbeatAsync(
+                        chunkRequest,
+                        turnTask,
+                        turnCancellation,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                var turnElapsedMilliseconds = (long)Stopwatch
+                    .GetElapsedTime(activeTurnStartedTimestamp.Value)
+                    .TotalMilliseconds;
+                if (result.IsSuccess)
+                {
+                    lastProgress = ReportProgress(
+                        chunkRequest,
+                        GenerationBatchDispatchStage.WaitingForTaskClaim,
+                        waitingProgress,
+                        "AgentConnection.RunTurnAsync(prompt) completed",
+                        $"{chunkLabel} 已在 {turnElapsedMilliseconds} ms 后结束；" +
+                        "最终产物状态继续以 MCP 任务库和本地文件为准。",
+                        chunkIndex: chunkNumber,
+                        chunkCount: chunks.Length,
+                        chunkTaskCount: chunkTaskIds.Count,
+                        elapsedMilliseconds: turnElapsedMilliseconds);
+                    activeTurnStartedTimestamp = null;
+                    continue;
+                }
+
                 failureMessage = string.IsNullOrWhiteSpace(result.ErrorMessage)
                     ? $"Agent Turn 结束状态为 {result.Status}。"
                     : result.ErrorMessage;
+                var failure = AgentTurnFailureClassifier.Classify(result, failureMessage);
+                var terminalStage = failure?.PreservePendingTasks == true
+                    ? GenerationBatchDispatchStage.Interrupted
+                    : GenerationBatchDispatchStage.Failed;
+                var terminalDetail = terminalStage == GenerationBatchDispatchStage.Interrupted
+                    ? $"{chunkLabel} 的上游模型响应流中断，后续分块未启动；" +
+                      $"原任务保持 Pending；Turn 用时 {turnElapsedMilliseconds} ms；" +
+                      $"response.completed=否。{failureMessage}"
+                    : $"{chunkLabel} 执行失败，后续分块未启动；" +
+                      $"Turn 用时 {turnElapsedMilliseconds} ms：{failureMessage}";
                 ReportTerminalProgress(
-                    request,
-                    GenerationBatchDispatchStage.Failed,
+                    chunkRequest,
+                    terminalStage,
                     lastProgress,
-                    failureMessage);
+                    terminalDetail,
+                    turnElapsedMilliseconds,
+                    chunkNumber,
+                    chunks.Length,
+                    chunkTaskIds.Count,
+                    failure?.Code);
+                break;
             }
         }
         catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
@@ -274,11 +374,22 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
         catch (Exception exception)
         {
             failureMessage = exception.Message;
+            var failure = AgentTurnFailureClassifier.Classify(null, failureMessage);
+            long? elapsedMilliseconds = activeTurnStartedTimestamp is { } startedTimestamp
+                ? (long)Stopwatch.GetElapsedTime(startedTimestamp).TotalMilliseconds
+                : null;
             ReportTerminalProgress(
                 request,
-                GenerationBatchDispatchStage.Failed,
+                failure?.PreservePendingTasks == true
+                    ? GenerationBatchDispatchStage.Interrupted
+                    : GenerationBatchDispatchStage.Failed,
                 lastProgress,
-                failureMessage);
+                failureMessage,
+                elapsedMilliseconds,
+                activeChunkIndex,
+                activeChunkCount,
+                activeChunkTaskCount,
+                failure?.Code);
         }
 
         DispatchCompleted?.Invoke(
@@ -535,7 +646,12 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
         string instruction,
         string detail,
         GenerationBatchDispatchStage? failureStage = null,
-        string? failureMessage = null)
+        string? failureMessage = null,
+        int? chunkIndex = null,
+        int? chunkCount = null,
+        int? chunkTaskCount = null,
+        long? elapsedMilliseconds = null,
+        string? failureCode = null)
     {
         var snapshot = new GenerationBatchDispatchProgressSnapshot(
             request,
@@ -544,7 +660,12 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
             instruction,
             detail,
             failureStage,
-            failureMessage);
+            failureMessage,
+            chunkIndex,
+            chunkCount,
+            chunkTaskCount,
+            elapsedMilliseconds,
+            failureCode);
         DispatchProgressChanged?.Invoke(
             this,
             new GenerationBatchDispatchProgressChangedEventArgs(snapshot));
@@ -555,7 +676,12 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
         GenerationBatchDispatchRequest request,
         GenerationBatchDispatchStage terminalStage,
         GenerationBatchDispatchProgressSnapshot? lastProgress,
-        string detail)
+        string detail,
+        long? elapsedMilliseconds = null,
+        int? chunkIndex = null,
+        int? chunkCount = null,
+        int? chunkTaskCount = null,
+        string? failureCode = null)
     {
         var failureStage = lastProgress?.Stage ?? GenerationBatchDispatchStage.BuildingAgentInstruction;
         ReportProgress(
@@ -564,8 +690,19 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
             lastProgress?.ProgressPercentage ?? BuildingInstructionProgress,
             lastProgress?.Instruction ?? "GenerationAgentPromptBuilder.Build(taskIds)",
             detail,
-            terminalStage == GenerationBatchDispatchStage.Failed ? failureStage : null,
-            terminalStage == GenerationBatchDispatchStage.Failed ? detail : null);
+            terminalStage is GenerationBatchDispatchStage.Failed or
+                GenerationBatchDispatchStage.Interrupted
+                ? failureStage
+                : null,
+            terminalStage is GenerationBatchDispatchStage.Failed or
+                GenerationBatchDispatchStage.Interrupted
+                ? detail
+                : null,
+            chunkIndex,
+            chunkCount,
+            chunkTaskCount,
+            elapsedMilliseconds,
+            failureCode);
     }
 
     public async ValueTask DisposeAsync()

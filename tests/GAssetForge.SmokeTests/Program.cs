@@ -159,7 +159,7 @@ internal static class Program
             GenerationBatchDispatchCoordinatorSmokeTests.RunAllAsync().GetAwaiter().GetResult();
             Console.WriteLine("PASS  素材批次通过单消费者队列串行派发 Agent Turn，失败不触发隐式重试");
             GenerationBatchTurnReconcilerSmokeTests.RunAllAsync().GetAwaiter().GetResult();
-            Console.WriteLine("PASS  Agent Turn 结束后批次任务可收束为明确终态且保留在途认领");
+            Console.WriteLine("PASS  Agent Turn 结束后仅按持久化真相收束，未认领与断流任务保持 Pending");
             CodexManualFallbackPromptSmokeTests.Run();
             Console.WriteLine("PASS  Codex 人工兜底提示自包含连接与批次闭环且不泄露令牌");
             DirectToolInvocationSmokeTests.RunAllAsync().GetAwaiter().GetResult();

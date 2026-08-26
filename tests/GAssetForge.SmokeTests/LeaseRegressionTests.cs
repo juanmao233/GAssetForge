@@ -235,7 +235,8 @@ internal static class LeaseRegressionTests
                              heartbeatDelay: heartbeatGate.WaitAsync))
             {
                 coordinator.DispatchCompleted += (_, eventArgs) => dispatchCompleted.TrySetResult(eventArgs);
-                Equal(true, coordinator.TryEnqueue("batch-heartbeat", [activeTask.Id], isRetry: false),
+                Equal(GenerationBatchDispatchEnqueueResult.Enqueued,
+                    coordinator.TryEnqueue("batch-heartbeat", [activeTask.Id], isRetry: false),
                     "长任务批次必须进入调度队列");
                 var initialClaim = await turnClaimed.Task.WaitAsync(TimeSpan.FromSeconds(3));
 
@@ -285,7 +286,8 @@ internal static class LeaseRegressionTests
             {
                 coordinator.DispatchCompleted += (_, eventArgs) =>
                     abandonedDispatchCompleted.TrySetResult(eventArgs);
-                Equal(true, coordinator.TryEnqueue("batch-ended", [abandonedTask.Id], isRetry: false),
+                Equal(GenerationBatchDispatchEnqueueResult.Enqueued,
+                    coordinator.TryEnqueue("batch-ended", [abandonedTask.Id], isRetry: false),
                     "结束续租测试批次必须进入调度队列");
                 await abandonedDispatchCompleted.Task.WaitAsync(TimeSpan.FromSeconds(3));
             }

@@ -9,7 +9,7 @@ Server。桌面端同时管理 Codex Agent Runtime：首选通过 Codex App Serv
 | 状态 | 所属组件 | 持久性与用途 |
 | --- | --- | --- |
 | Agent thread | Codex App Server / Codex CLI | `threadId` 与工作目录成对保存，用于恢复同一项目的对话上下文 |
-| Agent Turn | Codex Runtime | 一次批次发布对应一次串行执行，可完成、失败或中断 |
+| Agent Turn | Codex Runtime | 一个批次按最多五项拆成若干串行 Turn，可完成、失败或中断 |
 | 生成任务 | 本地 `JsonGenerationTaskStore` | 持久化批次队列；独立于 Agent 进程和 MCP 协议会话 |
 | MCP 协议会话 | `GAssetForge.McpServer` | 临时工具连接；HTTP 会话有活动 TTL，不保存 Agent 对话 |
 
@@ -187,10 +187,11 @@ codex exec resume --json ... <threadId> -
 - 可恢复失败会创建新任务、新批次、新 Run 和新交付路径，旧失败记录及中间产物保留用于审计，不覆盖上一轮。
 - 发布前由软件创建项目内 Run、最终分类目录、manifest、提示文件和固定交付路径；Agent 无需判断目录结构。
 
-批次落盘并更新 UI 后，Shell 根据任务 ID 构造 Agent prompt，并把发布请求交给 Codex Runtime。Turn 串行
-执行，避免多个批次同时争用一个 thread。若 Runtime 尚未接入、Turn 启动失败或 Agent 进程中断，分发状态
-会记录错误，但本地任务仍保持 `Pending`，可在恢复连接后重试。MCP Server 继续从同一队列读取任务，不依赖
-某个瞬时 HTTP MCP 会话一直在线。
+批次落盘并更新 UI 后，Shell 为该批次创建独立 Codex thread，再按稳定顺序把任务切成最多五项的 Turn 分块。
+同一批次的分块共享 thread 且严格串行；任一分块中断后不再启动后续分块，因此一次上游故障最多直接影响当前
+五项。若 Runtime 尚未接入、Turn 启动失败或 Responses/SSE 在 `response.completed` 前断开，分发状态记录为
+`Interrupted`，未被 MCP 认领的原任务仍保持 `Pending`，不会创建替代 task、Run 或产物路径。MCP Server 继续
+从同一队列读取任务，不依赖某个瞬时 HTTP MCP 会话一直在线。
 
 ### Codex 人工接力
 
@@ -537,7 +538,9 @@ task；每个后继使用新的 batch ID、Run、manifest、模型路径和最�
 
 新任务把应用内派发选择冻结为 `dispatchIntent`。仅 `requested=true` 的 Pending 批次会在 GAssetForge 重启、
 项目切换或 Agent 恢复 Ready 后自动续派；恢复始终复用原 batch/task ID 和冻结路径，并可从任务合同补齐缺失的
-Run 目录、prompt 与 manifest。调度器按 batch ID 进程内去重，因此正常发布通知与恢复扫描不会启动两个 Turn。
+Run 目录、prompt 与 manifest。调度器按 batch ID 进程内去重，并区分 `Enqueued`、`AlreadyScheduled` 与
+`QueueStopped`；只有真实新入队才记录一次恢复日志。恢复扫描只在 Agent 连接发生 false→true 变化时触发，
+普通 `/health` 轮询和 thread 书签更新不会重复扫描同一 Pending 批次。
 `requested=false` 的本地队列和人工接力任务只等待用户明确操作。
 
 如果自动重做在 child 入库前因权限、目录或 Run 准备问题失败，任务会持久化
@@ -545,10 +548,11 @@ Run 目录、prompt 与 manifest。调度器按 batch ID 进程内去重，因�
 中”，而是开放“重新生成该项”或手动批次入口。若 child 已经原子入库但后续 manifest/通知失败，则不回滚或
 覆盖 child；恢复器会继续显示、修复并派发同一个 Pending child。
 
-只有标记为可恢复的失败才进入自动重做。当前明确包括上述几何错误、Agent Turn 未认领/未完成，以及带
+只有 MCP/Harness 已明确持久化并标记为可恢复的产物失败才进入自动重做。当前明确包括上述几何错误，以及带
 timeout、socket、connection、HTTP 429/5xx 或 temporarily unavailable 证据的临时
 `image_delivery_fallback_failed`。认证或凭据缺失、路径权限、冻结合同损坏等需要人工介入的问题应使用
-`retryable=false`。没有重试谱系的历史任务不会因升级自动进入重做；额度耗尽后，界面保留本轮产物并提供
+`retryable=false`。`agent_transport_*` 与历史 `agent_turn_incomplete` 属于调度基础设施状态，即使旧记录曾
+错误保存 `FailureRetryable=true`，也不得创建自动重做 child。没有重试谱系的历史任务不会因升级自动进入重做；额度耗尽后，界面保留本轮产物并提供
 “重新生成该项”入口。
 
 ### 背景剔除生成契约
@@ -679,6 +683,11 @@ timeout、socket、connection、HTTP 429/5xx 或 temporarily unavailable 证据�
 Workbench 结构化上下文可包含 `runId`、`batchId`、`taskId`、`outputIndex`、Agent thread/Turn/item、`stage`、
 `status`、耗时、期望/观察路径和错误码。Reasoning 流不会逐条持久化；Agent 最终消息、工具、命令、item、
 Turn 和错误事件会持久化，并执行敏感值脱敏。
+
+批次调度日志还记录当前 Turn 分块序号/总数、分块任务数和 `elapsedMilliseconds`。Responses 流中断时使用
+`failureCode=agent_transport_stream_disconnected`、`status=interrupted`，详情明确标记
+`response.completed=否` 并保留上游安全摘要。Provider 与模型名称只有在 Codex Runtime 真实提供结构化字段时
+才记录，桌面端不会从自定义网关地址猜测或输出凭据。
 
 Run timeline 是 append-only、best-effort JSONL。稳定阶段为：
 

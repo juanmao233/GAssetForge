@@ -170,6 +170,7 @@ public sealed class PublishedGenerationTaskViewModel : ObservableObject
         !IsSuperseded &&
         !IsAutomaticRetryBlocked &&
         _task.FailureRetryable == true &&
+        !GenerationFailureClassifier.IsAgentInfrastructureFailureCode(_task.FailureCode) &&
         _task.RetryLineage is { } lineage &&
         lineage.AttemptNumber < lineage.MaxAttempts;
 

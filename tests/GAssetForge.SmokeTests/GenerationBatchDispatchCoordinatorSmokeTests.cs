@@ -1,5 +1,6 @@
 using GAssetForge.App.Services;
 using GAssetForge.App.Services.AgentRuntime;
+using GAssetForge.App.ViewModels;
 using GAssetForge.Core.Generation;
 using System.IO;
 
@@ -12,11 +13,90 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
         AgentPromptDelegatesOnlyImageGenerationAndSingleOutputSubmission();
         RecommendedSourcePathCannotEscapeFrozenAssetRoot();
         RecommendedSourcePathRejectsReparsePointAncestors();
+        PendingRecoveryOnlyRunsOnConnectedRisingEdge();
+        await EnqueueResultsDistinguishNewDuplicateAndStoppedCoordinatorAsync();
         await DispatchProgressIsMonotonicAndSerializedAsync();
         await LegacyTaskSkipsNewImageDeliveryPreflightAsync();
         await PublishedBatchesRunAsSerializedTurnsAsync();
+        await LargeBatchUsesFiveFiveTwoTurnsWithSinglePreparationAsync();
+        await FailedChunkStopsLaterTurnsAsync();
         await DispatchFailuresAreReportedWithoutRetryLoopsAsync();
         await ActiveDispatchReportsCanceledWhenCoordinatorStopsAsync();
+    }
+
+    private static void PendingRecoveryOnlyRunsOnConnectedRisingEdge()
+    {
+        var wasConnected = false;
+        False(
+            ShellViewModel.ShouldRecoverPendingDispatches(
+                ref wasConnected,
+                propertyName: null,
+                isConnected: true),
+            "空 PropertyChanged 通知不得触发 Pending 恢复扫描");
+        False(wasConnected,
+            "非 IsConnected 通知不得改写连接边沿状态");
+        True(
+            ShellViewModel.ShouldRecoverPendingDispatches(
+                ref wasConnected,
+                nameof(AgentConnectionViewModel.IsConnected),
+                isConnected: true),
+            "首次 false→true 必须触发一次 Pending 恢复扫描");
+        False(
+            ShellViewModel.ShouldRecoverPendingDispatches(
+                ref wasConnected,
+                nameof(AgentConnectionViewModel.IsConnected),
+                isConnected: true),
+            "每秒重复的 IsConnected=true 通知不得重复扫描持久化批次");
+        False(
+            ShellViewModel.ShouldRecoverPendingDispatches(
+                ref wasConnected,
+                nameof(AgentConnectionViewModel.IsConnected),
+                isConnected: false),
+            "true→false 只更新边沿状态，不应在断线时恢复调度");
+        True(
+            ShellViewModel.ShouldRecoverPendingDispatches(
+                ref wasConnected,
+                nameof(AgentConnectionViewModel.IsConnected),
+                isConnected: true),
+            "重新连接后的下一次 false→true 应允许恢复原 Pending 任务");
+    }
+
+    private static async Task EnqueueResultsDistinguishNewDuplicateAndStoppedCoordinatorAsync()
+    {
+        var turnStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var coordinator = new GenerationBatchDispatchCoordinator(
+            async (_, cancellationToken) =>
+            {
+                turnStarted.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                return new AgentTurnResult(
+                    ThreadId: null,
+                    TurnId: null,
+                    Status: "completed",
+                    ErrorMessage: null);
+            });
+        try
+        {
+            Equal(
+                GenerationBatchDispatchEnqueueResult.Enqueued,
+                coordinator.TryEnqueue("pending-recovery", ["task-a"], isRetry: false),
+                "首次 Pending 恢复扫描应真实进入调度队列");
+            Equal(
+                GenerationBatchDispatchEnqueueResult.AlreadyScheduled,
+                coordinator.TryEnqueue("pending-recovery", ["task-a-duplicate"], isRetry: false),
+                "同一 Pending 批次重复扫描应明确报告已在调度生命周期内");
+            await turnStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            await coordinator.DisposeAsync();
+            Equal(
+                GenerationBatchDispatchEnqueueResult.QueueStopped,
+                coordinator.TryEnqueue("after-stop", ["task-b"], isRetry: false),
+                "协调器停止后应返回 QueueStopped 而不是抛出或伪装成幂等成功");
+        }
+        finally
+        {
+            await coordinator.DisposeAsync();
+        }
     }
 
     private static async Task LegacyTaskSkipsNewImageDeliveryPreflightAsync()
@@ -66,7 +146,8 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
                 preflight);
             coordinator.DispatchCompleted += (_, eventArgs) => completion.TrySetResult(eventArgs);
 
-            True(coordinator.TryEnqueue("legacy-batch", [task.Id], isRetry: false),
+            Equal(GenerationBatchDispatchEnqueueResult.Enqueued,
+                coordinator.TryEnqueue("legacy-batch", [task.Id], isRetry: false),
                 "旧任务应能进入自动调度队列");
             var completed = await completion.Task.WaitAsync(TimeSpan.FromSeconds(3));
 
@@ -293,9 +374,11 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
             }
         };
 
-        True(coordinator.TryEnqueue("batch-progress-a", ["task-a"], isRetry: false),
+        Equal(GenerationBatchDispatchEnqueueResult.Enqueued,
+            coordinator.TryEnqueue("batch-progress-a", ["task-a"], isRetry: false),
             "第一进度批次应进入调度队列");
-        True(coordinator.TryEnqueue("batch-progress-b", ["task-b"], isRetry: false),
+        Equal(GenerationBatchDispatchEnqueueResult.Enqueued,
+            coordinator.TryEnqueue("batch-progress-b", ["task-b"], isRetry: false),
             "第二进度批次应进入调度队列");
         await allCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
 
@@ -309,12 +392,13 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
         {
             GenerationBatchDispatchStage.BuildingAgentInstruction,
             GenerationBatchDispatchStage.StartingAgentTurn,
+            GenerationBatchDispatchStage.WaitingForTaskClaim,
             GenerationBatchDispatchStage.WaitingForTaskClaim
         };
-        Equal(6, snapshots.Length, "两个批次应各报告三个结构化调度阶段");
+        Equal(8, snapshots.Length, "两个批次应各报告提交、等待与 Turn 用时四个结构化阶段");
         Equal(
-            "batch-progress-a,batch-progress-a,batch-progress-a," +
-            "batch-progress-b,batch-progress-b,batch-progress-b",
+            "batch-progress-a,batch-progress-a,batch-progress-a,batch-progress-a," +
+            "batch-progress-b,batch-progress-b,batch-progress-b,batch-progress-b",
             string.Join(',', snapshots.Select(snapshot => snapshot.Request.BatchId)),
             "串行调度时后一批次不得与前一批次的阶段交错");
         foreach (var batchId in new[] { "batch-progress-a", "batch-progress-b" })
@@ -330,6 +414,8 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
                     (current, next) => current.ProgressPercentage <= next.ProgressPercentage)
                 .All(isMonotonic => isMonotonic),
                 $"批次 {batchId} 的进度百分比必须单调不减");
+            True(batchSnapshots.Last().ElapsedMilliseconds is >= 0,
+                $"批次 {batchId} 的 Turn 完成快照必须记录持续时间");
             True(batchSnapshots.All(snapshot =>
                     snapshot.ProgressPercentage is >= 0d and <= 100d &&
                     !string.IsNullOrWhiteSpace(snapshot.Instruction) &&
@@ -383,18 +469,22 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
             }
         };
 
-        True(coordinator.TryEnqueue("batch-1", ["task-a"], isRetry: false),
+        Equal(GenerationBatchDispatchEnqueueResult.Enqueued,
+            coordinator.TryEnqueue("batch-1", ["task-a"], isRetry: false),
             "第一批次应进入 Agent 调度队列");
-        True(coordinator.TryEnqueue("batch-1", ["task-a-duplicate"], isRetry: false),
+        Equal(GenerationBatchDispatchEnqueueResult.AlreadyScheduled,
+            coordinator.TryEnqueue("batch-1", ["task-a-duplicate"], isRetry: false),
             "相同 batchId 的恢复入队应幂等成功而不是创建第二个 Turn");
-        True(coordinator.TryEnqueue("batch-2", ["task-b", "task-c"], isRetry: false),
+        Equal(GenerationBatchDispatchEnqueueResult.Enqueued,
+            coordinator.TryEnqueue("batch-2", ["task-b", "task-c"], isRetry: false),
             "第二批次应进入 Agent 调度队列");
-        True(coordinator.TryEnqueue("batch-3", ["task-d"], isRetry: true),
+        Equal(GenerationBatchDispatchEnqueueResult.Enqueued,
+            coordinator.TryEnqueue("batch-3", ["task-d"], isRetry: true),
             "重试批次应进入 Agent 调度队列");
 
         await allCompleted.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Equal(1, maximumConcurrentTurns, "同一 Agent 会话的批次 Turn 必须严格串行");
-        Equal(3, prompts.Count, "每个已发布批次应生成一个 Agent Turn prompt");
+        Equal(3, prompts.Count, "三个不超过五项的小批次应各生成一个 Agent Turn prompt");
         False(prompts.Any(prompt => prompt.Contains("task-a-duplicate", StringComparison.Ordinal)),
             "正常发布与恢复扫描并发时不得重复派发同一批次");
         True(prompts[0].Contains("task-a", StringComparison.Ordinal),
@@ -419,11 +509,130 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
             }
         };
         coordinator.ReleaseBatch("batch-1");
-        True(coordinator.TryEnqueue("batch-1", ["task-a-recovered"], isRetry: false),
+        Equal(GenerationBatchDispatchEnqueueResult.Enqueued,
+            coordinator.TryEnqueue("batch-1", ["task-a-recovered"], isRetry: false),
             "状态收束失败后释放 batch 生命周期应允许同一 Pending 批次再次派发");
         await recoveredCompletion.Task.WaitAsync(TimeSpan.FromSeconds(5));
         Equal(4, prompts.Count,
             "释放已完成调度生命周期后，恢复扫描应能为仍 Pending 的同一批次再启动一次 Turn");
+    }
+
+    private static async Task LargeBatchUsesFiveFiveTwoTurnsWithSinglePreparationAsync()
+    {
+        var taskIds = Enumerable.Range(1, 12)
+            .Select(index => $"chunk-success-task-{index:D2}")
+            .ToArray();
+        var prompts = new List<string>();
+        var prepareCount = 0;
+        var completion = new TaskCompletionSource<GenerationBatchDispatchCompletedEventArgs>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var coordinator = new GenerationBatchDispatchCoordinator(
+            (prompt, _) =>
+            {
+                prompts.Add(prompt);
+                return Task.FromResult(new AgentTurnResult(
+                    ThreadId: "thread-chunk-success",
+                    TurnId: $"turn-chunk-success-{prompts.Count}",
+                    Status: "completed",
+                    ErrorMessage: null));
+            },
+            prepareBatch: (request, _) =>
+            {
+                Interlocked.Increment(ref prepareCount);
+                Equal("batch-chunk-success", request.BatchId,
+                    "批次准备 seam 必须收到稳定 batchId");
+                Equal(string.Join(',', taskIds), string.Join(',', request.TaskIds),
+                    "批次准备 seam 应只调用一次并接收完整有序任务列表");
+                return Task.CompletedTask;
+            });
+        coordinator.DispatchCompleted += (_, eventArgs) => completion.TrySetResult(eventArgs);
+
+        Equal(
+            GenerationBatchDispatchEnqueueResult.Enqueued,
+            coordinator.TryEnqueue("batch-chunk-success", taskIds, isRetry: false),
+            "12 项批次应进入分块调度队列");
+        var completed = await completion.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        True(
+            completed.IsSuccess,
+            $"三个 Turn 分块全部成功时批次调度应成功：{completed.FailureMessage ?? completed.Result?.Status}");
+        Equal(1, prepareCount, "同一批次的所有 Turn 分块必须只准备一次 Agent thread");
+        Equal(3, prompts.Count, "12 项应固定拆成 5/5/2 三个串行 Turn");
+        Equal(
+            "5,5,2",
+            string.Join(',', prompts.Select(prompt => ReadPromptTaskIds(prompt).Length)),
+            "固定 Turn 分块大小");
+        Equal(
+            string.Join(',', taskIds),
+            string.Join(',', prompts.SelectMany(ReadPromptTaskIds)),
+            "分块不得遗漏、重复或改变原批次任务顺序");
+        True(prompts.All(prompt =>
+                ReadPromptTaskIds(prompt).Length <=
+                GenerationBatchDispatchCoordinator.MaximumTasksPerTurn),
+            "任何 Agent Turn 都不得超过固定五项上限");
+    }
+
+    private static async Task FailedChunkStopsLaterTurnsAsync()
+    {
+        var taskIds = Enumerable.Range(1, 12)
+            .Select(index => $"chunk-failure-task-{index:D2}")
+            .ToArray();
+        var prompts = new List<string>();
+        var progress = new List<GenerationBatchDispatchProgressSnapshot>();
+        var prepareCount = 0;
+        var completion = new TaskCompletionSource<GenerationBatchDispatchCompletedEventArgs>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var coordinator = new GenerationBatchDispatchCoordinator(
+            (prompt, _) =>
+            {
+                prompts.Add(prompt);
+                var turnNumber = prompts.Count;
+                return Task.FromResult(new AgentTurnResult(
+                    ThreadId: "thread-chunk-failure",
+                    TurnId: $"turn-chunk-failure-{turnNumber}",
+                    Status: turnNumber == 2 ? "failed" : "completed",
+                    ErrorMessage: turnNumber == 2
+                        ? "stream closed before response.completed"
+                        : null));
+            },
+            prepareBatch: (_, _) =>
+            {
+                Interlocked.Increment(ref prepareCount);
+                return Task.CompletedTask;
+            });
+        coordinator.DispatchProgressChanged += (_, eventArgs) => progress.Add(eventArgs.Snapshot);
+        coordinator.DispatchCompleted += (_, eventArgs) => completion.TrySetResult(eventArgs);
+
+        Equal(
+            GenerationBatchDispatchEnqueueResult.Enqueued,
+            coordinator.TryEnqueue("batch-chunk-failure", taskIds, isRetry: false),
+            "失败分块场景应进入调度队列");
+        var completed = await completion.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        False(completed.IsSuccess, "第二个 Turn 断流必须让本次批次派发报告失败");
+        Equal(1, prepareCount, "Turn 断流不得为同一批次重复准备 thread");
+        Equal(2, prompts.Count, "第二个 Turn 失败后不得启动包含最后两项的第三个 Turn");
+        Equal(
+            string.Join(',', taskIds.Take(10)),
+            string.Join(',', prompts.SelectMany(ReadPromptTaskIds)),
+            "断流前只允许派发前两个五项分块");
+        True(completed.FailureMessage?.Contains(
+                "stream closed before response.completed",
+                StringComparison.Ordinal) == true,
+            "分块失败结果必须保留上游 Responses 流诊断");
+        Equal(GenerationBatchDispatchStage.Interrupted, progress.Last().Stage,
+            "Responses 流中断应显示 Interrupted，而不是美术生成 Failed");
+        Equal<int?>(2, progress.Last().ChunkIndex,
+            "中断诊断必须记录失败 Turn 分块序号");
+        Equal<int?>(3, progress.Last().ChunkCount,
+            "中断诊断必须记录批次 Turn 分块总数");
+        Equal<int?>(5, progress.Last().ChunkTaskCount,
+            "中断诊断必须记录当前分块任务数");
+        True(progress.Last().ElapsedMilliseconds is >= 0,
+            "中断诊断必须记录 Turn 持续时间");
+        Equal(AgentTurnFailureClassifier.TransportStreamDisconnectedCode,
+            progress.Last().FailureCode,
+            "中断诊断必须暴露稳定传输错误码");
     }
 
     private static async Task DispatchFailuresAreReportedWithoutRetryLoopsAsync()
@@ -440,7 +649,8 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
         coordinator.DispatchProgressChanged += (_, eventArgs) => progress.Add(eventArgs.Snapshot);
         coordinator.DispatchCompleted += (_, eventArgs) => completion.TrySetResult(eventArgs);
 
-        True(coordinator.TryEnqueue("batch-failure", ["task-pending"], isRetry: false),
+        Equal(GenerationBatchDispatchEnqueueResult.Enqueued,
+            coordinator.TryEnqueue("batch-failure", ["task-pending"], isRetry: false),
             "失败场景批次仍应先进入调度队列");
         var result = await completion.Task.WaitAsync(TimeSpan.FromSeconds(3));
         False(result.IsSuccess, "Transport 异常必须报告调度失败");
@@ -490,7 +700,8 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
             };
             coordinator.DispatchCompleted += (_, _) => Interlocked.Increment(ref completionCount);
 
-            True(coordinator.TryEnqueue("batch-canceled", ["task-canceled"], isRetry: false),
+            Equal(GenerationBatchDispatchEnqueueResult.Enqueued,
+                coordinator.TryEnqueue("batch-canceled", ["task-canceled"], isRetry: false),
                 "取消场景批次应进入调度队列");
             await waitingForClaim.Task.WaitAsync(TimeSpan.FromSeconds(3));
             await coordinator.DisposeAsync();
@@ -525,6 +736,12 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
             }
         }
     }
+
+    private static string[] ReadPromptTaskIds(string prompt) => prompt
+        .Split('\n', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+        .Where(line => line.StartsWith("- ", StringComparison.Ordinal))
+        .Select(line => line[2..].Trim())
+        .ToArray();
 
     private static void True(bool condition, string message)
     {

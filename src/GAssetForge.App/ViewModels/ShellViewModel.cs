@@ -41,6 +41,7 @@ public sealed class ShellViewModel : ObservableObject
     private bool _isCreatingNewProject;
     private bool _isApplyingProjectSettings;
     private bool _isShutDown;
+    private bool _agentWasConnected;
     private Task? _shutdownTask;
     private readonly List<GatedCommand> _uiCommands = [];
     private readonly Dictionary<string, DateTimeOffset> _agentActivityStarts = new(StringComparer.Ordinal);
@@ -253,6 +254,7 @@ public sealed class ShellViewModel : ObservableObject
         AgentConnection.SessionChanged += OnAgentSessionChanged;
         AgentConnection.AgentActivityReceived += OnAgentActivityForStructuredLog;
         AgentConnection.PropertyChanged += OnAgentConnectionPropertyChanged;
+        _agentWasConnected = AgentConnection.IsConnected;
         ArtStyleLibrary.ConfigurePromptAnalysisService(
             new AgentArtStylePromptAnalysisService(
                 new AgentConnectionArtStylePromptAgentClient(AgentConnection)));
@@ -806,7 +808,12 @@ public sealed class ShellViewModel : ObservableObject
             AgentConnection.RunTurnAsync,
             _generationTaskStore,
             new ImageDeliveryPreflight(
-                sandboxNetworkAccessConfiguredProvider: () => true));
+                sandboxNetworkAccessConfiguredProvider: () => true),
+            prepareBatch: async (_, cancellationToken) =>
+            {
+                await AgentConnection.StartFreshGenerationThreadAsync(cancellationToken)
+                    .ConfigureAwait(false);
+            });
         coordinator.DispatchProgressChanged += OnAgentDispatchProgressChanged;
         coordinator.DispatchCompleted += OnAgentDispatchCompleted;
         return coordinator;
@@ -1192,15 +1199,30 @@ public sealed class ShellViewModel : ObservableObject
 
     private void OnAgentConnectionPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (_isShutDown ||
-            (!string.IsNullOrEmpty(e.PropertyName) &&
-             e.PropertyName != nameof(AgentConnectionViewModel.IsConnected)) ||
-            !AgentConnection.IsConnected)
+        if (_isShutDown || !ShouldRecoverPendingDispatches(
+                ref _agentWasConnected,
+                e.PropertyName,
+                AgentConnection.IsConnected))
         {
             return;
         }
 
         _ = RecoverPendingGenerationDispatchesAsync();
+    }
+
+    internal static bool ShouldRecoverPendingDispatches(
+        ref bool wasConnected,
+        string? propertyName,
+        bool isConnected)
+    {
+        if (propertyName != nameof(AgentConnectionViewModel.IsConnected) ||
+            isConnected == wasConnected)
+        {
+            return false;
+        }
+
+        wasConnected = isConnected;
+        return isConnected;
     }
 
     private void OnAgentSessionChanged(object? sender, AgentSessionChangedEventArgs e)
@@ -1221,10 +1243,6 @@ public sealed class ShellViewModel : ObservableObject
         }
 
         SaveSettings();
-        if (AgentConnection.IsConnected)
-        {
-            _ = RecoverPendingGenerationDispatchesAsync();
-        }
     }
 
     private async Task RecoverPendingGenerationDispatchesAsync()
@@ -1272,17 +1290,20 @@ public sealed class ShellViewModel : ObservableObject
                         "任务仍按冻结约束和路径继续派发。");
                 }
 
-                OnGenerationBatchPublished(
-                    AssetGeneration,
+                var enqueueResult = EnqueueGenerationBatch(
                     new GenerationBatchPublishedEventArgs(
                         dispatch.BatchId,
                         dispatch.TaskIds,
                         dispatch.IsRetry,
-                        dispatchRequested: true));
-                CommandConsole.WriteWarning(
-                    "Generation",
-                    $"已恢复持久化 Pending 批次 {CompactIdentifier(dispatch.BatchId)} 的 Agent 调度；" +
-                    "不会创建或覆盖新的任务与产物路径。");
+                        dispatchRequested: true),
+                    writeQueuedLog: false);
+                if (enqueueResult == GenerationBatchDispatchEnqueueResult.Enqueued)
+                {
+                    CommandConsole.WriteWarning(
+                        "Generation",
+                        $"已恢复持久化 Pending 批次 {CompactIdentifier(dispatch.BatchId)} 的 Agent 调度；" +
+                        "不会创建或覆盖新的任务与产物路径。");
+                }
             }
 
             var retrySources = await AssetGeneration.GetRecoverableAutomaticRetrySourceBatchIdsAsync()
@@ -1461,23 +1482,7 @@ public sealed class ShellViewModel : ObservableObject
 
         try
         {
-            if (!_agentDispatchCoordinator.TryEnqueue(e.BatchId, e.TaskIds, e.IsRetry))
-            {
-                const string queueStopped = "Agent 调度队列已停止；任务仍保留在本地 Pending 队列。 ";
-                AssetGeneration.ReportDispatchFailure(
-                    e.BatchId,
-                    queueStopped);
-                CommandConsole.WriteError("Generation", queueStopped);
-                return;
-            }
-
-            AssetGeneration.ReportDispatchQueued(
-                e.BatchId,
-                $"{e.TaskIds.Count} 个任务已排队，等待 {AgentConnection.SelectedAgent.DisplayName} 执行");
-            CommandConsole.WriteInfo(
-                "Generation",
-                $"批次 {CompactIdentifier(e.BatchId)} 已进入 Agent 调度队列 · {e.TaskIds.Count} 个任务 · " +
-                $"执行器：{AgentConnection.SelectedAgent.DisplayName}");
+            _ = EnqueueGenerationBatch(e, writeQueuedLog: true);
         }
         catch (Exception exception)
         {
@@ -1487,6 +1492,40 @@ public sealed class ShellViewModel : ObservableObject
                 $"批次 {CompactIdentifier(e.BatchId)} 入队失败：{exception.Message}",
                 exception);
         }
+    }
+
+    private GenerationBatchDispatchEnqueueResult EnqueueGenerationBatch(
+        GenerationBatchPublishedEventArgs e,
+        bool writeQueuedLog)
+    {
+        var enqueueResult = _agentDispatchCoordinator.TryEnqueue(e.BatchId, e.TaskIds, e.IsRetry);
+        switch (enqueueResult)
+        {
+            case GenerationBatchDispatchEnqueueResult.Enqueued:
+                AssetGeneration.ReportDispatchQueued(
+                    e.BatchId,
+                    $"{e.TaskIds.Count} 个任务已排队，等待 {AgentConnection.SelectedAgent.DisplayName} 执行");
+                if (writeQueuedLog)
+                {
+                    CommandConsole.WriteInfo(
+                        "Generation",
+                        $"批次 {CompactIdentifier(e.BatchId)} 已进入 Agent 调度队列 · {e.TaskIds.Count} 个任务 · " +
+                        $"执行器：{AgentConnection.SelectedAgent.DisplayName}");
+                }
+
+                break;
+            case GenerationBatchDispatchEnqueueResult.AlreadyScheduled:
+                break;
+            case GenerationBatchDispatchEnqueueResult.QueueStopped:
+                const string queueStopped = "Agent 调度队列已停止；任务仍保留在本地 Pending 队列。 ";
+                AssetGeneration.ReportDispatchFailure(e.BatchId, queueStopped);
+                CommandConsole.WriteError("Generation", queueStopped);
+                break;
+            default:
+                throw new ArgumentOutOfRangeException(nameof(enqueueResult), enqueueResult, null);
+        }
+
+        return enqueueResult;
     }
 
     private void OnAgentDispatchProgressChanged(
@@ -1507,9 +1546,13 @@ public sealed class ShellViewModel : ObservableObject
                 $"{e.Snapshot.Instruction} · {e.Snapshot.Detail}";
             var level = e.Snapshot.Stage == GenerationBatchDispatchStage.Failed
                 ? WorkbenchLogLevel.Error
-                : e.Snapshot.Stage == GenerationBatchDispatchStage.Canceled
+                : e.Snapshot.Stage is GenerationBatchDispatchStage.Canceled or
+                    GenerationBatchDispatchStage.Interrupted
                     ? WorkbenchLogLevel.Warning
                     : WorkbenchLogLevel.Information;
+            var transportFailure = AgentTurnFailureClassifier.Classify(
+                turnResult: null,
+                e.Snapshot.FailureMessage);
             _workbenchConsoleService.WriteStructured(
                 level,
                 "Generation",
@@ -1521,14 +1564,18 @@ public sealed class ShellViewModel : ObservableObject
                     Stage = e.Snapshot.Stage.ToString(),
                     Status = e.Snapshot.Stage is GenerationBatchDispatchStage.Failed
                         ? "failed"
+                        : e.Snapshot.Stage is GenerationBatchDispatchStage.Interrupted
+                            ? "interrupted"
                         : e.Snapshot.Stage is GenerationBatchDispatchStage.Canceled
                             ? "canceled"
                             : e.Snapshot.Stage is GenerationBatchDispatchStage.Completed
                                 ? "completed"
                                 : "active",
-                    ErrorCode = e.Snapshot.Stage == GenerationBatchDispatchStage.Failed
-                        ? e.Snapshot.FailureStage?.ToString()
-                        : null
+                    ElapsedMilliseconds = e.Snapshot.ElapsedMilliseconds,
+                    ErrorCode = e.Snapshot.FailureCode ?? transportFailure?.Code ??
+                                (e.Snapshot.Stage == GenerationBatchDispatchStage.Failed
+                                    ? e.Snapshot.FailureStage?.ToString()
+                                    : null)
                 });
         }
 
@@ -1581,10 +1628,17 @@ public sealed class ShellViewModel : ObservableObject
             return;
         }
 
+        var turnFailure = AgentTurnFailureClassifier.Classify(e.Result, e.FailureMessage);
+
         AutomaticGenerationRetryResult automaticRetry;
         try
         {
-            if (_dispatcher.HasShutdownStarted || _dispatcher.HasShutdownFinished)
+            if (turnFailure?.PreservePendingTasks == true)
+            {
+                automaticRetry = AutomaticGenerationRetryResult.None(
+                    "上游传输中断期间不创建自动重做任务。");
+            }
+            else if (_dispatcher.HasShutdownStarted || _dispatcher.HasShutdownFinished)
             {
                 automaticRetry = AutomaticGenerationRetryResult.None(
                     "应用正在关闭，未创建自动重做任务。");
@@ -1615,6 +1669,19 @@ public sealed class ShellViewModel : ObservableObject
         {
             if (_isShutDown || !ReferenceEquals(sender, _agentDispatchCoordinator))
             {
+                return;
+            }
+
+            if (turnFailure?.PreservePendingTasks == true)
+            {
+                const string interrupted =
+                    "上游模型响应流中断，当前未认领任务尚未进入图片生成阶段。" +
+                    "已完成项保持完成，原 Pending 任务已保留，请检查模型网关后继续。";
+                AssetGeneration.ReportDispatchInterrupted(e.Request.BatchId, interrupted);
+                CommandConsole.WriteWarning(
+                    "Generation",
+                    $"批次 {CompactIdentifier(e.Request.BatchId)} · {turnFailure.Code} · {interrupted}");
+                _ = AssetGeneration.RefreshAfterDispatchAsync();
                 return;
             }
 

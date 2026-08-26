@@ -12,8 +12,65 @@ internal static class BatchGenerationCoreSmokeTests
         await BatchBoundariesRejectWithoutPartialWritesAsync();
         await RetryLineageIsAtomicIdempotentAndStopsAtFrozenLimitAsync();
         await AutomaticRetryBlockAndDispatchIntentPersistAsync();
+        await AgentInfrastructureFailuresNeverCreateAutomaticRetryChildrenAsync();
         TilemapOutputCountBuildsVariantAwareConstraints();
         LegacyTasksRemainBatchNeutral();
+    }
+
+    private static async Task AgentInfrastructureFailuresNeverCreateAutomaticRetryChildrenAsync()
+    {
+        var testRoot = CreateTestRoot("agent-infrastructure-no-auto-retry");
+        try
+        {
+            var store = new JsonGenerationTaskStore(testRoot);
+            var parent = (await store.CreateBatchAsync(new CreateGenerationBatchRequest
+            {
+                BatchId = Guid.NewGuid().ToString("N"),
+                DisplayName = "传输中断不得新建任务",
+                DispatchRequested = true,
+                Items =
+                [
+                    new CreateGenerationBatchItemRequest
+                    {
+                        ItemId = Guid.NewGuid().ToString("N"),
+                        DisplayName = "保留原任务",
+                        MaxAttempts = 4,
+                        Constraints = CreateConstraints("保留原任务", 1)
+                    }
+                ]
+            })).Single();
+            const string agentId = "infrastructure-failure-fixture";
+            await store.ClaimAsync(parent.Id, agentId);
+            var failed = await store.FailAsync(
+                parent.Id,
+                agentId,
+                new GenerationTaskFailure
+                {
+                    Message = "Agent Turn 已结束，但任务未被 Agent 领取或完成。",
+                    Code = "agent_turn_incomplete",
+                    Stage = "agent.dispatch",
+                    Retryable = true
+                });
+
+            True(failed.FailureRetryable == true,
+                "fixture 应模拟旧版本已经错误持久化为 retryable 的基础设施失败");
+            True(GenerationFailureClassifier.IsAgentInfrastructureFailureCode(failed.FailureCode),
+                "旧 agent_turn_incomplete 必须被识别为基础设施失败");
+            await ThrowsAsync<InvalidOperationException>(
+                () => store.CreateRetryBatchAsync(CreateRetryRequest(failed)),
+                "即使旧记录带 retryable=true，也不得创建新的 generation task");
+            Equal(1, (await store.ListAsync()).Count,
+                "基础设施失败必须保留单一原任务，不得膨胀任务库");
+
+            var classified = GenerationFailureClassifier.Classify(
+                "Agent Turn 已结束，但任务未被 Agent 领取或完成。");
+            False(classified.Retryable,
+                "新版本不得再把 Agent 未认领分类成可自动重做的美术失败");
+        }
+        finally
+        {
+            DeleteTestRoot(testRoot);
+        }
     }
 
     private static async Task AutomaticRetryBlockAndDispatchIntentPersistAsync()
@@ -387,6 +444,8 @@ internal static class BatchGenerationCoreSmokeTests
             throw new InvalidOperationException(message);
         }
     }
+
+    private static void False(bool condition, string message) => True(!condition, message);
 
     private static void Equal<T>(T expected, T actual, string message)
     {

@@ -56,43 +56,7 @@ internal sealed class GenerationBatchTurnReconciler
                 FailureDetail: $"未找到批次 {batchId} 的生成任务，无法确认终态。");
         }
 
-        var pendingFailureDetail = BuildPendingFailureDetail(turnResult, failureMessage);
-        var reconciliationFailures = new List<string>();
-        var autoFailedCount = 0;
-        foreach (var task in initialTasks.Where(task => task.Status == GenerationTaskStatus.Pending))
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            try
-            {
-                await _taskStore.ClaimAsync(task.Id, DispatchProxyAgentId, cancellationToken)
-                    .ConfigureAwait(false);
-                await _taskStore.FailAsync(
-                        task.Id,
-                        DispatchProxyAgentId,
-                        pendingFailureDetail,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-                autoFailedCount++;
-            }
-            catch (InvalidOperationException exception)
-            {
-                // The Agent may have claimed or completed the task after the initial snapshot.
-                // Never steal an active claim or rewrite a terminal result.
-                var current = await _taskStore.GetAsync(task.Id, cancellationToken).ConfigureAwait(false);
-                if (current is null || current.Status == GenerationTaskStatus.Pending)
-                {
-                    throw;
-                }
-
-                if (current.Status == GenerationTaskStatus.Claimed &&
-                    ProductIdentity.IsDispatchReconcilerAgent(current.ClaimedBy))
-                {
-                    reconciliationFailures.Add(
-                        $"任务 {ShortId(task.Id)} 已由调度代理认领，但写入失败状态时出错：{Sanitize(exception.Message)}");
-                }
-            }
-        }
-
+        var turnFailure = AgentTurnFailureClassifier.Classify(turnResult, failureMessage);
         var finalTasks = await _taskStore.ListBatchAsync(batchId, cancellationToken)
             .ConfigureAwait(false);
         var pendingCount = finalTasks.Count(task => task.Status == GenerationTaskStatus.Pending);
@@ -100,9 +64,16 @@ internal sealed class GenerationBatchTurnReconciler
         var completedCount = finalTasks.Count(task => task.Status == GenerationTaskStatus.Completed);
         var failedCount = finalTasks.Count(task => task.Status == GenerationTaskStatus.Failed);
         var detailParts = new List<string>();
-        if (autoFailedCount > 0)
+        if (turnFailure?.PreservePendingTasks == true)
         {
-            detailParts.Add(pendingFailureDetail);
+            detailParts.Add(BuildTransportInterruptionDetail(turnFailure, turnResult, failureMessage));
+        }
+        else if (pendingCount > 0)
+        {
+            detailParts.Add(BuildPendingPreservationDetail(
+                turnResult,
+                failureMessage,
+                pendingCount));
         }
         else if (!string.IsNullOrWhiteSpace(failureMessage) || turnResult?.IsSuccess == false)
         {
@@ -114,12 +85,6 @@ internal sealed class GenerationBatchTurnReconciler
             detailParts.Add($"仍有 {claimedCount} 个任务处于 Claimed；为避免破坏 Agent 所有权，收束服务未改写这些任务。");
         }
 
-        if (pendingCount > 0)
-        {
-            detailParts.Add($"仍有 {pendingCount} 个任务处于 Pending，批次尚未完全收束。");
-        }
-
-        detailParts.AddRange(reconciliationFailures);
         return new GenerationBatchTurnReconciliationResult(
             batchId,
             finalTasks.Count,
@@ -127,8 +92,31 @@ internal sealed class GenerationBatchTurnReconciler
             claimedCount,
             completedCount,
             failedCount,
-            autoFailedCount,
+            AutoFailedCount: 0,
             JoinDetails(detailParts));
+    }
+
+    private static string BuildPendingPreservationDetail(
+        AgentTurnResult? turnResult,
+        string? failureMessage,
+        int pendingCount)
+    {
+        var turnDetail = BuildPendingFailureDetail(turnResult, failureMessage);
+        return Limit(
+            $"{turnDetail} 仍有 {pendingCount} 个任务保持 Pending；" +
+            "GAssetForge 未创建替代任务，等待连接恢复或下一次原任务调度。");
+    }
+
+    private static string BuildTransportInterruptionDetail(
+        AgentTurnFailureClassification failure,
+        AgentTurnResult? turnResult,
+        string? failureMessage)
+    {
+        var detail = Sanitize(failureMessage) ?? Sanitize(turnResult?.ErrorMessage);
+        var suffix = string.IsNullOrWhiteSpace(detail) ? string.Empty : $" 原始错误：{detail}";
+        return Limit(
+            $"{failure.Code}: 上游模型响应流在 response.completed 前中断；" +
+            $"未开始的任务已保持 Pending，等待连接恢复后继续调度。{suffix}");
     }
 
     private static string BuildPendingFailureDetail(
@@ -215,5 +203,4 @@ internal sealed class GenerationBatchTurnReconciler
         ? value
         : value[..MaximumFailureDetailLength];
 
-    private static string ShortId(string value) => value.Length <= 12 ? value : value[..12];
 }

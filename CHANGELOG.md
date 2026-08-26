@@ -5,6 +5,36 @@ development track; versioning policy will be finalized before the first public r
 
 ## Unreleased
 
+## 1.0.15t1 - 2026-08-26
+
+### Added
+
+- Added structured Agent dispatch diagnostics for Turn chunk index/count, task count, elapsed time,
+  stable transport failure code, and whether a missing `response.completed` caused interruption.
+- Added explicit `Interrupted` generation UI state for upstream Responses stream failures, with the
+  original Pending tasks retained for recovery instead of presenting the event as an art failure.
+
+### Changed
+
+- Split large generation batches into serialized Agent Turns of at most five tasks. Every batch starts
+  a fresh Codex thread, while all chunks within that batch share the same thread; a failed chunk stops
+  later chunks so one upstream disconnect cannot invalidate the whole remaining batch.
+- Made task reconciliation follow the persistent MCP/Harness task store exclusively. An Agent Turn
+  ending without claiming a task no longer lets the desktop claim and fail that Pending task.
+- Restricted automatic retry children to explicit retryable output/delivery failures. Historical
+  `agent_turn_incomplete` and `agent_transport_*` records are never expanded into new generation tasks.
+- Made Pending recovery edge-triggered on a real Agent disconnected-to-connected transition and gave
+  enqueue operations distinct `Enqueued`, `AlreadyScheduled`, and `QueueStopped` outcomes.
+
+### Fixed
+
+- Classified `stream disconnected before completion` and `stream closed before response.completed`
+  as `agent_transport_stream_disconnected` instead of local art validation failure.
+- Prevented Responses/SSE interruptions from creating “自动重做 2/4 …” task/run trees before image
+  generation or MCP claim had occurred.
+- Removed the once-per-second repeated Pending recovery scan and the resulting thousands of duplicate
+  “已恢复持久化 Pending 批次的 Agent 调度” log entries.
+
 ## 1.0.14t1 - 2026-08-26
 
 ### Changed

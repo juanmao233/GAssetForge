@@ -34,6 +34,8 @@ internal static class AgentConnectionLifecycleSmokeTests
         RuntimeSessionRestartsWhenFreshPathChanges(temporaryRoot);
         RuntimeSessionRestartsWhenApiOrProxyEnvironmentChanges(temporaryRoot);
         RunTurnRefreshesRuntimeWhenFreshPathChanges(temporaryRoot);
+        GenerationBatchCanRotateToFreshThread(temporaryRoot);
+        DeferredFreshThreadDoesNotResumePreviousBatch(temporaryRoot);
         SlowRuntimeStartupCanBeDisposedWithoutUiDeadlock(temporaryRoot);
     }
 
@@ -385,6 +387,68 @@ internal static class AgentConnectionLifecycleSmokeTests
             "环境刷新重启 Runtime 时必须恢复现有 Codex thread");
     }
 
+    private static void GenerationBatchCanRotateToFreshThread(string temporaryRoot)
+    {
+        var fixture = CreateFixture(
+            temporaryRoot,
+            "generation-batch-fresh-thread",
+            _ => FakeAgentSessionTransport.Ready(),
+            _ => FakeAgentSessionTransport.Failing("exec fallback should not start"));
+        using var viewModel = fixture.ViewModel;
+
+        viewModel.StartCommand.Execute(null);
+        PumpUntil(
+            () => viewModel.IsConnected &&
+                  string.Equals(fixture.Runtime.ThreadId, "fixture-thread", StringComparison.Ordinal),
+            CommandTimeout,
+            "Runtime 首次启动没有建立 fixture thread。");
+
+        var rotateTask = viewModel.StartFreshGenerationThreadAsync();
+        PumpUntil(
+            () => rotateTask.IsCompleted,
+            CommandTimeout,
+            "生成批次没有完成独立线程轮换。");
+        var rotated = rotateTask.GetAwaiter().GetResult();
+
+        Equal("fixture-thread-2", rotated.ThreadId,
+            "每个生成批次必须能显式创建与旧上下文隔离的新线程");
+        Equal(rotated.ThreadId, fixture.Runtime.ThreadId,
+            "Runtime 当前线程必须切换到批次新线程");
+    }
+
+    private static void DeferredFreshThreadDoesNotResumePreviousBatch(string temporaryRoot)
+    {
+        FakeAgentSessionTransport? transport = null;
+        var fixture = CreateFixture(
+            temporaryRoot,
+            "generation-batch-deferred-fresh-thread",
+            _ => transport = FakeAgentSessionTransport.ReadyWithDeferredThreadStart(),
+            _ => FakeAgentSessionTransport.Failing("exec fallback should not start"),
+            resumeThreadId: "previous-batch-thread");
+        using var viewModel = fixture.ViewModel;
+
+        viewModel.StartCommand.Execute(null);
+        PumpUntil(
+            () => viewModel.IsConnected && transport?.ResumeThreadCallCount == 1,
+            CommandTimeout,
+            "Runtime 没有按 fixture 恢复上一批次线程。");
+
+        var rotated = viewModel.StartFreshGenerationThreadAsync().GetAwaiter().GetResult();
+        True(rotated.IsDeferred,
+            "fixture 必须返回延迟创建的新线程");
+
+        // Deliberately do not pump the WPF Dispatcher between rotation and RunTurn. This catches
+        // stale bookmark races where UI publication is queued but the next exec Turn starts now.
+        var turn = viewModel.RunTurnAsync("start the fresh deferred batch thread")
+            .GetAwaiter()
+            .GetResult();
+
+        Equal("fixture-deferred-thread", turn.ThreadId,
+            "延迟创建通道的下一 Turn 必须建立新线程");
+        Equal(1, transport!.ResumeThreadCallCount,
+            "批次轮换后不得因 UI Dispatcher 延迟而再次恢复上一批次线程");
+    }
+
     private static void RuntimeSessionRestartsWhenApiOrProxyEnvironmentChanges(string temporaryRoot)
     {
         const string firstApiKey = "fixture-api-key-first";
@@ -462,7 +526,8 @@ internal static class AgentConnectionLifecycleSmokeTests
         Func<int, IAgentSessionTransport> appServerFactory,
         Func<int, IAgentSessionTransport> execFactory,
         Func<string>? pathEnvironmentProvider = null,
-        Func<IReadOnlyDictionary<string, string?>>? environmentVariablesProvider = null)
+        Func<IReadOnlyDictionary<string, string?>>? environmentVariablesProvider = null,
+        string? resumeThreadId = null)
     {
         var root = Path.Combine(temporaryRoot, testName, Guid.NewGuid().ToString("N"));
         var paths = new WorkspacePaths(Path.Combine(root, "app-data"));
@@ -485,7 +550,8 @@ internal static class AgentConnectionLifecycleSmokeTests
             runtime,
             selectedAgentKey: "codex",
             port: GetAvailableLoopbackPort(),
-            workingDirectory: workingDirectory);
+            workingDirectory: workingDirectory,
+            resumeThreadId: resumeThreadId);
         return fixture;
     }
 
@@ -617,18 +683,22 @@ internal static class AgentConnectionLifecycleSmokeTests
         private readonly bool _blockUntilCancelled;
         private readonly TaskCompletionSource<bool>? _startEntered;
         private readonly Action<AgentSessionStartOptions>? _started;
+        private readonly bool _deferredThreadStart;
         private AgentSessionTransportState _state = AgentSessionTransportState.Stopped;
+        private int _threadSequence;
 
         private FakeAgentSessionTransport(
             string? startFailure,
             bool blockUntilCancelled = false,
             TaskCompletionSource<bool>? startEntered = null,
-            Action<AgentSessionStartOptions>? started = null)
+            Action<AgentSessionStartOptions>? started = null,
+            bool deferredThreadStart = false)
         {
             _startFailure = startFailure;
             _blockUntilCancelled = blockUntilCancelled;
             _startEntered = startEntered;
             _started = started;
+            _deferredThreadStart = deferredThreadStart;
         }
 
         public static FakeAgentSessionTransport Failing(string message) => new(message);
@@ -636,6 +706,9 @@ internal static class AgentConnectionLifecycleSmokeTests
         public static FakeAgentSessionTransport Ready(
             Action<AgentSessionStartOptions>? started = null) =>
             new(null, started: started);
+
+        public static FakeAgentSessionTransport ReadyWithDeferredThreadStart() =>
+            new(null, deferredThreadStart: true);
 
         public static FakeAgentSessionTransport BlockingUntilCancelled(
             TaskCompletionSource<bool> startEntered) =>
@@ -664,6 +737,8 @@ internal static class AgentConnectionLifecycleSmokeTests
         public string? CurrentThreadId { get; private set; }
 
         public string? ActiveTurnId => null;
+
+        public int ResumeThreadCallCount { get; private set; }
 
         public event EventHandler<AgentTransportStateChangedEventArgs>? StateChanged;
 
@@ -762,7 +837,14 @@ internal static class AgentConnectionLifecycleSmokeTests
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            CurrentThreadId = "fixture-thread";
+            if (_deferredThreadStart)
+            {
+                CurrentThreadId = null;
+                return Task.FromResult(new AgentThreadResult(null, IsDeferred: true));
+            }
+
+            var sequence = Interlocked.Increment(ref _threadSequence);
+            CurrentThreadId = sequence == 1 ? "fixture-thread" : $"fixture-thread-{sequence}";
             return Task.FromResult(new AgentThreadResult(CurrentThreadId));
         }
 
@@ -771,6 +853,7 @@ internal static class AgentConnectionLifecycleSmokeTests
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            ResumeThreadCallCount++;
             CurrentThreadId = threadId;
             return Task.FromResult(new AgentThreadResult(CurrentThreadId));
         }
@@ -780,6 +863,11 @@ internal static class AgentConnectionLifecycleSmokeTests
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (string.IsNullOrWhiteSpace(CurrentThreadId) && _deferredThreadStart)
+            {
+                CurrentThreadId = "fixture-deferred-thread";
+            }
+
             return Task.FromResult(new AgentTurnResult(
                 CurrentThreadId,
                 "fixture-turn",

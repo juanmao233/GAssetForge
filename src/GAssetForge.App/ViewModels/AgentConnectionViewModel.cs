@@ -788,6 +788,68 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
         }
     }
 
+    public async Task<AgentThreadResult> StartFreshGenerationThreadAsync(
+        CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        await _turnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!IsConnected)
+            {
+                throw new InvalidOperationException(
+                    "Agent 会话尚未达到可执行状态，无法为生成批次创建独立线程。");
+            }
+
+            await _runtimeService.EnsureSessionAsync(
+                    WorkingDirectory,
+                    _runtimeService.ThreadId ?? _resumeThreadId,
+                    _serverService,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (!IsConnected)
+            {
+                throw new InvalidOperationException(
+                    "Agent 执行环境刷新后尚未达到 Ready 状态，无法轮换生成批次线程。");
+            }
+
+            Dispatch(() =>
+            {
+                _lastTurnStatus = "正在为生成批次创建独立线程";
+                RefreshState();
+            });
+            var result = await _runtimeService.StartFreshThreadAsync(cancellationToken)
+                .ConfigureAwait(false);
+            var freshThreadId = NormalizeThreadId(result.ThreadId);
+            _resumeThreadId = freshThreadId;
+            Dispatch(() =>
+            {
+                _activeWorkingDirectory = WorkingDirectory;
+                PublishSession(freshThreadId, WorkingDirectory);
+
+                _lastTurnStatus = result.IsDeferred
+                    ? "生成批次已切换到新的延迟创建线程"
+                    : $"生成批次已切换到独立线程 {result.ThreadId}";
+                RefreshState();
+            });
+            return result;
+        }
+        catch (Exception exception) when (exception is not OperationCanceledException)
+        {
+            Dispatch(() =>
+            {
+                _lastTurnStatus = $"批次线程轮换失败：{Sanitize(exception.Message)}";
+                AddLog(DateTimeOffset.Now, _lastTurnStatus, true);
+                RefreshState();
+            });
+            throw;
+        }
+        finally
+        {
+            _turnGate.Release();
+        }
+    }
+
     public void Dispose()
     {
         var disposeTask = DisposeAsync().AsTask();

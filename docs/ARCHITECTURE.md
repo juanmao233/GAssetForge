@@ -280,8 +280,9 @@ Adapter seam；在实现并验证真实 Adapter 前不能呈现为可用连接�
 
 本地队列负责排队与状态持久化，MCP Server 只把工作台状态、约束、任务操作和结果校验暴露为 tools；两者
 都不直接假装拥有图像模型。批次成功落盘后，`AssetGenerationViewModel.BatchPublished` 把稳定任务 ID 交给
-Shell，Shell 使用 `GenerationAgentPromptBuilder` 构造 prompt，并通过受管 Codex Runtime 启动串行 Turn。
-分发失败只记录 dispatch 错误，任务继续保持 `Pending`，因此 Runtime 故障不会吞掉本地待办。
+Shell。每个批次先显式创建独立 Codex thread，再由 `GenerationBatchDispatchCoordinator` 按最多五个任务切成
+有序 Turn 分块；同一批次分块共享 thread 且串行执行，任一分块失败或中断后不启动后续分块。分发失败只记录
+dispatch 状态，任务继续保持 `Pending`，因此 Runtime 故障不会吞掉本地待办或同时污染整批剩余任务。
 
 批量表格单行允许 1–16 张、最多 256 行、整批最多 256 张；发布时每个数量变体都创建一个独立单图任务，
 而不是让一条任务内部管理多张图片和自定义并行槽位。某一图片失败不阻塞同批其它任务。桌面端默认开启
@@ -341,14 +342,23 @@ Assets/Generated/GAssetForge/Runs/<batchId>/
 提示和唯一交付路径；父任务同时写入 `SupersededByTaskId`，子任务保存 `RootTaskId`、`PreviousTaskId`、
 `AttemptNumber` 与冻结的 `MaxAttempts`。同一父任务的并发重做请求是幂等的，不会产生两个后继任务。旧 Run
 和全部中间文件不被覆盖，后继提示会带入上一轮的具体几何诊断进行定向修正。没有 `RetryLineage` 的历史任务
-不会在升级后被意外自动重做；额度耗尽、关闭自动重做或非可恢复错误则保留产物并转为人工处理入口。
+不会在升级后被意外自动重做；`agent_transport_*` 与历史 `agent_turn_incomplete` 即使曾错误带有
+`FailureRetryable=true` 也被排除。只有 MCP/Harness 明确落盘的可恢复几何或临时交付失败能创建 child；额度
+耗尽、关闭自动重做或非可恢复错误则保留产物并转为人工处理入口。
 
 每个新任务还冻结可选 `DispatchIntent`。只有明确记录 `Requested=true` 的 Pending 批次才允许在应用重启、
 项目切换或 Agent 再次 Ready 后恢复自动派发；旧任务和“仅发布本地队列/人工接力”任务不会被升级后意外拉起。
 恢复器复用原 task ID 与冻结交付路径，补齐缺失的 Run 分类目录、prompt 和 manifest，再按 batch ID 幂等入队；
-同一进程中的正常发布与恢复扫描即使并发，也只会启动一个 Agent Turn。若自动重做在 child 提交前因路径、权限
+入队返回 `Enqueued`、`AlreadyScheduled` 或 `QueueStopped`，只有真实新入队才记录一次恢复日志；恢复扫描仅在
+Agent 连接 false→true 时触发，不响应每秒健康轮询或普通 thread 书签变化。同一进程中的正常发布与恢复扫描即使
+并发，也只会启动一个调度生命周期。若自动重做在 child 提交前因路径、权限
 或 Run 准备失败，父任务会持久化 `AutomaticRetryBlockedReason`，界面切换为“自动重做受阻，可人工接管”，
 不再占用人工重试入口。若 child 已经原子入库而 manifest/通知随后失败，child 仍保持可见并可由恢复器继续派发。
+
+Agent Turn 收束器不再用桌面端调度代理 Claim/Fail 未被领取的 Pending task。`Completed` Turn、启动异常或
+Responses/SSE 在 `response.completed` 前中断，都只能汇总任务库中已经存在的 Pending/Claimed/Completed/Failed
+真相。流中断稳定分类为 `agent_transport_stream_disconnected`，UI 显示 `Interrupted`，Workbench 记录分块
+序号/总数、当前任务数、Turn 耗时、`response.completed=否` 和安全错误摘要；原 task ID 等待重新连接后续派。
 
 完成校验使用任务创建时的 `delivery.assetRoot`，不读取用户后来切换的新 Project 根；Icon 与 Tilemap 都按冻结
 画幅、真实 Alpha 和背景合同进入同一确定性交付链。Tilemap PNG 还会真实
@@ -452,7 +462,8 @@ Shell 的 UI 编辑命令通过 `GatedCommand` 接到稳定 seam：非 UI 工作
 - Bearer Token 注入、401 拒绝、日志脱敏与 `/health` 不泄密
 - fake process 下的 App Server initialize、账号读取、thread start/resume、MCP ready、Turn 完成与异常退出
 - `codex exec --json` 降级、thread ID + 工作目录恢复，以及切换项目不误用旧 thread
-- 数量展开为一图一任务、页面并行数不进入 Agent prompt、批次调度失败仍保留 `Pending`
+- 数量展开为一图一任务、页面并行数不进入 Agent prompt、5/5/2 Turn 分块、批次独立 thread、断流仍保留 `Pending`
+- Responses 中断分类、基础设施失败不创建 retry child、恢复入队幂等结果与连接上升沿日志去重
 - 风格库统一提示词样本持久化、稳定指纹过期判断、一次性 Agent request/result 协议与严格结果校验
 - 生成页统一提示词优先、`unified-prompt-only` 冻结合同、跳过参考图快照及缺失/过期回退旧链路
 - 项目内 Run 目录、manifest、提示与参考图镜像、中间图保留和结构化阶段 timeline
