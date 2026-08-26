@@ -68,8 +68,8 @@ public static class TilemapConstraintPackageBuilder
     public const string PreferredSkill = "imagegen";
     public const string RotationConvention =
         TilemapGeometryCalculator.AxisAAlignedRotationConventionId;
-    public const string SolidOpaqueColorBackgroundMode = "solid-opaque-color";
-    public const string TransparentAlphaBackgroundMode = "transparent-alpha";
+    public const string SolidOpaqueColorBackgroundMode = GenerationBackgroundContractBuilder.SolidOpaqueColorMode;
+    public const string TransparentAlphaBackgroundMode = GenerationBackgroundContractBuilder.TransparentAlphaMode;
     public const string TransparentBackgroundRule =
         "生成内容必须完整落在瓦片有效轮廓内；有效轮廓外 alpha 必须为 0。透明背景必须是真实 alpha 通道，不得使用白底、纯色底或棋盘格模拟透明。";
 
@@ -262,38 +262,16 @@ public static class TilemapConstraintPackageBuilder
     }
 
     private static string BuildBackgroundInstruction(GenerationBackgroundRemovalSpec? backgroundRemoval) =>
-        backgroundRemoval is null
-            ? TransparentBackgroundRule
-            : $"生成阶段必须使用均匀纯色 {backgroundRemoval.ColorHex} 背景，画布边缘和瓦片有效轮廓外均保持该颜色；" +
-              "不得使用渐变、纹理、棋盘格、背景投影或环境雾污染底色，也不要自行抠图或制造透明通道。" +
-              "GAssetForge 会把该原图作为第一道工序输入，在本地剔除底色并交付最终真实透明 PNG；最终瓦片有效轮廓外 alpha 必须为 0。";
+        GenerationBackgroundContractBuilder.BuildInstruction(
+            backgroundRemoval,
+            TransparentBackgroundRule,
+            "瓦片有效轮廓");
 
     private static JsonObject BuildBackgroundParameters(
-        GenerationBackgroundRemovalSpec? backgroundRemoval)
-    {
-        var generationStage = backgroundRemoval is null
-            ? new JsonObject
-            {
-                ["mode"] = TransparentAlphaBackgroundMode,
-                ["outsideDiamondAlpha"] = 0
-            }
-            : new JsonObject
-            {
-                ["mode"] = SolidOpaqueColorBackgroundMode,
-                ["colorHex"] = backgroundRemoval.ColorHex,
-                ["alpha"] = 255
-            };
-
-        return new JsonObject
-        {
-            ["generationStage"] = generationStage,
-            ["finalStage"] = new JsonObject
-            {
-                ["mode"] = TransparentAlphaBackgroundMode,
-                ["outsideDiamondAlpha"] = 0
-            }
-        };
-    }
+        GenerationBackgroundRemovalSpec? backgroundRemoval) =>
+        GenerationBackgroundContractBuilder.BuildParameters(
+            backgroundRemoval,
+            "outsideDiamondAlpha");
 
     private static void Validate(TilemapGenerationConstraintInput input)
     {

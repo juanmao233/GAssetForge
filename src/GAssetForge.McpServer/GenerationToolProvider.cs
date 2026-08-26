@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using GAssetForge.Core;
 using GAssetForge.Core.Generation;
+using GAssetForge.Core.IconDesign;
 
 namespace GAssetForge.McpServer;
 
@@ -34,12 +35,12 @@ internal sealed class GenerationToolProvider(
             ServerInfoAsync),
         new(
             "get_current_context",
-            "读取桌面端当前业务工作流、项目资产目录和 Tilemap 参数；Tilemap 工作流同时通过 Core 构建器返回可直接用于 AI 绘图任务的正式约束包。建议提供 contentPrompt。",
+            "读取桌面端当前业务工作流、素材生成步骤、项目资产目录及其 Tilemap/Icon 参数；受支持的生成步骤同时通过 Core 构建器返回可直接用于 AI 绘图任务的正式约束包。建议提供 contentPrompt。",
             McpToolCatalog.Schema("""
                 {
                   "type":"object",
                   "properties":{
-                    "contentPrompt":{"type":"string","description":"具体要生成的瓦片内容；省略时生成明确的待补充占位提示"},
+                    "contentPrompt":{"type":"string","description":"具体要生成的美术资产内容；省略时根据当前生成步骤使用明确的待补充占位提示"},
                     "stylePrompt":{"type":"string","description":"可选的美术风格描述"},
                     "negativePrompt":{"type":"string","description":"可选的负向提示词"}
                   },
@@ -284,14 +285,16 @@ internal sealed class GenerationToolProvider(
         var negativePrompt = JsonArguments.OptionalString(arguments, "negativePrompt");
         var constraintResult = BuildCurrentGenerationConstraints(
             context,
-            contentPrompt ?? "待补充具体内容的单瓦片美术资产",
+            contentPrompt ?? GetDefaultContentPrompt(context.ActiveGenerationStep.Key),
             stylePrompt,
             negativePrompt);
         return Task.FromResult<object?>(new
         {
             activeWorkflow = context.ActiveWorkflow,
+            activeGenerationStep = context.ActiveGenerationStep,
             assets = context.Assets,
             tilemap = context.Tilemap,
+            iconDesign = context.IconDesign,
             generationConstraints = constraintResult?.Constraints,
             generationMetrics = constraintResult?.Metrics,
             settings = new
@@ -300,10 +303,10 @@ internal sealed class GenerationToolProvider(
                 path = context.SettingsFilePath
             },
             guidance = constraintResult is null
-                ? "当前工作流尚未提供专用约束构建器，可自行创建 provider-neutral 约束包。"
+                ? $"当前生成步骤 {context.ActiveGenerationStep.DisplayName} 尚未提供专用约束构建器，可自行创建 provider-neutral 约束包。"
                 : contentPrompt is null
                     ? "当前约束包使用占位内容；请带 contentPrompt 再调用本工具，或在创建任务前替换 constraints.prompt。"
-                    : "generationConstraints 已包含当前 Tilemap 几何、画布、透明区域和具体内容要求，可直接用于 create_generation_task.constraints。"
+                    : $"generationConstraints 已包含当前 {context.ActiveGenerationStep.DisplayName} 的画幅、透视、透明区域和具体内容要求，可直接用于 create_generation_task.constraints。"
         });
     }
 
@@ -1391,30 +1394,65 @@ internal sealed class GenerationToolProvider(
         string? stylePrompt,
         string? negativePrompt)
     {
-        if (!string.Equals(context.ActiveWorkflow.Key, TilemapConstraintPackageBuilder.WorkflowId, StringComparison.Ordinal))
+        if (string.Equals(
+                context.ActiveGenerationStep.Key,
+                TilemapConstraintPackageBuilder.WorkflowId,
+                StringComparison.Ordinal))
         {
-            return null;
+            var input = new TilemapGenerationConstraintInput
+            {
+                GridUnitSize = context.Tilemap.GridUnitSize,
+                ArtWidth = context.Tilemap.ArtImageWidth,
+                ArtHeight = context.Tilemap.ArtImageHeight,
+                DiamondAngle = context.Tilemap.DiamondAngle,
+                RotationAngle = context.Tilemap.RotationAngle,
+                ContentPrompt = contentPrompt,
+                StylePrompt = stylePrompt,
+                NegativePrompt = negativePrompt
+            };
+            return new CurrentConstraintResult(
+                TilemapConstraintPackageBuilder.Build(input),
+                TilemapConstraintPackageBuilder.CalculateMetrics(input));
         }
 
-        var input = new TilemapGenerationConstraintInput
+        if (string.Equals(
+                context.ActiveGenerationStep.Key,
+                IconDesignConstraintPackageBuilder.WorkflowId,
+                StringComparison.Ordinal))
         {
-            GridUnitSize = context.Tilemap.GridUnitSize,
-            ArtWidth = context.Tilemap.ArtImageWidth,
-            ArtHeight = context.Tilemap.ArtImageHeight,
-            DiamondAngle = context.Tilemap.DiamondAngle,
-            RotationAngle = context.Tilemap.RotationAngle,
-            ContentPrompt = contentPrompt,
-            StylePrompt = stylePrompt,
-            NegativePrompt = negativePrompt
-        };
-        return new CurrentConstraintResult(
-            TilemapConstraintPackageBuilder.Build(input),
-            TilemapConstraintPackageBuilder.CalculateMetrics(input));
+            var input = new IconDesignGenerationConstraintInput
+            {
+                Mode = IconDesignMode.SpecifiedAngle,
+                ImageWidth = context.IconDesign.ImageWidth,
+                ImageHeight = context.IconDesign.ImageHeight,
+                CameraAzimuthDegrees = context.IconDesign.CameraAzimuthDegrees,
+                CameraElevationDegrees = context.IconDesign.CameraElevationDegrees,
+                CameraRollDegrees = context.IconDesign.CameraRollDegrees,
+                CameraDistance = context.IconDesign.CameraDistance,
+                FocalLengthMillimeters = context.IconDesign.FocalLengthMillimeters,
+                ContentPrompt = contentPrompt,
+                StylePrompt = stylePrompt,
+                NegativePrompt = negativePrompt
+            };
+            return new CurrentConstraintResult(
+                IconDesignConstraintPackageBuilder.Build(input),
+                IconDesignConstraintPackageBuilder.CalculateMetrics(input));
+        }
+
+        return null;
     }
 
     private sealed record CurrentConstraintResult(
         GenerationConstraintPackage Constraints,
-        TilemapGenerationMetrics Metrics);
+        object Metrics);
+
+    private static string GetDefaultContentPrompt(string generationStepKey) =>
+        string.Equals(
+            generationStepKey,
+            IconDesignConstraintPackageBuilder.WorkflowId,
+            StringComparison.Ordinal)
+            ? "待补充具体内容的游戏美术 Icon"
+            : "待补充具体内容的单瓦片美术资产";
 
     private static int ReadOptionalInt32(
         JsonElement arguments,

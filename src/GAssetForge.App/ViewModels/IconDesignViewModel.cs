@@ -1,4 +1,5 @@
 using GAssetForge.App.Infrastructure;
+using GAssetForge.Core.Generation;
 using GAssetForge.Core.IconDesign;
 using System.Windows.Input;
 
@@ -243,11 +244,7 @@ public sealed class IconDesignViewModel : ObservableObject
         $"方位角 {CameraAzimuthDegrees:0.#}° · 仰角 {CameraElevationDegrees:0.#}° · 镜头滚转 {CameraRollDegrees:0.#}°";
 
     public string GenerationDescription =>
-        $"生成一枚 {ImageSizeText} 的游戏美术 Icon。使用指定角度透视：相机围绕物体中心的方位角为 " +
-        $"{CameraAzimuthDegrees:0.#}°（0° 位于物体正前方 +Z，正值向物体右侧 +X 环绕），相机仰角为 " +
-        $"{CameraElevationDegrees:0.#}°，镜头画面顺时针滚转 {CameraRollDegrees:0.#}°。使用 " +
-        $"{FocalLengthMillimeters:0.#} mm 镜头，归一化物距 {CameraDistance:0.##}，" +
-        $"{FieldOfViewText}。主体必须遵循该相机透视并完整落在画幅内，不得自行改为等距、正投影或其他角度。";
+        IconDesignConstraintPackageBuilder.BuildGenerationAngleDescription(Projection);
 
     public string StatusText =>
         $"指定角度生成 · {ImageSizeText} · {AngleDescription} · {FocalLengthMillimeters:0.#} mm · {FramingStateText}";
@@ -270,6 +267,29 @@ public sealed class IconDesignViewModel : ObservableObject
             CameraRollDegrees,
             CameraDistance,
             FocalLengthMillimeters);
+
+    public GenerationConstraintPackage BuildGenerationConstraints(
+        string contentPrompt = "单个游戏美术 Icon",
+        string? stylePrompt = null,
+        string? negativePrompt = null,
+        int outputCount = 1,
+        GenerationBackgroundRemovalSpec? backgroundRemoval = null) =>
+        IconDesignConstraintPackageBuilder.Build(new IconDesignGenerationConstraintInput
+        {
+            Mode = SelectedMode.Mode,
+            ImageWidth = ImageWidth,
+            ImageHeight = ImageHeight,
+            CameraAzimuthDegrees = CameraAzimuthDegrees,
+            CameraElevationDegrees = CameraElevationDegrees,
+            CameraRollDegrees = CameraRollDegrees,
+            CameraDistance = CameraDistance,
+            FocalLengthMillimeters = FocalLengthMillimeters,
+            ContentPrompt = contentPrompt,
+            StylePrompt = stylePrompt,
+            NegativePrompt = negativePrompt,
+            OutputCount = outputCount,
+            BackgroundRemoval = backgroundRemoval
+        });
 
     public void ApplySettings(
         IconDesignSettingsSnapshot settings,

@@ -40,9 +40,11 @@ public partial class MainWindow : Window
     private readonly Dictionary<string, FrameworkElement> _sharedPanelViews = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FrameworkElement> _uiPanelViews = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FrameworkElement> _tilemapPanelViews = new(StringComparer.Ordinal);
+    private FrameworkElement _iconDesignPropertiesView = null!;
     private BlueprintToolPaletteView _blueprintToolPaletteView = null!;
     private FrameworkElement? _workflowToolPaletteView;
     private string _activeToolContextContentId = CanvasContentId;
+    private string _activePropertiesContextContentId = CanvasContentId;
     private LayoutAnchorable? _observedBlueprintAnchorable;
     private bool _isLoaded;
     private bool _isShutdownInProgress;
@@ -54,6 +56,7 @@ public partial class MainWindow : Window
         _viewModel = viewModel;
         _layoutService = layoutService;
         DataContext = viewModel;
+        _activePropertiesContextContentId = GetWorkflowDocumentContentId(_viewModel.CurrentWorkflow);
 
         CreatePanelHosts();
         RefreshPanelContents();
@@ -143,6 +146,10 @@ public partial class MainWindow : Window
         {
             DataContext = _viewModel.TilemapWorkspace
         };
+        _iconDesignPropertiesView = new IconDesignPropertiesView
+        {
+            DataContext = _viewModel.IconDesign
+        };
 
         _documentHosts[CanvasContentId].Content = new CanvasDocumentView
         {
@@ -174,6 +181,11 @@ public partial class MainWindow : Window
     {
         foreach (var (contentId, host) in _panelHosts)
         {
+            if (string.Equals(contentId, PropertiesContentId, StringComparison.Ordinal))
+            {
+                continue;
+            }
+
             if (_sharedPanelViews.TryGetValue(contentId, out var sharedPanelView))
             {
                 host.Content = sharedPanelView;
@@ -196,9 +208,41 @@ public partial class MainWindow : Window
             host.Content = CreateUnavailablePanel(GetPanelTitle(contentId));
         }
 
+        RefreshPropertiesPanel();
         _workflowToolPaletteView = _panelHosts[ToolsContentId].Content as FrameworkElement;
         RefreshActiveToolPalette();
         UpdateLayoutTitles();
+    }
+
+    private void RefreshPropertiesPanel()
+    {
+        if (!_panelHosts.TryGetValue(PropertiesContentId, out var host))
+        {
+            return;
+        }
+
+        if (string.Equals(
+                _activePropertiesContextContentId,
+                IconDesignContentId,
+                StringComparison.Ordinal))
+        {
+            host.Content = _iconDesignPropertiesView;
+            return;
+        }
+
+        if (_viewModel.CurrentWorkflow.Kind == WorkflowKind.UiDesign)
+        {
+            host.Content = _uiPanelViews[PropertiesContentId];
+            return;
+        }
+
+        if (_viewModel.CurrentWorkflow.Kind == WorkflowKind.Tilemap)
+        {
+            host.Content = _tilemapPanelViews[PropertiesContentId];
+            return;
+        }
+
+        host.Content = CreateUnavailablePanel(GetPanelTitle(PropertiesContentId));
     }
 
     private FrameworkElement CreateUnavailablePanel(string panelName)
@@ -235,6 +279,7 @@ public partial class MainWindow : Window
     {
         ObserveBlueprintVisibility(null);
         _activeToolContextContentId = CanvasContentId;
+        _activePropertiesContextContentId = GetWorkflowDocumentContentId(_viewModel.CurrentWorkflow);
         var tools = CreateAnchorable(ToolsContentId);
         var properties = CreateAnchorable(PropertiesContentId);
         var layers = CreateAnchorable(LayersContentId);
@@ -401,6 +446,7 @@ public partial class MainWindow : Window
         ObserveBlueprintVisibility(FindContent(BlueprintContentId) as LayoutAnchorable);
         SyncActiveWorkflowContextFromLayout();
         SyncActiveToolContextFromLayout();
+        SyncActivePropertiesContextFromLayout();
         RefreshPanelContents();
         SyncToggleMenuStates();
         if (_viewModel.IsNewProjectDialogOpen)
@@ -556,6 +602,15 @@ public partial class MainWindow : Window
         if (content is LayoutAnchorable { IsHidden: false, IsVisible: true } visibleAnchorable)
         {
             visibleAnchorable.Hide();
+            if (string.Equals(contentId, IconDesignContentId, StringComparison.Ordinal) &&
+                string.Equals(
+                    _activePropertiesContextContentId,
+                    IconDesignContentId,
+                    StringComparison.Ordinal))
+            {
+                RestoreWorkflowPropertiesContext();
+            }
+
             SyncToggleMenuStates();
             return;
         }
@@ -579,6 +634,12 @@ public partial class MainWindow : Window
         if (content is LayoutAnchorable anchorable)
         {
             anchorable.IsVisible = true;
+        }
+
+        if (string.Equals(contentId, IconDesignContentId, StringComparison.Ordinal))
+        {
+            _activePropertiesContextContentId = IconDesignContentId;
+            RefreshPropertiesPanel();
         }
 
         content.IsSelected = true;
@@ -640,6 +701,8 @@ public partial class MainWindow : Window
         {
             EnsurePrimaryDocumentPane();
             SyncActiveWorkflowContextFromLayout();
+            SyncActivePropertiesContextFromLayout();
+            RefreshPropertiesPanel();
             SyncToggleMenuStates();
             DockManager.Focus();
         });
@@ -834,23 +897,42 @@ public partial class MainWindow : Window
         if (TryGetWorkflowForDocument(contentId, out var workflow))
         {
             _activeToolContextContentId = contentId!;
+            _activePropertiesContextContentId = contentId!;
             _viewModel.ActivateWorkspaceDocument(workflow);
+            RefreshPropertiesPanel();
             RefreshActiveToolPalette();
             return;
         }
 
         if (string.Equals(contentId, BlueprintContentId, StringComparison.Ordinal))
         {
+            RestoreWorkflowPropertiesContext();
             _activeToolContextContentId = BlueprintContentId;
             RefreshActiveToolPalette();
             return;
         }
 
-        if (contentId is StyleLibraryContentId or AssetGenerationContentId or
-            BackgroundRemovalContentId or ImageOutlineContentId or IconDesignContentId or PixelAlignmentContentId or AgentConnectionContentId)
+        if (string.Equals(contentId, IconDesignContentId, StringComparison.Ordinal))
         {
+            _activePropertiesContextContentId = IconDesignContentId;
+            RefreshPropertiesPanel();
             _activeToolContextContentId = GetWorkflowDocumentContentId(_viewModel.CurrentWorkflow);
             RefreshActiveToolPalette();
+            return;
+        }
+
+        if (contentId is StyleLibraryContentId or AssetGenerationContentId or
+            BackgroundRemovalContentId or ImageOutlineContentId or PixelAlignmentContentId or AgentConnectionContentId)
+        {
+            RestoreWorkflowPropertiesContext();
+            _activeToolContextContentId = GetWorkflowDocumentContentId(_viewModel.CurrentWorkflow);
+            RefreshActiveToolPalette();
+            return;
+        }
+
+        if (contentId is ToolsContentId or LayersContentId or ProjectContentId or CommandConsoleContentId)
+        {
+            RestoreWorkflowPropertiesContext();
             return;
         }
 
@@ -933,6 +1015,33 @@ public partial class MainWindow : Window
             StringComparison.Ordinal)
             ? BlueprintContentId
             : GetWorkflowDocumentContentId(_viewModel.CurrentWorkflow);
+    }
+
+    private void SyncActivePropertiesContextFromLayout()
+    {
+        var contentId = DockManager.Layout.ActiveContent?.ContentId;
+        if (string.Equals(contentId, IconDesignContentId, StringComparison.Ordinal))
+        {
+            _activePropertiesContextContentId = IconDesignContentId;
+            return;
+        }
+
+        if (TryGetWorkflowForDocument(contentId, out _))
+        {
+            _activePropertiesContextContentId = contentId!;
+            return;
+        }
+
+        RestoreWorkflowPropertiesContext(refresh: false);
+    }
+
+    private void RestoreWorkflowPropertiesContext(bool refresh = true)
+    {
+        _activePropertiesContextContentId = GetWorkflowDocumentContentId(_viewModel.CurrentWorkflow);
+        if (refresh)
+        {
+            RefreshPropertiesPanel();
+        }
     }
 
     private void SyncActiveWorkflowContextFromLayout()

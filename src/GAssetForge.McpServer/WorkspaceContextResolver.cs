@@ -1,5 +1,6 @@
 using System.Text.Json;
 using GAssetForge.Core.Generation;
+using GAssetForge.Core.IconDesign;
 using GAssetForge.Core.Workflows;
 
 namespace GAssetForge.McpServer;
@@ -10,6 +11,22 @@ internal sealed record TilemapSettings(
     int ArtImageHeight,
     double DiamondAngle,
     double RotationAngle);
+
+internal sealed record AssetGenerationStepContext(
+    string Key,
+    string DisplayName,
+    string Description,
+    bool IsSupported);
+
+internal sealed record IconDesignSettings(
+    string ModeKey,
+    int ImageWidth,
+    int ImageHeight,
+    double CameraAzimuthDegrees,
+    double CameraElevationDegrees,
+    double CameraRollDegrees,
+    double CameraDistance,
+    double FocalLengthMillimeters);
 
 internal sealed record AssetRootContext(
     string? ConfiguredPath,
@@ -24,8 +41,10 @@ internal sealed record ValidatedAssetPath(
 
 internal sealed record WorkspaceContext(
     WorkflowDefinition ActiveWorkflow,
+    AssetGenerationStepContext ActiveGenerationStep,
     AssetRootContext Assets,
     TilemapSettings Tilemap,
+    IconDesignSettings IconDesign,
     bool SettingsFileExists,
     string SettingsFilePath);
 
@@ -36,6 +55,14 @@ internal sealed class WorkspaceContextResolver(ServerOptions options)
     private const int DefaultArtImageHeight = 256;
     private const double DefaultDiamondAngle = 53.13010235415598d;
     private const double DefaultRotationAngle = 0d;
+    private const int DefaultIconImageWidth = 512;
+    private const int DefaultIconImageHeight = 512;
+    private const double DefaultIconCameraAzimuthDegrees = 45d;
+    private const double DefaultIconCameraElevationDegrees = 30d;
+    private const double DefaultIconCameraRollDegrees = 0d;
+    private const double DefaultIconCameraDistance = 4.5d;
+    private const double DefaultIconFocalLengthMillimeters = 50d;
+    private const double MaximumEditorCameraDistance = 20d;
 
     private static readonly JsonDocumentOptions DocumentOptions = new()
     {
@@ -60,14 +87,57 @@ internal sealed class WorkspaceContextResolver(ServerOptions options)
         var assets = ResolveAssetRoot(settings.AssetRootPath, settings.AssetCurrentPath);
         var workflow = WorkflowCatalog.Find(
             settings.AssetGenerationStepKey ?? settings.ActiveWorkflowKey);
+        var activeGenerationStep = ResolveGenerationStep(settings.AssetGenerationStepKey);
         var tilemap = new TilemapSettings(
             ClampFinite(settings.TilemapGridUnitSize, DefaultGridUnitSize, 8d, 512d),
             Math.Clamp(settings.TilemapArtImageWidth ?? DefaultArtImageWidth, 16, 8192),
             Math.Clamp(settings.TilemapArtImageHeight ?? DefaultArtImageHeight, 16, 8192),
             ClampFinite(settings.TilemapDiamondAngle, DefaultDiamondAngle, 15d, 165d),
             ClampFinite(settings.TilemapRotationAngle, DefaultRotationAngle, -180d, 180d));
+        var iconDesign = new IconDesignSettings(
+            NormalizeIconDesignMode(settings.IconDesignModeKey),
+            Math.Clamp(
+                settings.IconDesignImageWidth ?? DefaultIconImageWidth,
+                IconPerspectiveProjectionService.MinimumImageDimension,
+                IconPerspectiveProjectionService.MaximumImageDimension),
+            Math.Clamp(
+                settings.IconDesignImageHeight ?? DefaultIconImageHeight,
+                IconPerspectiveProjectionService.MinimumImageDimension,
+                IconPerspectiveProjectionService.MaximumImageDimension),
+            ClampFinite(
+                settings.IconDesignCameraAzimuthDegrees,
+                DefaultIconCameraAzimuthDegrees,
+                -180d,
+                180d),
+            ClampFinite(
+                settings.IconDesignCameraElevationDegrees,
+                DefaultIconCameraElevationDegrees,
+                IconPerspectiveProjectionService.MinimumElevationDegrees,
+                IconPerspectiveProjectionService.MaximumElevationDegrees),
+            ClampFinite(
+                settings.IconDesignCameraRollDegrees,
+                DefaultIconCameraRollDegrees,
+                -180d,
+                180d),
+            ClampFinite(
+                settings.IconDesignCameraDistance,
+                DefaultIconCameraDistance,
+                IconPerspectiveProjectionService.MinimumCameraDistance,
+                MaximumEditorCameraDistance),
+            ClampFinite(
+                settings.IconDesignFocalLengthMillimeters,
+                DefaultIconFocalLengthMillimeters,
+                IconPerspectiveProjectionService.MinimumFocalLengthMillimeters,
+                IconPerspectiveProjectionService.MaximumFocalLengthMillimeters));
 
-        return new WorkspaceContext(workflow, assets, tilemap, settingsFileExists, options.SettingsFilePath);
+        return new WorkspaceContext(
+            workflow,
+            activeGenerationStep,
+            assets,
+            tilemap,
+            iconDesign,
+            settingsFileExists,
+            options.SettingsFilePath);
     }
 
     public IReadOnlyList<string> ValidateCompletedAssetPaths(IEnumerable<string> assetPaths)
@@ -247,7 +317,15 @@ internal sealed class WorkspaceContextResolver(ServerOptions options)
             TilemapArtImageWidth = ReadInt32(root, "tilemapArtImageWidth"),
             TilemapArtImageHeight = ReadInt32(root, "tilemapArtImageHeight"),
             TilemapDiamondAngle = ReadDouble(root, "tilemapDiamondAngle"),
-            TilemapRotationAngle = ReadDouble(root, "tilemapRotationAngle")
+            TilemapRotationAngle = ReadDouble(root, "tilemapRotationAngle"),
+            IconDesignModeKey = ReadString(root, "iconDesignModeKey"),
+            IconDesignImageWidth = ReadInt32(root, "iconDesignImageWidth"),
+            IconDesignImageHeight = ReadInt32(root, "iconDesignImageHeight"),
+            IconDesignCameraAzimuthDegrees = ReadDouble(root, "iconDesignCameraAzimuthDegrees"),
+            IconDesignCameraElevationDegrees = ReadDouble(root, "iconDesignCameraElevationDegrees"),
+            IconDesignCameraRollDegrees = ReadDouble(root, "iconDesignCameraRollDegrees"),
+            IconDesignCameraDistance = ReadDouble(root, "iconDesignCameraDistance"),
+            IconDesignFocalLengthMillimeters = ReadDouble(root, "iconDesignFocalLengthMillimeters")
         };
     }
 
@@ -413,6 +491,48 @@ internal sealed class WorkspaceContextResolver(ServerOptions options)
     private static double ClampFinite(double? value, double fallback, double minimum, double maximum) =>
         value is { } number && double.IsFinite(number) ? Math.Clamp(number, minimum, maximum) : fallback;
 
+    private static AssetGenerationStepContext ResolveGenerationStep(string? key)
+    {
+        if (string.Equals(key, IconDesignConstraintPackageBuilder.WorkflowId, StringComparison.OrdinalIgnoreCase))
+        {
+            return new AssetGenerationStepContext(
+                IconDesignConstraintPackageBuilder.WorkflowId,
+                "Icon 图标制作",
+                "使用当前 Icon 相机、镜头、画幅与指定角度描述生成透明游戏图标。",
+                true);
+        }
+
+        if (string.IsNullOrWhiteSpace(key) ||
+            string.Equals(key, TilemapConstraintPackageBuilder.WorkflowId, StringComparison.OrdinalIgnoreCase))
+        {
+            return new AssetGenerationStepContext(
+                TilemapConstraintPackageBuilder.WorkflowId,
+                "Tilemap 制作",
+                "使用当前 Tilemap 网格、画布尺寸、控制角与旋转参数生成透明瓦片。",
+                true);
+        }
+
+        var workflow = WorkflowCatalog.All.FirstOrDefault(item =>
+            string.Equals(item.Key, key, StringComparison.OrdinalIgnoreCase));
+        return workflow is null
+            ? new AssetGenerationStepContext(
+                key.Trim(),
+                key.Trim(),
+                "当前生成步骤尚未提供 MCP 专用约束构建器。",
+                false)
+            : new AssetGenerationStepContext(
+                workflow.Key,
+                workflow.Label,
+                workflow.Description,
+                false);
+    }
+
+    private static string NormalizeIconDesignMode(string? value) =>
+        string.Equals(value, nameof(IconDesignMode.SpecifiedAngle), StringComparison.OrdinalIgnoreCase) ||
+        string.Equals(value, IconDesignConstraintPackageBuilder.SpecifiedAngleModeKey, StringComparison.OrdinalIgnoreCase)
+            ? IconDesignConstraintPackageBuilder.SpecifiedAngleModeKey
+            : IconDesignConstraintPackageBuilder.SpecifiedAngleModeKey;
+
     private sealed class SettingsSnapshot
     {
         public string? ActiveWorkflowKey { get; init; }
@@ -424,5 +544,13 @@ internal sealed class WorkspaceContextResolver(ServerOptions options)
         public int? TilemapArtImageHeight { get; init; }
         public double? TilemapDiamondAngle { get; init; }
         public double? TilemapRotationAngle { get; init; }
+        public string? IconDesignModeKey { get; init; }
+        public int? IconDesignImageWidth { get; init; }
+        public int? IconDesignImageHeight { get; init; }
+        public double? IconDesignCameraAzimuthDegrees { get; init; }
+        public double? IconDesignCameraElevationDegrees { get; init; }
+        public double? IconDesignCameraRollDegrees { get; init; }
+        public double? IconDesignCameraDistance { get; init; }
+        public double? IconDesignFocalLengthMillimeters { get; init; }
     }
 }

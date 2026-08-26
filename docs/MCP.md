@@ -176,8 +176,10 @@ codex exec resume --json ... <threadId> -
 - 整批最多预分配 256 个产物。
 - 可导入 `.xlsx/.xls/.csv/.tsv`，在 Excel 风格预览中选择工作表、描述列和有效行后追加或替换任务表。
   导入行数量默认为 1，输出目录继承当前任务行；工作簿中的路径、公式、宏和外部链接不会被执行。
+- 生成步骤当前支持 `tilemap` 与 `icon-design`。Icon 步骤读取共享属性栏中的制作模式、画幅、方位/仰角/
+  滚转、物距、焦距和稳定生成角度描述；主体未完整入镜时在发布前拒绝任务。
 - 点击发布时原子创建批次；每一行按数量展开，每张图片形成一个独立 `GenerationTask`，共享本次风格与
-  工作流约束快照。
+  生成步骤约束快照。Icon 批次不会在后续属性变化时重新读取相机状态。
 - 新任务固定 `output.count=1`、`outputIndex=0`。`maxParallelism=1` 只作为旧 Schema 兼容值保留，页面不再
   暴露或向 Agent 传递“并行图片数”；任务间并发和多 Agent 分配由当前 Agent Host 默认调度。
 - 单张失败不会阻塞其他任务。自动重做默认开启，默认值是初次生成后再尝试 3 次（共 4 次尝试）；页面可
@@ -281,10 +283,12 @@ task ID，不能省略 task ID 去领取其他待办。成功返回退出码 `0`
 
 ```text
 <所选 Assets 内目录>/Tilemap/<batchId>/Final/*.png
+<所选 Assets 内目录>/Icon/<batchId>/Final/*.png
 ```
 
-若用户选择的就是 Assets 根，软件使用 `Assets/Generated/Tilemap/<batchId>/Final`。权威位置始终来自任务冻结
-的 `delivery.assetRoot + delivery.targetPaths`，不会回落到 Codex 默认 `generated_images`，也不会随之后的
+若用户选择的就是 Assets 根，软件分别使用 `Assets/Generated/Tilemap/<batchId>/Final` 或
+`Assets/Generated/Icon/<batchId>/Final`。权威位置始终来自任务冻结的
+`delivery.assetRoot + delivery.targetPaths`，不会回落到 Codex 默认 `generated_images`，也不会随之后的
 Project 切换漂移。
 
 “生成产物”窗口会持续扫描四个阶段，不等待整批完成：模型原图、画布归一化图、背景处理图或最终文件任一
@@ -413,7 +417,7 @@ GAssetForge.McpServer.exe
 | MCP Tool | 用途 |
 | --- | --- |
 | `server_info` | 查看版本、数据目录、任务文件和有效 Assets 根目录 |
-| `get_current_context` | 读取当前工作流、Tilemap 参数并生成正式约束包 |
+| `get_current_context` | 读取当前素材生成步骤、Tilemap/Icon 参数并生成对应正式约束包 |
 | `create_generation_task` | 向本地持久化队列创建 AI 美术任务 |
 | `list_generation_tasks` | 按状态或工作流查询任务 |
 | `get_generation_task` | 获取指定任务及交付计划 |
@@ -423,6 +427,17 @@ GAssetForge.McpServer.exe
 | `process_generation_output` | 旧兼容合同：按零基 `outputIndex` 把 staging 原图本地剔色并写入最终 target |
 | `complete_generation_task` | 旧兼容合同：校验完整目标集合后完成多图或无 Run 任务 |
 | `fail_generation_task` | 记录失败原因并结束任务 |
+
+`get_current_context` 的生成选择以素材生成页保存的步骤为准。响应新增：
+
+- `activeGenerationStep`：当前步骤的 `key`、显示名、说明和是否已有专用约束构建器；调用方应以它判断
+  `tilemap` 或 `icon-design`。
+- `iconDesign`：规范化后的模式、画幅、相机方位/仰角/滚转、物距和焦距。
+- `generationConstraints` / `generationMetrics`：按 `activeGenerationStep` 由 Tilemap 或 Icon Core 构建器生成。
+
+旧字段 `activeWorkflow` 继续保留以兼容现有客户端，但它仍表达历史项目/业务模板语义；Icon 是素材生成步骤而
+不是新建项目模板，因此新调用方不能再仅根据 `activeWorkflow` 判断应使用哪类生成约束。`tilemap` 字段也继续
+返回，便于旧客户端和诊断工具读取，不代表当前一定选择了 Tilemap 步骤。
 
 新任务的正常顺序：
 
@@ -538,7 +553,8 @@ timeout、socket、connection、HTTP 429/5xx 或 temporarily unavailable 证据�
 
 ### 背景剔除生成契约
 
-背景剔除是客户端 Harness 的可选确定性工序。新任务把规则冻结在 `output.backgroundRemoval`；Agent 只需让
+背景剔除是 Tilemap 与 Icon 共用的客户端 Harness 可选确定性工序。两个步骤都通过
+`GenerationBackgroundContractBuilder` 把规则冻结在 `output.backgroundRemoval` 和结构化背景参数中；Agent 只需让
 真实图像模型按 `colorHex` 生成均匀纯色底 PNG，然后把模型返回的绝对 `sourcePath` 交给
 `submit_generation_output`。`parameters.delivery.stagingPaths[0]` 现在是软件管理的
 `35-normalized-input` 文件，不再是 Agent 必须亲自写入的路径。
@@ -737,6 +753,9 @@ Pending → Claimed → Completed
 - 背景剔除任务在创建时即按 `width × height × 4` 校验 513 MiB 单图解码预算，避免创建必然无法后处理的任务。
 - Tilemap 的 `parameters.background` 使用 `generationStage` / `finalStage` 分别描述“不透明纯色生成底图”和
   “真实透明最终 PNG”；校验器仍兼容旧任务的 `transparent=true` 结构。
+- Icon 同样冻结 `parameters.background`，并在 `parameters.iconDesign` 中同时保存模式、精确画幅、投影约定、
+  相机位置与基向量、FOV、画面包围盒、完整入镜状态和 `generationAngleDescription`；Agent 不得自行改成
+  等距、正投影或其它角度。
 - `submit_generation_output` 只接受认领者、单图 `outputIndex=0`、有效 workspace 和允许来源中的真实 PNG；
   原图导入采用哈希保护，归一化/剔色中间图和最终 target 均使用临时文件后原子移动。
 - 新提交成功后自动调用任务完成状态迁移；重复提交已完成任务时幂等返回既有 target，不覆盖不同模型原图。

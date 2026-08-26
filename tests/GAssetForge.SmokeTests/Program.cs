@@ -64,6 +64,8 @@ internal static class Program
             Console.WriteLine("PASS  Tilemap 几何校验区分长方形、旋转方形与真实菱形并输出结构化诊断");
             IconPerspectiveProjectionSmokeTests.Run();
             Console.WriteLine("PASS  Icon 指定角度投影遵循稳定世界坐标、镜头滚转与构图缩放规则");
+            IconDesignGenerationConstraintSmokeTests.Run();
+            Console.WriteLine("PASS  Icon 生成步骤冻结画幅、相机、镜头、投影与背景处理合同");
             ProductIdentityCompatibilitySmokeTests.Run();
             Console.WriteLine("PASS  GAssetForge 新标识与旧数据、项目、MCP 和调度身份兼容");
             ReleaseVersionConsistencySmokeTests.RunAsync(_temporaryRoot).GetAwaiter().GetResult();
@@ -130,6 +132,8 @@ internal static class Program
             Console.WriteLine("PASS  生成约束注入纯色底图并为每张产物分配背景剔除暂存交付路径");
             AssetGenerationBatchSmokeTests.Run();
             Console.WriteLine("PASS  素材生成可离线批量发布、追溯认领者并即时展示进行中落盘产物");
+            IconAssetGenerationWorkflowSmokeTests.Run();
+            Console.WriteLine("PASS  素材生成可选择 Icon 步骤并冻结相机画幅、独立目录与不可变任务合同");
             AssetGenerationProjectIsolationSmokeTests.Run();
             Console.WriteLine("PASS  素材生成保留本次会话在途批次，并在重载后按项目 Assets 根目录恢复");
             GenerationReferenceSnapshotsFailFastAndStreamHashes();
@@ -1035,8 +1039,17 @@ internal static class Program
             True(ReferenceEquals(shell.IconDesign, iconDesignView.DataContext),
                 "Icon 图标制作应绑定 Shell 持有的单实例 ViewModel");
 
+            var properties = FindDockContent(manager, MainWindow.PropertiesContentId) as LayoutAnchorable
+                ?? throw new SmokeTestException("停靠交互测试未找到属性面板。");
+            var propertiesHost = properties.Content as ContentControl
+                ?? throw new SmokeTestException("属性面板必须由 ContentControl 承载。");
+            var iconPropertiesView = propertiesHost.Content as IconDesignPropertiesView
+                ?? throw new SmokeTestException("激活 Icon 图标制作后属性栏未切换为 IconDesignPropertiesView。");
+            True(ReferenceEquals(shell.IconDesign, iconPropertiesView.DataContext),
+                "Icon 属性栏与主视图必须共享同一个 ViewModel");
+
             var iconModeComboBox = RequireNamedElement<ComboBox>(
-                iconDesignView,
+                iconPropertiesView,
                 "IconDesignModeComboBox",
                 "Icon 图标制作缺少制作模式下拉框。");
             iconModeComboBox.GetBindingExpression(ItemsControl.ItemsSourceProperty)?.UpdateTarget();
@@ -1049,11 +1062,11 @@ internal static class Program
                 "Icon 制作模式选择绑定");
 
             var iconImageWidthTextBox = RequireNamedElement<TextBox>(
-                iconDesignView,
+                iconPropertiesView,
                 "IconImageWidthTextBox",
                 "Icon 图标制作缺少图片宽度输入框。");
             var iconImageHeightTextBox = RequireNamedElement<TextBox>(
-                iconDesignView,
+                iconPropertiesView,
                 "IconImageHeightTextBox",
                 "Icon 图标制作缺少图片高度输入框。");
             Equal(nameof(IconDesignViewModel.ImageWidth),
@@ -1078,7 +1091,7 @@ internal static class Program
             foreach (var sliderBinding in iconSliderBindings)
             {
                 var slider = RequireNamedElement<Slider>(
-                    iconDesignView,
+                    iconPropertiesView,
                     sliderBinding.Name,
                     $"Icon 图标制作缺少 {sliderBinding.Name}。");
                 Equal(sliderBinding.Path,
@@ -1112,6 +1125,13 @@ internal static class Program
                 "Icon 左侧主视图类型");
             Equal(IconPerspectiveSurfaceViewKind.CameraFrame, iconCameraFrameSurface.ViewKind,
                 "Icon 右侧主视图类型");
+
+            shell.ShowPanelCommand.Execute(MainWindow.AssetGenerationContentId);
+            True(propertiesHost.Content is PropertiesView,
+                "从 Icon 切到其它共享工具页后应恢复当前 UI 工作流属性栏");
+            shell.ShowPanelCommand.Execute(MainWindow.IconDesignContentId);
+            True(ReferenceEquals(iconPropertiesView, propertiesHost.Content),
+                "再次激活 Icon 时应恢复同一个 Icon 属性视图实例");
 
             var backgroundRemovalHost = backgroundRemoval.Content as ContentControl
                 ?? throw new SmokeTestException("背景剔除工具缺少稳定 ContentControl host。");
@@ -3013,6 +3033,50 @@ internal static class Program
             True(constraints.GetProperty("prompt").GetString()!.Contains("顺时针旋转 45°", StringComparison.Ordinal),
                 "MCP 提示词应包含当前 Tilemap 旋转规则");
 
+            new UserSettingsService(paths).Save(new UserSettingsModel
+            {
+                ActiveWorkflowKey = "ui",
+                AssetGenerationStepKey = IconDesignConstraintPackageBuilder.WorkflowId,
+                HasCompletedWorkflowSelection = true,
+                IconDesignModeKey = "SpecifiedAngle",
+                IconDesignImageWidth = 768,
+                IconDesignImageHeight = 640,
+                IconDesignCameraAzimuthDegrees = -35d,
+                IconDesignCameraElevationDegrees = 22d,
+                IconDesignCameraRollDegrees = 8d,
+                IconDesignCameraDistance = 6.25d,
+                IconDesignFocalLengthMillimeters = 70d
+            });
+            using var iconContext = CallMcpTool(process, 30, "get_current_context", new
+            {
+                contentPrompt = "镶嵌蓝色宝石的银质护符 Icon",
+                stylePrompt = "手绘奇幻游戏图标"
+            });
+            var iconContextPayload = iconContext.RootElement
+                .GetProperty("result")
+                .GetProperty("structuredContent");
+            Equal(IconDesignConstraintPackageBuilder.WorkflowId,
+                iconContextPayload.GetProperty("activeGenerationStep").GetProperty("key").GetString(),
+                "MCP 应把 Icon 识别为独立素材生成步骤而非项目模板");
+            Equal(768,
+                iconContextPayload.GetProperty("iconDesign").GetProperty("imageWidth").GetInt32(),
+                "MCP 应读取持久化 Icon 画幅宽度");
+            var iconConstraints = iconContextPayload.GetProperty("generationConstraints");
+            Equal(IconDesignConstraintPackageBuilder.WorkflowId,
+                iconConstraints.GetProperty("workflowId").GetString(),
+                "MCP Icon 当前约束 workflowId");
+            Equal(768, iconConstraints.GetProperty("output").GetProperty("width").GetInt32(),
+                "MCP Icon 当前约束画幅宽度");
+            Equal(-35d,
+                iconConstraints.GetProperty("parameters")
+                    .GetProperty("iconDesign")
+                    .GetProperty("cameraAzimuthDegrees")
+                    .GetDouble(),
+                "MCP Icon 当前约束方位角");
+            True(iconConstraints.GetProperty("prompt").GetString()!
+                    .Contains("不得自行改为等距、正投影或其他角度", StringComparison.Ordinal),
+                "MCP Icon 当前约束应包含禁止改角规则");
+
             using var created = CallMcpTool(process, 4, "create_generation_task", new
             {
                 displayName = "Smoke Tilemap Generation",
@@ -3978,8 +4042,8 @@ internal static class Program
             _ = RequireBoundElement<TextBlock>(
                 generationView,
                 TextBlock.TextProperty,
-                nameof(AssetGenerationViewModel.TilemapGeometryText),
-                "素材生成页缺少 Tilemap 几何约束绑定。");
+                nameof(AssetGenerationViewModel.GenerationPerspectiveText),
+                "素材生成页缺少当前生成步骤的相机与透视绑定。");
             _ = RequireBoundElement<TextBox>(
                 generationView,
                 TextBox.TextProperty,
@@ -4163,8 +4227,8 @@ internal static class Program
 
             Equal("512 × 256 px · PNG · 透明背景", generation.CanvasSizeText,
                 "素材生成 Tilemap 画布摘要");
-            True(generation.TilemapGeometryText.Contains("A/B 边夹角 48°", StringComparison.Ordinal) &&
-                 generation.TilemapGeometryText.Contains("A 边方向 27.5°", StringComparison.Ordinal),
+            True(generation.GenerationPerspectiveText.Contains("A/B 边夹角 48°", StringComparison.Ordinal) &&
+                 generation.GenerationPerspectiveText.Contains("A 边方向 27.5°", StringComparison.Ordinal),
                 "素材生成应公开 Tilemap 边夹角与绝对方向参数");
             True(generation.ConstraintPreview.Contains(styleGroup.Description, StringComparison.Ordinal) &&
                  generation.ConstraintPreview.Contains("512 × 256", StringComparison.Ordinal) &&

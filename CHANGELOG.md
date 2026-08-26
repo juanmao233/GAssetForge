@@ -5,6 +5,40 @@ development track; versioning policy will be finalized before the first public r
 
 ## Unreleased
 
+## 1.0.11t1 - 2026-08-26
+
+### Added
+
+- Added a dedicated Icon properties panel that appears whenever the `icon-design` dock page is active.
+  It shares the same settings-backed view model as the dual camera preview and exposes the production mode,
+  output canvas, azimuth, elevation, roll, camera distance, focal length, framing diagnostics, presets, and
+  generated angle description in the standard right-side Properties workflow.
+- Added `Icon 图标制作` as a real Asset Generation step. Published tasks freeze a provider-neutral
+  `icon-design` contract containing the exact canvas, camera basis, pinhole projection convention, focal
+  length, field of view, normalized framing bounds, transparent-background stages, and reusable angle text.
+- Added MCP `get_current_context` support for an independent `activeGenerationStep` and persisted Icon camera
+  settings without registering Icon as a New Project template.
+
+### Changed
+
+- Simplified the Icon main dock page to the spatial rig and final camera-frame previews; all editable camera
+  and canvas controls now follow the same context-sensitive Properties-panel model as Tilemap.
+- Generalized Asset Generation summaries, batch names, project folders, filenames, manifests, and automatic
+  or manual retry paths by workflow. Icon outputs now use `Generated/Icon/<batchId>/Final` and `icon_` names,
+  while existing Tilemap paths remain unchanged.
+- Unified Tilemap and Icon first-stage background contracts through one Core helper while preserving the
+  established Tilemap JSON fields and using subject-specific Alpha semantics for Icon assets.
+
+### Fixed
+
+- Prevented switching generation steps or editing Icon settings during asynchronous style snapshot work from
+  mutating a batch already being published; the selected step and all perspective parameters are captured
+  before the first await and remain immutable in persisted tasks.
+- Blocked Icon task publication when the current camera projection cuts the subject outside the frame, with
+  an actionable prompt to reduce focal length or increase camera distance.
+- Prevented Icon retries and diagnostic MCP context from falling back to Tilemap directories, prefixes, or UI
+  workflow constraints.
+
 ## 1.0.10t1 - 2026-08-25
 
 ### Added

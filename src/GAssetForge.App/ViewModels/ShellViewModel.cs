@@ -269,7 +269,8 @@ public sealed class ShellViewModel : ObservableObject
             _settings.AssetGenerationAutoRetryCount,
             _settings.AssetGenerationPreferUnifiedStylePrompt,
             spreadsheetPicker: assetGenerationSpreadsheetPicker,
-            spreadsheetReader: assetGenerationSpreadsheetReader);
+            spreadsheetReader: assetGenerationSpreadsheetReader,
+            iconDesign: IconDesign);
         AssetGeneration.SettingsChanged += OnAssetGenerationSettingsChanged;
         AssetGeneration.StyleLibraryRequested += OnAssetGenerationStyleLibraryRequested;
         AssetGeneration.AgentConnectionRequested += OnAssetGenerationAgentConnectionRequested;

@@ -538,6 +538,7 @@ internal static class AssetGenerationBatchSmokeTests
                             out var retryDelivery) &&
                          retryDelivery is not null &&
                          retryDelivery.TargetPaths.All(path =>
+                             path.Contains($"/{manualRetryEvent.BatchId}/Final/", StringComparison.Ordinal) &&
                              path.Contains("_manual_r", StringComparison.Ordinal)),
                         $"手动重试第 {index + 1} 项应分配新的人工接力交付路径");
                 }

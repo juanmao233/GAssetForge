@@ -46,12 +46,12 @@ AvalonDock 的模块接口只承担面板拓扑、大小、停靠位置、隐藏
 | `asset-generation` | 素材生成 | 与 Project 共用画布下方标签停靠区 |
 | `background-removal` | 背景剔除 / 假透明棋盘格恢复 | 与 Project 共用画布下方标签停靠区 |
 | `image-outline` | 图片描边工具 | 与 Project 共用画布下方标签停靠区 |
-| `icon-design` | Icon 指定角度与镜头构图设计 | 与 Project 共用画布下方标签停靠区 |
+| `icon-design` | Icon 指定角度与镜头构图主视图 | 与 Project 共用画布下方标签停靠区；激活时接管共享属性栏 |
 | `pixel-grid-alignment` | 像素点对齐工具 | 与 Project 共用画布下方标签停靠区 |
 | `workflow-blueprint` | Agent 与工具工作流蓝图 | 与 Project 共用画布下方标签停靠区 |
 | `mcp-agent-connection` | MCP Agent 连接管理 | 默认隐藏；拉起后位于宽底部区域 |
 
-`MainWindow` 维护面板注册表。布局恢复时，`AvalonDockLayoutService` 仅根据 `ContentId` 把真实 WPF View 重新挂接到布局模型；恢复失败则重建默认布局。
+`MainWindow` 维护面板注册表。布局恢复时，`AvalonDockLayoutService` 仅根据 `ContentId` 把真实 WPF View 重新挂接到布局模型；恢复失败则重建默认布局。工具栏上下文和属性栏上下文相互独立：激活 `icon-design` 时，稳定的 `ui-properties` host 装载单实例 `IconDesignPropertiesView`；激活 UI 或 Tilemap 工作流文档时再恢复各自属性视图，因此无需为 Icon 创建第二个属性 ContentId，也不会改变已保存布局结构。
 
 ### 独立状态生命周期
 
@@ -121,10 +121,15 @@ expansion 防止外描边被裁切。
 Right/Up 基向量，不修改方块世界姿态。服务根据图片宽高、固定 24 mm 传感器高度和焦距计算水平/垂直视场角，
 返回方块顶点、面朝向、镜头像素坐标、画面包围盒及是否完整入镜。
 
-`IconDesignViewModel` 持有单实例参数、预设、实时生成描述和用户设置快照。两个
-`IconPerspectiveSurface` 只消费同一份不可变投影快照：空间模式显示相机、方块和视锥，镜头模式按目标画幅比例显示
-投影结果。该页面目前不调用 Agent 或图片模型；它提供稳定的透视约束输入，后续生成工作流应冻结这些数值，而不是
-从预览像素反推相机角度。
+`IconDesignViewModel` 持有单实例参数、预设、实时生成描述和用户设置快照。可编辑的制作模式、画幅、相机与镜头
+参数、预设和生成角度描述位于 `IconDesignPropertiesView`；`IconDesignView` 只保留两个
+`IconPerspectiveSurface` 和状态摘要。两个 surface 消费同一份不可变投影快照：空间模式显示相机、方块和视锥，
+镜头模式按目标画幅比例显示投影结果。
+
+`IconDesignConstraintPackageBuilder` 把这套确定性投影接入正式素材生成。发布时从 ViewModel 捕获一次
+`IconDesignGenerationConstraintInput`，随后冻结模式、精确画幅、方位/仰角/滚转、物距、焦距、固定传感器高度、
+相机位置与 Forward/Right/Up 基向量、水平/垂直 FOV、画面包围盒、完整入镜状态、生成角度描述和背景合同。
+Agent 与 MCP 只消费冻结约束，不能从预览像素反推相机角度；当前投影未完整入镜时客户端在发布前拒绝任务。
 
 ### 风格分析一次性文件协议
 
@@ -146,7 +151,9 @@ Agent 必须逐张使用视觉能力检查，只归纳共同视觉语言。参�
 身份字段、分析器、时间、长度、参考图存在性和 SHA-256，并将当前完整素材 ID 集合写入最终样本。
 
 AI 生成任务是第四条本地运行时 seam，保存于 `Generation\generation-tasks.v1.json`。`AssetGenerationView`
-以表格收集多行内容描述、数量和输出目录，并把当前风格组与 Tilemap 参数组合为 provider-neutral 约束包。
+以表格收集多行内容描述、数量和输出目录，并把当前风格组与所选生成步骤组合为 provider-neutral 约束包。正式步骤
+目前包括 Tilemap 和 Icon；前者冻结网格与瓦片投影，后者冻结上述 Icon 相机投影和角度描述。两者共用同一套
+`GenerationBackgroundContractBuilder`，保证首道纯色底与最终真实 Alpha 合同不会因业务构建器不同而漂移。
 步骤 2 还通过 `IAssetGenerationSpreadsheetReader` / `IAssetGenerationSpreadsheetPicker` 提供独立导入 seam：
 ExcelDataReader 只把 `.xlsx/.xls/.csv/.tsv` 转为有界、惰性的 workbook/sheet/column/row 值模型，公式只取缓存值，
 不执行宏、外部链接或工作簿内容。预览、工作表选择、描述列和勾选行属于会话瞬态状态；真正追加或替换后的
@@ -156,8 +163,10 @@ ExcelDataReader 只把 `.xlsx/.xls/.csv/.tsv` 转为有界、惰性的 workbook/
 交给当前 Agent Host 的默认调度，不再把页面“并行图片数”作为生成协议的一部分。页面默认开启统一提示词
 优先：选中组存在新鲜样本时，任务冻结 `sourceMode=unified-prompt-only`、样本文本、来源指纹和生成时间，参考图
 集合为空，也不会创建或镜像参考图快照；样本缺失、过期或用户关闭开关时，明确回退到描述、人工提示词和当前
-参考图快照。交付计划始终冻结任务创建时的绝对 Assets 根、项目内运行路径和唯一最终目标路径。任务队列不写入
-UI 项目 Schema、Undo/Redo 或 AvalonDock 布局，也不依赖 Agent 或 MCP HTTP 会话持续在线。
+参考图快照。交付计划始终冻结任务创建时的绝对 Assets 根、项目内运行路径和唯一最终目标路径。Assets 根作为行
+输出位置时，Tilemap 与 Icon 分别交付到 `Generated/Tilemap/<batchId>/Final` 和
+`Generated/Icon/<batchId>/Final`；选择 Assets 内子目录时在该目录下追加同样的业务分类。任务队列不写入 UI
+项目 Schema、Undo/Redo 或 AvalonDock 布局，也不依赖 Agent 或 MCP HTTP 会话持续在线。
 
 ### 客户端 + Harness + Skill + MCP/ACP 分层
 
@@ -228,6 +237,11 @@ MCP 负责工具调用和授权边界，不负责 Agent 持久会话。项目内
 组合的架构简称，不作为标准协议、产品兼容性或外部配置格式宣传。OpenCode 当前只有不可启动的 profile 与
 Adapter seam；在实现并验证真实 Adapter 前不能呈现为可用连接。
 
+`get_current_context` 把“当前项目工作流”和“当前素材生成步骤”分离。`activeGenerationStep` 是生成约束选择的
+权威字段，`iconDesign` 提供规范化后的 Icon 画幅与相机输入；Core 根据步骤返回对应的
+`generationConstraints` / `generationMetrics`。`activeWorkflow` 与 `tilemap` 继续保留以兼容旧 MCP 客户端，
+但新调用方不得再用 `activeWorkflow` 推断 Icon，因为 Icon 是共享工具页和生成步骤，不是项目模板。
+
 实现以官方 OpenAI 文档为基线：
 
 - [Codex App Server](https://developers.openai.com/codex/app-server/)
@@ -278,8 +292,8 @@ Assets/Generated/GAssetForge/Runs/<batchId>/
 
 `00-manifest/run.v1.json` 将每个 `itemId`、`taskId`、表格行、变体序号、模型原图、归一化图、剔色图和最终
 目标关联起来。`50-final` 是 Run 内预建的最终阶段分类 seam；权威交付文件仍按用户选定位置写入
-`<输出目录>/Tilemap/<batchId>/Final/*.png`，并由任务冻结的 `delivery.targetPaths` 决定，避免回落到 Codex
-默认 `generated_images` 或用户后来切换的项目。
+`<输出目录>/Tilemap/<batchId>/Final/*.png` 或 `<输出目录>/Icon/<batchId>/Final/*.png`，并由任务冻结的
+`delivery.targetPaths` 决定，避免回落到 Codex 默认 `generated_images` 或用户后来切换的项目。
 
 “生成产物”并不等待整个批次结束才刷新。轮询会同时检查 `30-model-output`、`35-normalized-input`、
 `40-background-removed` 和正式 `targetPaths`；任一文件真实落盘后就立即创建对应的“模型原图 / 画布归一化 /
@@ -308,7 +322,8 @@ Assets/Generated/GAssetForge/Runs/<batchId>/
 或 Run 准备失败，父任务会持久化 `AutomaticRetryBlockedReason`，界面切换为“自动重做受阻，可人工接管”，
 不再占用人工重试入口。若 child 已经原子入库而 manifest/通知随后失败，child 仍保持可见并可由恢复器继续派发。
 
-完成校验使用任务创建时的 `delivery.assetRoot`，不读取用户后来切换的新 Project 根；Tilemap PNG 会真实
+完成校验使用任务创建时的 `delivery.assetRoot`，不读取用户后来切换的新 Project 根；Icon 与 Tilemap 都按冻结
+画幅、真实 Alpha 和背景合同进入同一确定性交付链。Tilemap PNG 还会真实
 解压 IDAT、校验精确尺寸，并要求瓦片有效轮廓外 Alpha 为 0。Core 同时冻结 A/B 两条边的绝对屏幕角度；
 90°/0° 被明确解释为画布轴对齐正方形，Agent 不得二次概括为 diamond/rhombus，校验器也会拒绝实际呈
 上下尖角、中心最宽且四个角部缺失的内接 45° 钻石形。任务认领使用 30 分钟租约，异常退出的 Agent 不会

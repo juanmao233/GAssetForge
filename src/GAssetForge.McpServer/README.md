@@ -152,12 +152,19 @@ HTTP 默认端口为 `43120`，`--expected-agent` 支持 `codex` 与 `opencode`�
 任务创建、列表与任意上下文读取不会暴露给这条自动 Turn。一次性 `--invoke-tool` 人工桥接使用相同 worker
 白名单。
 
+通用 MCP 客户端调用 `get_current_context` 时，应以新增的 `activeGenerationStep` 选择 Tilemap 或
+`icon-design` 约束；`iconDesign` 返回规范化模式、画幅和相机参数，`generationConstraints` /
+`generationMetrics` 与该步骤一致。`activeWorkflow` 和 `tilemap` 继续保留用于旧客户端兼容，但 Icon 不是项目
+模板，新客户端不能只根据 `activeWorkflow` 判断生成步骤。
+
 桌面“素材生成”页把数量展开为多个 `output.count=1` 的 Pending 任务，并冻结 `parameters.style`、
-`parameters.delivery` 与项目内 `delivery.workspace`。Agent 对每个 task 只执行
+`parameters.delivery` 与项目内 `delivery.workspace`。Tilemap 任务冻结网格投影；Icon 任务还会冻结制作模式、
+精确画幅、相机方位/仰角/滚转、物距、焦距、投影派生数据、生成角度描述和共用背景合同。Agent 对每个 task 只执行
 `claim_generation_task → 真实内置 ImageGen → savedPath 有值时 submit_generation_output / savedPath 为空时 run_image_delivery_fallback`；任务间并发由 Agent Host 默认调度，
 不再读取页面并行数。模型返回的 `sourcePath` 可以位于 Codex 临时目录，服务会原样归档到当前项目
 `Assets/Generated/GAssetForge/Runs/<batchId>/30-model-output`，再写入 `35-normalized-input`、
-`40-background-removed` 和冻结的最终 `targetPaths`，并自动完成任务登记。
+`40-background-removed` 和冻结的最终 `targetPaths`，并自动完成任务登记。Assets 根作为输出位置时，正式结果分别
+位于 `Generated/Tilemap/<batchId>/Final` 或 `Generated/Icon/<batchId>/Final`。
 
 若图片已生成、导入和完成中间处理，但 90°/0° Tilemap 前景主体几何未通过，
 `submit_generation_output` 不抛 MCP tool error，而是正常返回

@@ -287,7 +287,7 @@
                         <TextBlock Margin="0,3,0,0"
                                    Foreground="{DynamicResource App.TextSecondaryBrush}"
                                    FontSize="10"
-                                   Text="组合风格参考、Tilemap 约束与内容描述，在应用内直接调度 Agent 生成素材" />
+                                   Text="组合风格参考、当前生成步骤约束与内容描述，在应用内直接调度 Agent 生成素材" />
                     </StackPanel>
                 </StackPanel>
             </Grid>
@@ -1005,7 +1005,7 @@
                                     <StackPanel>
                                         <TextBlock Foreground="{DynamicResource App.TextMutedBrush}"
                                                    FontSize="9"
-                                                   Text="TILEMAP 画幅" />
+                                                   Text="当前画幅" />
                                         <TextBlock Margin="0,5,0,0"
                                                    Foreground="{DynamicResource App.TextPrimaryBrush}"
                                                    FontSize="12"
@@ -1017,14 +1017,14 @@
                                     <StackPanel>
                                         <TextBlock Foreground="{DynamicResource App.TextMutedBrush}"
                                                    FontSize="9"
-                                                   Text="透视与几何" />
+                                                   Text="相机与透视" />
                                         <TextBlock Margin="0,5,0,0"
                                                    Foreground="{DynamicResource App.TextPrimaryBrush}"
                                                    FontSize="11"
                                                    FontWeight="SemiBold"
-                                                   Text="{Binding TilemapGeometryText}"
+                                                   Text="{Binding GenerationPerspectiveText}"
                                                    TextTrimming="CharacterEllipsis"
-                                                   ToolTip="{Binding TilemapGeometryText}" />
+                                                   ToolTip="{Binding GenerationPerspectiveText}" />
                                     </StackPanel>
                                 </Border>
                             </Grid>

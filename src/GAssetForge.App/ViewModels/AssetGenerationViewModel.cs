@@ -232,7 +232,11 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         new(
             TilemapConstraintPackageBuilder.WorkflowId,
             "Tilemap 制作",
-            "使用当前 Tilemap 网格、画布尺寸、控制角与旋转参数生成单个透明瓦片。")
+            "使用当前 Tilemap 网格、画布尺寸、控制角与旋转参数生成单个透明瓦片。"),
+        new(
+            IconDesignConstraintPackageBuilder.WorkflowId,
+            "Icon 图标制作",
+            "冻结当前 Icon 画幅、制作模式、相机角度、物距与焦距，生成指定镜头透视的透明图标资产。")
     ];
 
     private static readonly IReadOnlyList<int> SupportedAutoRetryCounts =
@@ -247,6 +251,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
     private readonly IAssetGenerationSpreadsheetReader _spreadsheetReader;
     private readonly ArtStyleLibraryViewModel _styleLibrary;
     private readonly TilemapWorkspaceViewModel _tilemap;
+    private readonly IconDesignViewModel _iconDesign;
     private readonly ProjectBrowserViewModel _projectBrowser;
     private readonly AgentConnectionViewModel _agentConnection;
     private readonly BackgroundRemovalViewModel _backgroundRemoval;
@@ -344,12 +349,14 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         bool preferUnifiedStylePrompt = true,
         TimeProvider? timeProvider = null,
         IAssetGenerationSpreadsheetPicker? spreadsheetPicker = null,
-        IAssetGenerationSpreadsheetReader? spreadsheetReader = null)
+        IAssetGenerationSpreadsheetReader? spreadsheetReader = null,
+        IconDesignViewModel? iconDesign = null)
     {
         _paths = paths ?? throw new ArgumentNullException(nameof(paths));
         _taskStore = taskStore ?? throw new ArgumentNullException(nameof(taskStore));
         _styleLibrary = styleLibrary ?? throw new ArgumentNullException(nameof(styleLibrary));
         _tilemap = tilemap ?? throw new ArgumentNullException(nameof(tilemap));
+        _iconDesign = iconDesign ?? new IconDesignViewModel();
         _projectBrowser = projectBrowser ?? throw new ArgumentNullException(nameof(projectBrowser));
         _agentConnection = agentConnection ?? throw new ArgumentNullException(nameof(agentConnection));
         _outputPicker = outputPicker ?? throw new ArgumentNullException(nameof(outputPicker));
@@ -435,6 +442,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
 
         _styleLibrary.PropertyChanged += OnStyleLibraryPropertyChanged;
         _tilemap.PropertyChanged += OnTilemapPropertyChanged;
+        _iconDesign.PropertyChanged += OnIconDesignPropertyChanged;
         _agentConnection.PropertyChanged += OnAgentConnectionPropertyChanged;
         _agentConnection.AgentActivityReceived += OnAgentActivityReceived;
         _backgroundRemoval.PropertyChanged += OnBackgroundRemovalPropertyChanged;
@@ -814,12 +822,24 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         ? $"已连接 {_agentConnection.SelectedAgent.DisplayName} · {_agentConnection.Endpoint}"
         : $"{_agentConnection.StatusText} · 可离线发布到本地队列，Agent 就绪后再调度";
 
-    public string CanvasSizeText =>
-        $"{_tilemap.ArtImageWidth} × {_tilemap.ArtImageHeight} px · PNG · 透明背景";
+    public string CanvasSizeText => SelectedGenerationStep.Key switch
+    {
+        IconDesignConstraintPackageBuilder.WorkflowId =>
+            $"{_iconDesign.ImageWidth} × {_iconDesign.ImageHeight} px · PNG · 透明背景",
+        _ => $"{_tilemap.ArtImageWidth} × {_tilemap.ArtImageHeight} px · PNG · 透明背景"
+    };
 
-    public string TilemapGeometryText =>
-        $"网格边长 {_tilemap.GridUnitSize:0.##} · {_tilemap.TileShapeText} · " +
-        $"A/B 边夹角 {_tilemap.DiamondAngle:0.##}° · A 边方向 {_tilemap.RotationAngle:0.##}°";
+    public string GenerationPerspectiveText => SelectedGenerationStep.Key switch
+    {
+        IconDesignConstraintPackageBuilder.WorkflowId =>
+            $"{_iconDesign.SelectedMode.DisplayName} · {_iconDesign.AngleDescription} · " +
+            $"{_iconDesign.FocalLengthMillimeters:0.#} mm · 物距 {_iconDesign.CameraDistance:0.##}",
+        _ =>
+            $"网格边长 {_tilemap.GridUnitSize:0.##} · {_tilemap.TileShapeText} · " +
+            $"A/B 边夹角 {_tilemap.DiamondAngle:0.##}° · A 边方向 {_tilemap.RotationAngle:0.##}°"
+    };
+
+    public string TilemapGeometryText => GenerationPerspectiveText;
 
     public string OutputDirectoryHint
     {
@@ -1039,13 +1059,20 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
 
     public bool HasDispatchFailure => !string.IsNullOrWhiteSpace(DispatchFailureText);
 
+    private bool IsSelectedGenerationStepReady => SelectedGenerationStep.Key switch
+    {
+        TilemapConstraintPackageBuilder.WorkflowId => true,
+        IconDesignConstraintPackageBuilder.WorkflowId => _iconDesign.Projection.IsFullyInFrame,
+        _ => false
+    };
+
     public bool CanCreateTask => !IsBusy &&
                                   !IsDispatching &&
                                   SelectedStyleGroup is not null &&
                                   HasUsableSelectedStyle(SelectedStyleGroup) &&
                                   (TryGetFreshUnifiedPrompt(SelectedStyleGroup, out _) ||
                                    TryValidateStyleReferences(SelectedStyleGroup, out _)) &&
-                                  SelectedGenerationStep.Key == TilemapConstraintPackageBuilder.WorkflowId &&
+                                  IsSelectedGenerationStepReady &&
                                   DraftRows.Count > 0 &&
                                   DraftRows.All(row => row.IsValid) &&
                                   BackgroundRemoval.IsGenerationConfigurationValid &&
@@ -1541,11 +1568,13 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
 
                 var attemptNumber = parent.RetryLineage!.AttemptNumber + 1;
                 var itemId = Guid.NewGuid().ToString("N");
+                var filePrefix = GetWorkflowFilePrefix(parent.Constraints.WorkflowId);
                 var suggestedBaseName =
-                    $"tilemap_{retryBatchId[..8]}_attempt_{attemptNumber:D2}_r{index + 1:D2}";
+                    $"{filePrefix}_{retryBatchId[..8]}_attempt_{attemptNumber:D2}_r{index + 1:D2}";
                 var finalOutputDirectory = ResolveRetryOutputDirectory(
                     previousDelivery.OutputDirectory,
-                    retryBatchId);
+                    retryBatchId,
+                    parent.Constraints.WorkflowId);
                 var targetPath = $"{finalOutputDirectory}/{suggestedBaseName}.png";
                 var targetFullPath = Path.GetFullPath(Path.Combine(
                     previousDelivery.AssetRoot,
@@ -2150,6 +2179,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         UnsubscribeStyleGroup(_selectedStyleGroup);
         _styleLibrary.PropertyChanged -= OnStyleLibraryPropertyChanged;
         _tilemap.PropertyChanged -= OnTilemapPropertyChanged;
+        _iconDesign.PropertyChanged -= OnIconDesignPropertyChanged;
         _agentConnection.PropertyChanged -= OnAgentConnectionPropertyChanged;
         _agentConnection.AgentActivityReceived -= OnAgentActivityReceived;
         _backgroundRemoval.PropertyChanged -= OnBackgroundRemovalPropertyChanged;
@@ -2193,6 +2223,8 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         try
         {
             var batchId = Guid.NewGuid().ToString("N");
+            var publication = CapturePublicationSnapshot();
+            var stepSnapshot = publication.Step;
             dispatchBatchId = requestDispatch ? batchId : null;
             if (requestDispatch)
             {
@@ -2200,24 +2232,10 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                     batchId,
                     GenerationBatchDispatchStage.PreparingConstraints,
                     5d,
-                    "读取 Tilemap 参数并校验批量描述、数量与输出目录",
-                    $"正在准备 {DraftRows.Count} 个任务、{TotalRequestedCount} 个预期产物的冻结约束。");
+                    $"读取 {stepSnapshot.DisplayName} 参数并校验批量描述、数量与输出目录",
+                    $"正在准备 {publication.Rows.Length} 个任务、{publication.TotalRequestedCount} 个预期产物的冻结约束。");
             }
 
-            var useUnifiedPrompt = TryGetFreshUnifiedPrompt(
-                SelectedStyleGroup,
-                out var unifiedPromptSample);
-            var sourceReferences = useUnifiedPrompt
-                ? []
-                : SelectedStyleGroup.Assets
-                    .Where(asset => !asset.IsMissing)
-                    .Select(asset => new GenerationReferenceSource(
-                        asset.Id,
-                        asset.Name,
-                        asset.FullPath,
-                        asset.Sha256,
-                        asset.MediaType))
-                    .ToArray();
             if (requestDispatch)
             {
                 ApplyDispatchProgress(
@@ -2225,48 +2243,31 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                     GenerationBatchDispatchStage.FreezingStyleReferences,
                     15d,
                     "GenerationReferenceSnapshotService.CaptureAsync(batchId, references)",
-                    useUnifiedPrompt
+                    publication.UseUnifiedPrompt
                         ? "已冻结新鲜统一提示词样本；本批次明确跳过参考图校验与携带。"
-                        : $"正在复制并校验 {sourceReferences.Length} 张风格参考图快照。");
+                        : $"正在复制并校验 {publication.ReferenceSources.Length} 张风格参考图快照。");
             }
 
-            snapshot = await _snapshotService.CaptureAsync(batchId, sourceReferences)
+            snapshot = await _snapshotService.CaptureAsync(batchId, publication.ReferenceSources)
                 .ConfigureAwait(true);
-            var styleSelection = new MaterialGenerationStyleSelection
+            var styleSelection = publication.StyleSelection with
             {
-                GroupId = SelectedStyleGroup.Id,
-                Name = SelectedStyleGroup.Name,
-                Description = useUnifiedPrompt ? string.Empty : SelectedStyleGroup.Description,
-                Prompt = useUnifiedPrompt
-                    ? unifiedPromptSample!.Prompt
-                    : SelectedStyleGroup.StylePrompt,
-                SourceMode = useUnifiedPrompt
-                    ? MaterialGenerationConstraintComposer.UnifiedPromptOnlySourceMode
-                    : null,
-                SourceFingerprint = useUnifiedPrompt
-                    ? unifiedPromptSample!.SourceFingerprint
-                    : null,
-                GeneratedAtUtc = useUnifiedPrompt
-                    ? unifiedPromptSample!.GeneratedAtUtc
-                    : null,
                 References = snapshot.References.ToArray()
             };
-            var stylePrompt = useUnifiedPrompt
-                ? unifiedPromptSample!.Prompt.Trim()
-                : BuildLegacyStylePrompt(SelectedStyleGroup);
-            var backgroundRemoval = BackgroundRemoval.CreateGenerationSpec();
-            var assetRoot = Path.GetFullPath(_projectBrowser.RootPath);
+            var stylePrompt = publication.StylePrompt;
+            var backgroundRemoval = publication.BackgroundRemoval;
+            var assetRoot = publication.AssetRoot;
             runWorkspace = _runWorkspaceService.Prepare(batchId, assetRoot);
             await _runWorkspaceService.MirrorStyleReferencesAsync(runWorkspace, snapshot)
                 .ConfigureAwait(true);
             var reservedTargets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var itemDescriptions = new Dictionary<string, string>(StringComparer.Ordinal);
-            var items = new List<CreateGenerationBatchItemRequest>(TotalRequestedCount);
-            var manifestDrafts = new List<GenerationRunManifestDraft>(TotalRequestedCount);
+            var items = new List<CreateGenerationBatchItemRequest>(publication.TotalRequestedCount);
+            var manifestDrafts = new List<GenerationRunManifestDraft>(publication.TotalRequestedCount);
 
-            for (var rowIndex = 0; rowIndex < DraftRows.Count; rowIndex++)
+            for (var rowIndex = 0; rowIndex < publication.Rows.Length; rowIndex++)
             {
-                var row = DraftRows[rowIndex];
+                var row = publication.Rows[rowIndex];
                 if (!TryValidateOutputDirectory(row.OutputDirectory, out var normalizedOutput, out var outputReason))
                 {
                     throw new InvalidOperationException($"第 {rowIndex + 1} 行：{outputReason}");
@@ -2280,8 +2281,8 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                 }
 
                 var finalOutputDirectory = string.IsNullOrEmpty(relativeOutputDirectory)
-                    ? $"Generated/Tilemap/{batchId}/Final"
-                    : $"{relativeOutputDirectory}/Tilemap/{batchId}/Final";
+                    ? $"Generated/{stepSnapshot.OutputFolderName}/{batchId}/Final"
+                    : $"{relativeOutputDirectory}/{stepSnapshot.OutputFolderName}/{batchId}/Final";
                 var finalOutputFullPath = Path.GetFullPath(Path.Combine(
                     assetRoot,
                     finalOutputDirectory.Replace('/', Path.DirectorySeparatorChar)));
@@ -2295,7 +2296,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                 {
                     var itemId = Guid.NewGuid().ToString("N");
                     var suggestedBaseName =
-                        $"tilemap_{batchId[..8]}_r{rowIndex + 1:D2}_v{variantIndex + 1:D3}";
+                        $"{stepSnapshot.FilePrefix}_{batchId[..8]}_r{rowIndex + 1:D2}_v{variantIndex + 1:D3}";
                     var targetPath = $"{finalOutputDirectory}/{suggestedBaseName}.png";
                     if (!reservedTargets.Add(targetPath))
                     {
@@ -2315,10 +2316,11 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                         throw new IOException($"生成目标已经存在：{targetFullPath}");
                     }
 
-                    var basePackage = _tilemap.BuildGenerationConstraints(
-                        row.Description.Trim(),
+                    var basePackage = BuildGenerationConstraints(
+                        stepSnapshot,
+                        row.Description,
                         stylePrompt,
-                        string.IsNullOrWhiteSpace(NegativePrompt) ? null : NegativePrompt.Trim(),
+                        publication.NegativePrompt,
                         1,
                         backgroundRemoval);
                     basePackage = basePackage with
@@ -2350,17 +2352,17 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                             workspacePlan,
                             constraints)
                         .ConfigureAwait(true);
-                    itemDescriptions[itemId] = row.Description.Trim();
+                    itemDescriptions[itemId] = row.Description;
                     items.Add(new CreateGenerationBatchItemRequest
                     {
                         ItemId = itemId,
-                        DisplayName = $"{BuildDisplayName(row.Description)} · {variantIndex + 1}/{row.Quantity}",
-                        MaxAttempts = MaxGenerationAttempts,
+                        DisplayName = $"{BuildDisplayName(stepSnapshot.DisplayName, row.Description)} · {variantIndex + 1}/{row.Quantity}",
+                        MaxAttempts = publication.MaxGenerationAttempts,
                         Constraints = constraints
                     });
                     manifestDrafts.Add(new GenerationRunManifestDraft(
                         itemId,
-                        row.Description.Trim(),
+                        row.Description,
                         rowIndex,
                         variantIndex,
                         row.Quantity,
@@ -2384,7 +2386,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             var tasks = await _taskStore.CreateBatchAsync(new CreateGenerationBatchRequest
             {
                 BatchId = batchId,
-                DisplayName = $"Tilemap 批次 · {DraftRows.Count} 种 · {TotalRequestedCount} 张",
+                DisplayName = $"{stepSnapshot.DisplayName}批次 · {publication.Rows.Length} 种 · {publication.TotalRequestedCount} 张",
                 RequestedBy = "GAssetForge Desktop",
                 DispatchRequested = requestDispatch,
                 Items = items.ToArray()
@@ -2398,10 +2400,10 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                         batchId,
                         batchId,
                         assetRoot,
-                        SelectedGenerationStep.Key,
+                        stepSnapshot.WorkflowId,
                         DateTimeOffset.UtcNow,
-                        SelectedStyleGroup.Id,
-                        SelectedStyleGroup.Name,
+                        publication.StyleSelection.GroupId,
+                        publication.StyleSelection.Name,
                         manifestDrafts.Select(draft => new GenerationRunManifestItem(
                             draft.ItemId,
                             tasksByItemId[draft.ItemId].Id,
@@ -2427,13 +2429,13 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             if (requestDispatch)
             {
                 StatusText =
-                    $"批次 {batchId[..8]} 已发布，共 {tasks.Count} 个任务、{TotalRequestedCount} 个产物；正在请求应用内调度";
+                    $"批次 {batchId[..8]} 已发布，共 {tasks.Count} 个任务、{publication.TotalRequestedCount} 个产物；正在请求应用内调度";
                 RaiseBatchPublished(batchId, tasks, isRetry: false, dispatchRequested: true);
             }
             else
             {
                 StatusText =
-                    $"批次 {batchId[..8]} 已仅发布到本地队列，共 {tasks.Count} 个任务、{TotalRequestedCount} 个产物";
+                    $"批次 {batchId[..8]} 已仅发布到本地队列，共 {tasks.Count} 个任务、{publication.TotalRequestedCount} 个产物";
                 RaiseBatchPublished(batchId, tasks, isRetry: false, dispatchRequested: false);
             }
 
@@ -2515,11 +2517,14 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             for (var outputIndex = 0; outputIndex < failedTask.Constraints.Output.Count; outputIndex++)
             {
                 var itemId = Guid.NewGuid().ToString("N");
+                var filePrefix = GetWorkflowFilePrefix(failedTask.Constraints.WorkflowId);
                 var suggestedBaseName =
-                    $"tilemap_{retryBatchId[..8]}_retry_v{outputIndex + 1:D3}";
-                var targetPath = string.IsNullOrEmpty(previousDelivery.OutputDirectory)
-                    ? $"Generated/Tilemap/{retryBatchId}/Final/{suggestedBaseName}.png"
-                    : $"{previousDelivery.OutputDirectory}/{suggestedBaseName}.png";
+                    $"{filePrefix}_{retryBatchId[..8]}_retry_v{outputIndex + 1:D3}";
+                var finalOutputDirectory = ResolveRetryOutputDirectory(
+                    previousDelivery.OutputDirectory,
+                    retryBatchId,
+                    failedTask.Constraints.WorkflowId);
+                var targetPath = $"{finalOutputDirectory}/{suggestedBaseName}.png";
                 var fullPath = Path.GetFullPath(Path.Combine(
                     previousDelivery.AssetRoot,
                     targetPath.Replace('/', Path.DirectorySeparatorChar)));
@@ -2707,11 +2712,14 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                 for (var outputIndex = 0; outputIndex < failedTask.Constraints.Output.Count; outputIndex++)
                 {
                     var itemId = Guid.NewGuid().ToString("N");
+                    var filePrefix = GetWorkflowFilePrefix(failedTask.Constraints.WorkflowId);
                     var suggestedBaseName =
-                        $"tilemap_{retryBatchId[..8]}_manual_r{retryIndex + 1:D2}_v{outputIndex + 1:D3}";
-                    var targetPath = string.IsNullOrEmpty(previousDelivery.OutputDirectory)
-                        ? $"Generated/Tilemap/{retryBatchId}/Final/{suggestedBaseName}.png"
-                        : $"{previousDelivery.OutputDirectory}/{suggestedBaseName}.png";
+                        $"{filePrefix}_{retryBatchId[..8]}_manual_r{retryIndex + 1:D2}_v{outputIndex + 1:D3}";
+                    var finalOutputDirectory = ResolveRetryOutputDirectory(
+                        previousDelivery.OutputDirectory,
+                        retryBatchId,
+                        failedTask.Constraints.WorkflowId);
+                    var targetPath = $"{finalOutputDirectory}/{suggestedBaseName}.png";
                     var fullPath = Path.GetFullPath(Path.Combine(
                         previousDelivery.AssetRoot,
                         targetPath.Replace('/', Path.DirectorySeparatorChar)));
@@ -4109,7 +4117,9 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
 
         var row = new AssetGenerationDraftRowViewModel(
             Guid.NewGuid().ToString("N"),
-            "新的 Tilemap 物品",
+            SelectedGenerationStep.Key == IconDesignConstraintPackageBuilder.WorkflowId
+                ? "新的 Icon 物品"
+                : "新的 Tilemap 物品",
             1,
             SelectedDraftRow?.OutputDirectory ?? PrimaryDraftRow?.OutputDirectory ?? _projectBrowser.CurrentPath);
         AttachDraftRow(row);
@@ -4158,6 +4168,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(IsAgentConnected));
         OnPropertyChanged(nameof(ConnectionStatusText));
         OnPropertyChanged(nameof(CanvasSizeText));
+        OnPropertyChanged(nameof(GenerationPerspectiveText));
         OnPropertyChanged(nameof(TilemapGeometryText));
         OnPropertyChanged(nameof(IsUsingUnifiedStylePrompt));
         OnPropertyChanged(nameof(UnifiedStylePromptStatusText));
@@ -4198,6 +4209,12 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             return $"背景剔除参数无效：{BackgroundRemoval.GenerationConfigurationValidationText}";
         }
 
+        var stepIssue = GetSelectedGenerationStepIssue();
+        if (!string.IsNullOrWhiteSpace(stepIssue))
+        {
+            return stepIssue;
+        }
+
         var invalidIndex = DraftRows
             .Select((row, index) => (row, index))
             .FirstOrDefault(item => !item.row.IsValid);
@@ -4231,7 +4248,13 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                 .AppendLine($"【批量规模】{DraftRows.Count} 种物品 · {TotalRequestedCount} 个产物")
                 .AppendLine("【调度】每张图片是独立任务；并发与多 Agent 分配由当前 Agent Host 默认调度，页面不再指定并行数量")
                 .AppendLine($"【画布】每个产物 {CanvasSizeText}")
-                .AppendLine($"【透视】{TilemapGeometryText}")
+                .AppendLine($"【透视】{GenerationPerspectiveText}");
+            if (SelectedGenerationStep.Key == IconDesignConstraintPackageBuilder.WorkflowId)
+            {
+                builder.AppendLine($"【生成角度描述】{_iconDesign.GenerationDescription}");
+            }
+
+            builder
                 .AppendLine()
                 .AppendLine("【批量条目】");
             for (var index = 0; index < DraftRows.Count; index++)
@@ -4280,6 +4303,12 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         if (!BackgroundRemoval.IsGenerationConfigurationValid)
         {
             return $"背景剔除参数无效：{BackgroundRemoval.GenerationConfigurationValidationText}";
+        }
+
+        var stepIssue = GetSelectedGenerationStepIssue();
+        if (!string.IsNullOrWhiteSpace(stepIssue))
+        {
+            return stepIssue;
         }
 
         var invalid = DraftRows
@@ -4459,7 +4488,153 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         return "自动回退旧链路 · 统一提示词样本已过期";
     }
 
-    private static string BuildDisplayName(string prompt)
+    private GenerationPublicationSnapshot CapturePublicationSnapshot()
+    {
+        var styleGroup = SelectedStyleGroup
+            ?? throw new InvalidOperationException("请选择一个美术风格组。");
+        var useUnifiedPrompt = TryGetFreshUnifiedPrompt(styleGroup, out var unifiedPromptSample);
+        var referenceSources = useUnifiedPrompt
+            ? []
+            : styleGroup.Assets
+                .Where(asset => !asset.IsMissing)
+                .Select(asset => new GenerationReferenceSource(
+                    asset.Id,
+                    asset.Name,
+                    asset.FullPath,
+                    asset.Sha256,
+                    asset.MediaType))
+                .ToArray();
+        var styleSelection = new MaterialGenerationStyleSelection
+        {
+            GroupId = styleGroup.Id,
+            Name = styleGroup.Name,
+            Description = useUnifiedPrompt ? string.Empty : styleGroup.Description,
+            Prompt = useUnifiedPrompt
+                ? unifiedPromptSample!.Prompt
+                : styleGroup.StylePrompt,
+            SourceMode = useUnifiedPrompt
+                ? MaterialGenerationConstraintComposer.UnifiedPromptOnlySourceMode
+                : null,
+            SourceFingerprint = useUnifiedPrompt
+                ? unifiedPromptSample!.SourceFingerprint
+                : null,
+            GeneratedAtUtc = useUnifiedPrompt
+                ? unifiedPromptSample!.GeneratedAtUtc
+                : null,
+            References = []
+        };
+        var rows = DraftRows
+            .Select(row => new GenerationDraftSnapshot(
+                row.Description.Trim(),
+                row.Quantity,
+                row.OutputDirectory))
+            .ToArray();
+        var totalRequestedCount = rows.Sum(row => row.Quantity);
+
+        return new GenerationPublicationSnapshot(
+            CaptureGenerationStepSnapshot(),
+            styleSelection,
+            useUnifiedPrompt
+                ? unifiedPromptSample!.Prompt.Trim()
+                : BuildLegacyStylePrompt(styleGroup),
+            referenceSources,
+            string.IsNullOrWhiteSpace(NegativePrompt) ? null : NegativePrompt.Trim(),
+            BackgroundRemoval.CreateGenerationSpec(),
+            Path.GetFullPath(_projectBrowser.RootPath),
+            rows,
+            totalRequestedCount,
+            MaxGenerationAttempts,
+            useUnifiedPrompt);
+    }
+
+    private GenerationStepSnapshot CaptureGenerationStepSnapshot()
+    {
+        var step = SelectedGenerationStep;
+        return step.Key switch
+        {
+            TilemapConstraintPackageBuilder.WorkflowId => new GenerationStepSnapshot(
+                step.Key,
+                step.DisplayName,
+                GetWorkflowOutputFolder(step.Key),
+                GetWorkflowFilePrefix(step.Key),
+                new TilemapGenerationConstraintInput
+                {
+                    GridUnitSize = _tilemap.GridUnitSize,
+                    ArtWidth = _tilemap.ArtImageWidth,
+                    ArtHeight = _tilemap.ArtImageHeight,
+                    DiamondAngle = _tilemap.DiamondAngle,
+                    RotationAngle = _tilemap.RotationAngle
+                },
+                null),
+            IconDesignConstraintPackageBuilder.WorkflowId => new GenerationStepSnapshot(
+                step.Key,
+                step.DisplayName,
+                GetWorkflowOutputFolder(step.Key),
+                GetWorkflowFilePrefix(step.Key),
+                null,
+                new IconDesignGenerationConstraintInput
+                {
+                    Mode = _iconDesign.SelectedMode.Mode,
+                    ImageWidth = _iconDesign.ImageWidth,
+                    ImageHeight = _iconDesign.ImageHeight,
+                    CameraAzimuthDegrees = _iconDesign.CameraAzimuthDegrees,
+                    CameraElevationDegrees = _iconDesign.CameraElevationDegrees,
+                    CameraRollDegrees = _iconDesign.CameraRollDegrees,
+                    CameraDistance = _iconDesign.CameraDistance,
+                    FocalLengthMillimeters = _iconDesign.FocalLengthMillimeters
+                }),
+            _ => throw new InvalidOperationException($"尚未实现生成步骤：{step.DisplayName} ({step.Key})")
+        };
+    }
+
+    private static GenerationConstraintPackage BuildGenerationConstraints(
+        GenerationStepSnapshot step,
+        string contentPrompt,
+        string stylePrompt,
+        string? negativePrompt,
+        int outputCount,
+        GenerationBackgroundRemovalSpec? backgroundRemoval) =>
+        step.WorkflowId switch
+        {
+            TilemapConstraintPackageBuilder.WorkflowId when step.Tilemap is not null =>
+                TilemapConstraintPackageBuilder.Build(step.Tilemap with
+                {
+                    ContentPrompt = contentPrompt,
+                    StylePrompt = stylePrompt,
+                    NegativePrompt = negativePrompt,
+                    OutputCount = outputCount,
+                    BackgroundRemoval = backgroundRemoval
+                }),
+            IconDesignConstraintPackageBuilder.WorkflowId when step.IconDesign is not null =>
+                IconDesignConstraintPackageBuilder.Build(step.IconDesign with
+                {
+                    ContentPrompt = contentPrompt,
+                    StylePrompt = stylePrompt,
+                    NegativePrompt = negativePrompt,
+                    OutputCount = outputCount,
+                    BackgroundRemoval = backgroundRemoval
+                }),
+            _ => throw new InvalidOperationException($"生成步骤 {step.WorkflowId} 缺少冻结参数。")
+        };
+
+    private string GetSelectedGenerationStepIssue()
+    {
+        if (!SupportedSteps.Any(step =>
+                string.Equals(step.Key, SelectedGenerationStep.Key, StringComparison.Ordinal)))
+        {
+            return $"当前生成步骤尚未实现：{SelectedGenerationStep.DisplayName}";
+        }
+
+        if (SelectedGenerationStep.Key == IconDesignConstraintPackageBuilder.WorkflowId &&
+            !_iconDesign.Projection.IsFullyInFrame)
+        {
+            return "当前 Icon 相机参数会让主体超出镜头边界；请在 Icon 图标制作属性栏减小焦距或增大物距，确认主体完整入镜后再发布。";
+        }
+
+        return string.Empty;
+    }
+
+    private static string BuildDisplayName(string stepDisplayName, string prompt)
     {
         var compact = string.Join(' ', prompt.Split(
             new[] { '\r', '\n', '\t' },
@@ -4469,7 +4644,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             compact = compact[..80];
         }
 
-        return $"Tilemap · {compact}";
+        return $"{stepDisplayName} · {compact}";
     }
 
     private static GenerationConstraintPackage BuildAutomaticRetryConstraints(
@@ -4547,15 +4722,19 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         return normalized.Length <= 2_000 ? normalized : normalized[..2_000];
     }
 
-    private static string ResolveRetryOutputDirectory(string previousOutputDirectory, string retryBatchId)
+    private static string ResolveRetryOutputDirectory(
+        string previousOutputDirectory,
+        string retryBatchId,
+        string workflowId)
     {
+        var outputFolderName = GetWorkflowOutputFolder(workflowId);
         var segments = (previousOutputDirectory ?? string.Empty)
             .Replace('\\', '/')
             .Trim('/')
             .Split('/', StringSplitOptions.RemoveEmptyEntries)
             .ToList();
         if (segments.Count >= 3 &&
-            string.Equals(segments[^3], "Tilemap", StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(segments[^3], outputFolderName, StringComparison.OrdinalIgnoreCase) &&
             Guid.TryParseExact(segments[^2], "N", out _) &&
             string.Equals(segments[^1], "Final", StringComparison.OrdinalIgnoreCase))
         {
@@ -4565,9 +4744,49 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
 
         var prefix = string.Join('/', segments);
         return string.IsNullOrEmpty(prefix)
-            ? $"Generated/Tilemap/{retryBatchId}/Final"
-            : $"{prefix}/Tilemap/{retryBatchId}/Final";
+            ? $"Generated/{outputFolderName}/{retryBatchId}/Final"
+            : $"{prefix}/{outputFolderName}/{retryBatchId}/Final";
     }
+
+    private static string GetWorkflowOutputFolder(string workflowId) => workflowId switch
+    {
+        TilemapConstraintPackageBuilder.WorkflowId => "Tilemap",
+        IconDesignConstraintPackageBuilder.WorkflowId => "Icon",
+        _ => "GeneratedAsset"
+    };
+
+    private static string GetWorkflowFilePrefix(string workflowId) => workflowId switch
+    {
+        TilemapConstraintPackageBuilder.WorkflowId => "tilemap",
+        IconDesignConstraintPackageBuilder.WorkflowId => "icon",
+        _ => "asset"
+    };
+
+    private sealed record GenerationStepSnapshot(
+        string WorkflowId,
+        string DisplayName,
+        string OutputFolderName,
+        string FilePrefix,
+        TilemapGenerationConstraintInput? Tilemap,
+        IconDesignGenerationConstraintInput? IconDesign);
+
+    private sealed record GenerationDraftSnapshot(
+        string Description,
+        int Quantity,
+        string OutputDirectory);
+
+    private sealed record GenerationPublicationSnapshot(
+        GenerationStepSnapshot Step,
+        MaterialGenerationStyleSelection StyleSelection,
+        string StylePrompt,
+        GenerationReferenceSource[] ReferenceSources,
+        string? NegativePrompt,
+        GenerationBackgroundRemovalSpec? BackgroundRemoval,
+        string AssetRoot,
+        GenerationDraftSnapshot[] Rows,
+        int TotalRequestedCount,
+        int MaxGenerationAttempts,
+        bool UseUnifiedPrompt);
 
     private void SubscribeStyleGroup(ArtStyleGroupViewModel? group)
     {
@@ -4607,6 +4826,9 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         RefreshDerivedState();
 
     private void OnTilemapPropertyChanged(object? sender, PropertyChangedEventArgs e) =>
+        RefreshDerivedState();
+
+    private void OnIconDesignPropertyChanged(object? sender, PropertyChangedEventArgs e) =>
         RefreshDerivedState();
 
     private void OnAgentConnectionPropertyChanged(object? sender, PropertyChangedEventArgs e)
