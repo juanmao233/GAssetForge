@@ -5,6 +5,27 @@ development track; versioning policy will be finalized before the first public r
 
 ## Unreleased
 
+## 1.0.19t1 - 2026-08-26
+
+### Added
+
+- Added an interactive square ruler to the Background Removal source preview for aligning fake-
+  transparency checkerboards. Users can draw a reference cell, move it, resize it from any corner,
+  and apply the resulting cell size and X/Y phase directly to the processing settings.
+
+### Changed
+
+- Upgraded checker-grid cell size, offsets, and boundary tolerance from integer-only values to
+  double-precision source pixels, while retaining compatible reads for settings saved by older versions.
+- Kept the ruler and rendered grid aligned to original-image coordinates through viewport zooming and
+  panning, and normalized negative or over-period offsets with positive floating-point modulo.
+
+### Fixed
+
+- Removed rounding drift when matching scaled screenshots or other checkerboards with fractional cell
+  geometry, and applied boundary tolerance symmetrically on both sides of every cell edge.
+- Prevented cancelled or invalid ruler gestures from overwriting the last committed grid alignment.
+
 ## 1.0.17t1 - 2026-08-26
 
 ### Added
