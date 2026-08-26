@@ -94,7 +94,7 @@ public sealed record GenerationBackgroundRemovalSpec
 
     public bool Despill { get; init; } = true;
 
-    public bool EdgeConnectedOnly { get; init; } = true;
+    public bool EdgeConnectedOnly { get; init; }
 }
 
 public sealed record GenerationConstraintRule

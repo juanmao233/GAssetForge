@@ -126,6 +126,12 @@ Wu 量化并输出 Palette PNG，关闭时使用 RGBA PNG。完全透明像素�
 局部底色。单幅棋盘格合成图无法精确反演原始半透明前景，因此 UI 把它定义为显式本地兜底，而不是素材生成模型
 可以主动选择的输出格式；生成合同继续冻结单一纯色底。
 
+背景候选范围由兼容字段 `EdgeConnectedOnly` 冻结：`false` 会在全图匹配底色，因而可删除被主体轮廓包围的镂空
+内部底色；`true` 只从画布四边做四邻域泛洪，可保护主体内部有意使用的同色细节。产品 UI 暴露正向的
+`RemoveEnclosedBackground` 并默认开启，内部映射为 `!EdgeConnectedOnly`。用户设置同时保存新的正向字段和旧的
+反向字段；旧设置缺少正向字段时迁移为开启，新任务沿用既有 MCP/JSON 字段而不升级生成 Schema，历史任务中显式
+冻结的值保持原行为。
+
 `ImageSharpImageOutlineService` 也是单图、确定性、原子落盘服务。它先按 Alpha threshold 清理极弱透明噪点，再用
 可分离滑动窗口 max/min 计算方形形态学轮廓：outside 为 `dilate(A)-A`，inside 为 `A-erode(A)`，center 把总宽度
 拆成外 `ceil/2` 与内 `floor/2`。外轮廓在源图后方 SourceOver，内轮廓只替换边缘颜色且保持源 Alpha；可选 canvas

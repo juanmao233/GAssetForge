@@ -20,6 +20,7 @@ internal static class ImageToolIntegrationSmokeTests
         Directory.CreateDirectory(testRoot);
         ImageOutlineBatchContinuesAfterIndividualFailures(testRoot);
         ShellLoadsAndPersistsOutlineAndCheckerPreferences(testRoot);
+        LegacyBackgroundRemovalSettingsEnableHollowRemovalByDefault(testRoot);
     }
 
     private static void ImageOutlineBatchContinuesAfterIndividualFailures(string testRoot)
@@ -130,6 +131,10 @@ internal static class ImageToolIntegrationSmokeTests
             Equal(3, checker.CheckerOffsetX, "Shell 加载棋盘 X 偏移");
             Equal(5, checker.CheckerOffsetY, "Shell 加载棋盘 Y 偏移");
             Equal(2, checker.CheckerBoundaryTolerance, "Shell 加载棋盘边界容差");
+            True(shell.BackgroundRemoval.RemoveEnclosedBackground,
+                "新设置应默认识别并剔除镂空内部底色");
+            False(checker.EdgeConnectedOnly,
+                "默认镂空识别应在 Core 快照中使用全图色键模式");
 
             shell.ImageOutline.SelectedMode = shell.ImageOutline.ModeOptions.Single(
                 option => option.Placement == ImageOutlinePlacement.Inside);
@@ -170,9 +175,64 @@ internal static class ImageToolIntegrationSmokeTests
             var generationSpec = shell.BackgroundRemoval.CreateGenerationSpec();
             False(generationSpec.ColorHex is "#EEEEEE" or "#999999",
                 "素材生成首道底色不得被独立假透明棋盘格颜色替换");
+            False(generationSpec.EdgeConnectedOnly,
+                "素材生成应默认冻结镂空内部底色剔除规则");
             var serialized = File.ReadAllText(paths.UserSettingsPath);
             False(serialized.Contains("batchItems", StringComparison.OrdinalIgnoreCase),
                 "图片描边批处理队列不得进入用户设置");
+        }
+        finally
+        {
+            shell.Shutdown();
+        }
+    }
+
+    private static void LegacyBackgroundRemovalSettingsEnableHollowRemovalByDefault(string testRoot)
+    {
+        var settingsRoot = Path.Combine(testRoot, "legacy-background-removal-settings");
+        var paths = new WorkspacePaths(settingsRoot);
+        File.WriteAllText(
+            paths.UserSettingsPath,
+            """
+            {
+              "schemaVersion": 1,
+              "theme": 0,
+              "activeWorkflowKey": "ui",
+              "hasCompletedWorkflowSelection": true,
+              "backgroundRemovalEdgeConnectedOnly": true
+            }
+            """);
+        var settingsService = new UserSettingsService(paths);
+        var migrated = settingsService.Load();
+        True(migrated.BackgroundRemovalRemoveEnclosedBackground,
+            "旧设置缺少正向字段时应迁移为默认开启镂空识别");
+
+        var editor = new EditorWorkspaceViewModel(
+            new JsonProjectRepository(paths),
+            new DesktopFileDialogService(),
+            new ProjectHistoryService());
+        var shell = new ShellViewModel(new ThemeService(), settingsService, editor);
+
+        try
+        {
+            True(shell.BackgroundRemoval.RemoveEnclosedBackground,
+                "旧设置加载到 Shell 后应默认开启镂空识别");
+            False(shell.BackgroundRemoval.EdgeConnectedOnly,
+                "旧设置中的历史默认值不得覆盖新的正向默认行为");
+
+            shell.BackgroundRemoval.RemoveEnclosedBackground = false;
+            var disabled = settingsService.Load();
+            False(disabled.BackgroundRemovalRemoveEnclosedBackground,
+                "用户关闭镂空识别后应持久化正向设置");
+            True(disabled.BackgroundRemovalEdgeConnectedOnly,
+                "关闭镂空识别后应同步旧版兼容字段");
+
+            shell.BackgroundRemoval.RemoveEnclosedBackground = true;
+            var enabled = settingsService.Load();
+            True(enabled.BackgroundRemovalRemoveEnclosedBackground,
+                "重新开启镂空识别后应持久化正向设置");
+            False(enabled.BackgroundRemovalEdgeConnectedOnly,
+                "重新开启镂空识别后应同步旧版兼容字段");
         }
         finally
         {

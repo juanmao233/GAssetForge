@@ -580,7 +580,7 @@ timeout、socket、connection、HTTP 429/5xx 或 temporarily unavailable 证据�
       "edgeContract": 1,
       "edgeFeather": 0,
       "despill": true,
-      "edgeConnectedOnly": true
+      "edgeConnectedOnly": false
     }
   },
   "parameters": {
@@ -624,10 +624,11 @@ timeout、socket、connection、HTTP 429/5xx 或 temporarily unavailable 证据�
 | `white` | 白色 | `#FFFFFF` |
 | `custom` | 自定义颜色 | 规范大写 `#RRGGBB` |
 
-黑色和白色容易与主体阴影、高光或描边重叠；默认启用 `edgeConnectedOnly`，只删除与画布边缘连通的底色，
-降低主体内部同色像素被误删的风险。`transparentThreshold` 与 `opaqueThreshold` 定义 RGB 色距的透明/不透明
-过渡，后者必须大于前者；`edgeContract` 为 0–3 px，`edgeFeather` 为 0–2 px，`despill` 用于清理半透明
-边缘残留的底色污染。
+黑色和白色容易与主体阴影、高光或描边重叠。新任务默认使用 `edgeConnectedOnly=false`，会在全图匹配底色，
+从而同时删除物体外侧与镂空区域内部的背景；用户关闭“识别并剔除镂空区域内部的背景颜色”后会冻结为
+`edgeConnectedOnly=true`，只删除与画布边缘连通的底色，以保护主体内部有意使用的同色细节。历史任务中已经
+冻结的值保持原行为。`transparentThreshold` 与 `opaqueThreshold` 定义 RGB 色距的透明/不透明过渡，后者必须
+大于前者；`edgeContract` 为 0–3 px，`edgeFeather` 为 0–2 px，`despill` 用于清理半透明边缘残留的底色污染。
 
 新单图输出流程：
 

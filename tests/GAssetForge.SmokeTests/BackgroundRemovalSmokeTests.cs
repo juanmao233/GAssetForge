@@ -40,8 +40,11 @@ internal static class BackgroundRemovalSmokeTests
             CheckerDespillUsesPerPixelExpectedColor(testRoot);
             CheckerModeNeverRevivesSourceAlpha(testRoot);
             InvalidCheckerSettingsAreRejected(testRoot);
+            DefaultModeRemovesEnclosedHollowBackground(testRoot);
+            CheckerboardHollowBackgroundRespectsRemovalScope(testRoot);
             EdgeConnectedModePreservesEnclosedSubjectColor(testRoot);
             GlobalModeRemovesEnclosedMatchingColor(testRoot);
+            ViewModelDefaultsToRemovingEnclosedBackground();
             FeatherOnlySoftensTowardTheSubjectInterior(testRoot);
             FeatherDoesNotReviveSourceTransparencyOrRaiseExistingAlpha(testRoot);
             ExistingAlphaIsPreserved(testRoot);
@@ -380,6 +383,32 @@ internal static class BackgroundRemovalSmokeTests
         Equal((byte)255, output[3, 2].A, "边缘连通模式不得删除包围中心色的主体像素");
     }
 
+    private static void DefaultModeRemovesEnclosedHollowBackground(string testRoot)
+    {
+        const string keyHex = "#FF00FF";
+        var inputPath = Path.Combine(testRoot, "default-hollow-input.png");
+        var outputPath = Path.Combine(testRoot, "default-hollow-output.png");
+        SaveEnclosedKeyFixture(inputPath, ParseHex(keyHex));
+
+        Service.RemoveToPng(
+            inputPath,
+            outputPath,
+            new BackgroundRemovalSettings
+            {
+                KeyColorHex = keyHex,
+                TransparentThreshold = 0d,
+                OpaqueThreshold = 1d,
+                EdgeContract = 0,
+                EdgeFeather = 0,
+                Despill = false
+            });
+
+        using var output = Image.Load<Rgba32>(outputPath);
+        Equal((byte)0, output[0, 0].A, "默认模式应删除物体外侧底色");
+        Equal((byte)0, output[3, 3].A, "默认模式应识别并删除被镂空轮廓包围的底色");
+        Equal((byte)255, output[3, 2].A, "默认模式仍应保留构成镂空轮廓的主体像素");
+    }
+
     private static void GlobalModeRemovesEnclosedMatchingColor(string testRoot)
     {
         const string keyHex = "#FF00FF";
@@ -396,6 +425,87 @@ internal static class BackgroundRemovalSmokeTests
         Equal((byte)0, output[0, 0].A, "全局模式应删除外部底色");
         Equal((byte)0, output[3, 3].A, "全局模式应删除主体内部与底色相同的像素");
         Equal((byte)255, output[3, 2].A, "全局模式仍应保留非底色主体像素");
+    }
+
+    private static void CheckerboardHollowBackgroundRespectsRemovalScope(string testRoot)
+    {
+        const string colorAHex = "#FFFFFF";
+        const string colorBHex = "#CCCCCC";
+        var inputPath = Path.Combine(testRoot, "checker-hollow-input.png");
+        var globalOutputPath = Path.Combine(testRoot, "checker-hollow-global-output.png");
+        var edgeOutputPath = Path.Combine(testRoot, "checker-hollow-edge-output.png");
+        var subject = new Rgba32(30, 120, 220, 255);
+        SaveCheckerFixture(
+            inputPath,
+            10,
+            10,
+            ParseHex(colorAHex),
+            ParseHex(colorBHex),
+            cellSize: 2,
+            offsetX: 0,
+            offsetY: 0,
+            image =>
+            {
+                for (var coordinate = 2; coordinate <= 7; coordinate++)
+                {
+                    image[coordinate, 2] = subject;
+                    image[coordinate, 7] = subject;
+                    image[2, coordinate] = subject;
+                    image[7, coordinate] = subject;
+                }
+            });
+
+        Service.RemoveToPng(
+            inputPath,
+            globalOutputPath,
+            CreateExactCheckerSettings(
+                colorAHex,
+                colorBHex,
+                enableGridAlignment: true,
+                cellSize: 2,
+                edgeConnectedOnly: false));
+        Service.RemoveToPng(
+            inputPath,
+            edgeOutputPath,
+            CreateExactCheckerSettings(
+                colorAHex,
+                colorBHex,
+                enableGridAlignment: true,
+                cellSize: 2,
+                edgeConnectedOnly: true));
+
+        using var globalOutput = Image.Load<Rgba32>(globalOutputPath);
+        Equal((byte)0, globalOutput[0, 0].A, "棋盘格全局模式应删除物体外侧底色");
+        Equal((byte)0, globalOutput[4, 4].A, "棋盘格全局模式应删除镂空内部底色");
+        Equal((byte)255, globalOutput[2, 4].A, "棋盘格全局模式应保留主体轮廓");
+
+        using var edgeOutput = Image.Load<Rgba32>(edgeOutputPath);
+        Equal((byte)0, edgeOutput[0, 0].A, "棋盘格边缘连通模式应删除物体外侧底色");
+        Equal((byte)255, edgeOutput[4, 4].A, "棋盘格边缘连通模式应保留被主体包围的底色");
+        Equal((byte)255, edgeOutput[2, 4].A, "棋盘格边缘连通模式应保留主体轮廓");
+    }
+
+    private static void ViewModelDefaultsToRemovingEnclosedBackground()
+    {
+        var viewModel = new BackgroundRemovalViewModel(
+            Service,
+            new FixedInputPicker(string.Empty),
+            new FixedOutputPicker(string.Empty));
+        var settingsChangedCount = 0;
+        viewModel.SettingsChanged += (_, _) => settingsChangedCount++;
+
+        True(viewModel.RemoveEnclosedBackground, "背景剔除工具应默认开启镂空内部底色识别");
+        False(viewModel.EdgeConnectedOnly, "默认镂空识别应映射为全图色键模式");
+        False(viewModel.CaptureSettings().EdgeConnectedOnly, "默认工具快照应冻结全图色键模式");
+        False(viewModel.CreateGenerationSpec().EdgeConnectedOnly, "新生成合同应默认剔除镂空内部底色");
+
+        viewModel.RemoveEnclosedBackground = false;
+
+        False(viewModel.RemoveEnclosedBackground, "用户应能关闭镂空内部底色识别");
+        True(viewModel.EdgeConnectedOnly, "关闭镂空识别后应恢复旧的边缘连通模式");
+        True(viewModel.CaptureSettings().EdgeConnectedOnly, "关闭后的工具快照应保留边缘连通模式");
+        True(viewModel.CreateGenerationSpec().EdgeConnectedOnly, "关闭后的生成合同应保留边缘连通模式");
+        Equal(1, settingsChangedCount, "切换镂空识别应只发出一次设置变化通知");
     }
 
     private static void ExistingAlphaIsPreserved(string testRoot)
@@ -660,7 +770,8 @@ internal static class BackgroundRemovalSmokeTests
         bool enableGridAlignment,
         int cellSize,
         int offsetX = 0,
-        int offsetY = 0) => new()
+        int offsetY = 0,
+        bool edgeConnectedOnly = false) => new()
     {
         UseFakeTransparencyGrid = true,
         CheckerColorAHex = colorAHex,
@@ -675,7 +786,7 @@ internal static class BackgroundRemovalSmokeTests
         EdgeContract = 0,
         EdgeFeather = 0,
         Despill = false,
-        EdgeConnectedOnly = false
+        EdgeConnectedOnly = edgeConnectedOnly
     };
 
     private static void SaveEnclosedKeyFixture(string path, Rgba32 key)

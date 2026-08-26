@@ -326,10 +326,15 @@
                                               SelectedItem="{Binding EdgeFeather, Mode=TwoWay}" />
                                 </StackPanel>
                             </Grid>
-                            <CheckBox x:Name="BackgroundRemovalEdgeConnectedCheckBox"
+                            <CheckBox x:Name="BackgroundRemovalRemoveEnclosedCheckBox"
                                       Margin="0,12,0,0"
-                                      IsChecked="{Binding EdgeConnectedOnly, Mode=TwoWay}"
-                                      Content="仅剔除与画布边缘连通的底色" />
+                                      IsChecked="{Binding RemoveEnclosedBackground, Mode=TwoWay}"
+                                      Content="识别并剔除镂空区域内部的背景颜色" />
+                            <TextBlock Margin="22,4,0,0"
+                                       Foreground="{DynamicResource App.TextMutedBrush}"
+                                       FontSize="10"
+                                       Text="关闭后仅处理与画布外边缘连通的底色，可保护主体内部有意使用的同色细节。"
+                                       TextWrapping="Wrap" />
                             <CheckBox x:Name="BackgroundRemovalDespillCheckBox"
                                       Margin="0,7,0,0"
                                       IsChecked="{Binding Despill, Mode=TwoWay}"

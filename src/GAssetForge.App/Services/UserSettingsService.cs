@@ -57,6 +57,9 @@ public sealed class UserSettingsModel
     public int BackgroundRemovalEdgeContract { get; set; } = 1;
     public int BackgroundRemovalEdgeFeather { get; set; }
     public bool BackgroundRemovalDespill { get; set; } = true;
+    public bool BackgroundRemovalRemoveEnclosedBackground { get; set; } = true;
+
+    // Retained for older GAssetForge builds and persisted task-setting compatibility.
     public bool BackgroundRemovalEdgeConnectedOnly { get; set; } = true;
     public bool BackgroundRemovalUseFakeTransparencyGrid { get; set; }
     public string BackgroundRemovalCheckerColorAHex { get; set; } = "#FFFFFF";

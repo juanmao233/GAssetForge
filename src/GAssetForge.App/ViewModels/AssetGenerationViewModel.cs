@@ -4244,7 +4244,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                         ? $"【参考图片】素材库现有 {availableReferences} 张，本批次携带 0 张；不会让 Agent 重新查看素材"
                         : $"【参考图片】{availableReferences} / {MaterialGenerationConstraintComposer.MaximumReferenceCount} 张，将在发布时冻结一次并供整批共享")
                 .AppendLine(
-                    $"【首道底色】{BackgroundRemoval.SelectedPresetDisplayName} {BackgroundRemoval.EffectiveColorHex}；Agent 只生成纯色底原图，GAssetForge 本地剔色后才写入最终透明 PNG")
+                    $"【首道底色】{BackgroundRemoval.SelectedPresetDisplayName} {BackgroundRemoval.EffectiveColorHex}；剔色范围：{BackgroundRemoval.RemovalScopeText}；Agent 只生成纯色底原图，GAssetForge 本地剔色后才写入最终透明 PNG")
                 .AppendLine($"【批量规模】{DraftRows.Count} 种物品 · {TotalRequestedCount} 个产物")
                 .AppendLine("【调度】每张图片是独立任务；并发与多 Agent 分配由当前 Agent Host 默认调度，页面不再指定并行数量")
                 .AppendLine($"【画布】每个产物 {CanvasSizeText}")

@@ -123,7 +123,7 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         int edgeContract = 1,
         int edgeFeather = 0,
         bool despill = true,
-        bool edgeConnectedOnly = true,
+        bool edgeConnectedOnly = false,
         bool useFakeTransparencyGrid = false,
         string? checkerColorAHex = null,
         string? checkerColorBHex = null,
@@ -342,12 +342,24 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         {
             if (SetProperty(ref _edgeConnectedOnly, value))
             {
+                OnPropertyChanged(nameof(RemoveEnclosedBackground));
+                OnPropertyChanged(nameof(RemovalScopeText));
                 MarkPreviewStale();
                 RefreshValidationAndCommands();
                 NotifySettingsChanged();
             }
         }
     }
+
+    public bool RemoveEnclosedBackground
+    {
+        get => !EdgeConnectedOnly;
+        set => EdgeConnectedOnly = !value;
+    }
+
+    public string RemovalScopeText => RemoveEnclosedBackground
+        ? "画布外侧与物体镂空区域内部"
+        : "仅与画布外边缘连通的区域";
 
     public bool UseFakeTransparencyGrid
     {

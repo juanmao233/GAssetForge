@@ -234,9 +234,10 @@ internal static class ImageProcessingUiSmokeTests
             TimeSpan.FromSeconds(5),
             "背景剔除缓存预览应完成");
         False(File.Exists(outputPath), "刷新背景剔除预览不得创建最终文件");
+        True(viewModel.RemoveEnclosedBackground, "背景剔除预览应默认识别镂空内部底色");
 
-        viewModel.TransparentThreshold++;
-        True(viewModel.IsPreviewStale, "背景剔除参数变化后应保留并标记旧预览过期");
+        viewModel.RemoveEnclosedBackground = false;
+        True(viewModel.IsPreviewStale, "关闭镂空底色识别后应保留并标记旧预览过期");
         False(viewModel.SaveResultCommand.CanExecute(null), "过期背景剔除预览不得保存");
         viewModel.RefreshPreviewCommand.Execute(null);
         WaitUntil(

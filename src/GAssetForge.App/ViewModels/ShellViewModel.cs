@@ -148,7 +148,7 @@ public sealed class ShellViewModel : ObservableObject
             _settings.BackgroundRemovalEdgeContract,
             _settings.BackgroundRemovalEdgeFeather,
             _settings.BackgroundRemovalDespill,
-            _settings.BackgroundRemovalEdgeConnectedOnly,
+            !_settings.BackgroundRemovalRemoveEnclosedBackground,
             _settings.BackgroundRemovalUseFakeTransparencyGrid,
             _settings.BackgroundRemovalCheckerColorAHex,
             _settings.BackgroundRemovalCheckerColorBHex,
@@ -1771,6 +1771,7 @@ public sealed class ShellViewModel : ObservableObject
         _settings.BackgroundRemovalEdgeContract = settings.EdgeContract;
         _settings.BackgroundRemovalEdgeFeather = settings.EdgeFeather;
         _settings.BackgroundRemovalDespill = settings.Despill;
+        _settings.BackgroundRemovalRemoveEnclosedBackground = !settings.EdgeConnectedOnly;
         _settings.BackgroundRemovalEdgeConnectedOnly = settings.EdgeConnectedOnly;
         _settings.BackgroundRemovalUseFakeTransparencyGrid = settings.UseFakeTransparencyGrid;
         _settings.BackgroundRemovalCheckerColorAHex = settings.CheckerColorAHex;

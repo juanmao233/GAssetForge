@@ -5,6 +5,26 @@ development track; versioning policy will be finalized before the first public r
 
 ## Unreleased
 
+## 1.0.14t1 - 2026-08-26
+
+### Changed
+
+- Background Removal now enables enclosed-background recognition by default for both solid chroma
+  keys and aligned fake-transparency checkerboards. The positive UI option maps to the existing
+  `edgeConnectedOnly` contract field, so historical generation tasks and MCP payloads remain readable.
+- Added an explicit opt-out that restores the previous border-connected-only behavior when a subject
+  intentionally contains details that match the selected background color.
+- Added a forward user-setting field for the positive option. Settings written by earlier versions
+  migrate to the new enabled default, while saves continue synchronizing the legacy inverse field for
+  down-level compatibility.
+
+### Fixed
+
+- Removed background colors trapped inside enclosed or hollow subjects instead of leaving opaque
+  islands after the outer canvas background was removed.
+- Marked cached Background Removal previews stale when the enclosed-region option changes and froze
+  the same scope into newly published generation tasks.
+
 ## 1.0.13t1 - 2026-08-26
 
 ### Added
