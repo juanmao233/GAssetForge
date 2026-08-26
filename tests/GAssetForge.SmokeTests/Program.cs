@@ -4363,10 +4363,12 @@ internal static class Program
             True(generation.CanCreateTask, "完成握手且配置有效后应允许提交素材生成任务");
 
             generation.CreateTaskCommand.Execute(null);
+            // The task store becomes readable before the run manifest and page state are applied.
             WaitUntilWithDispatcher(
-                () => secondStore.ListAsync().GetAwaiter().GetResult().Count > 0,
+                () => !generation.IsBusy &&
+                      secondStore.ListAsync().GetAwaiter().GetResult().Count > 0,
                 TimeSpan.FromSeconds(8),
-                "素材生成页未创建共享 Pending 任务。");
+                "素材生成页未完成共享 Pending 任务持久化与页面状态同步。");
 
             var task = secondStore.ListAsync().GetAwaiter().GetResult().Single();
             var batchId = task.BatchId
