@@ -93,6 +93,14 @@ domain separation 的稳定 SHA-256。重命名风格组不会令样本过期；
 HSV、RGB 与 Hex 双向同步并保留灰色状态下最近有效 Hue。窗口同时展示原色和新色；只有确认才返回结果，取消返回
 `null`，调用方不会收到临时编辑。当前描边颜色、背景剔除自定义色和棋盘格 A/B 色使用同一服务。
 
+拾色器内部的 `IScreenEyedropperService` 是另一条输入 seam，不改变外层 `IColorPickerService` 的确认边界。
+`DesktopScreenEyedropperService` 保持 `ShowDialog` 模态窗口存活，仅把其 Opacity 暂时设为零；随后由无边框 Topmost
+覆盖层接管整个虚拟桌面的鼠标与键盘。虚拟桌面范围与光标位置来自 Win32 物理坐标，应用清单固定
+Per-Monitor-V2 DPI awareness，因此负坐标和不同缩放屏幕不会经过 WPF DIP 反推。预览阶段通过
+`IScreenColorSampler` 读取当前 `COLORREF`，确认前先让覆盖层退出桌面合成并 `DwmFlush`，再提交权威 RGB。
+右键、Escape、失焦、鼠标捕获丢失或显示器拓扑变化均取消；每次 `GetDC(NULL)` 都在 `finally` 中配对
+`ReleaseDC`。吸管确认只更新拾色器的新色，宿主工具仍需外层“确定”才会收到结果。
+
 普通源图/结果预览通过 `ImagePreviewControl` 与 `ImageViewportSurface` 共享 `ImageViewportState`。滚轮缩放以
 鼠标所在图片坐标为锚点，中键拖拽改变平移量，右键或双击恢复 fit-to-view；缩放范围与视口边界统一约束。
 `PixelAlignmentSurface` 使用同一 viewport 状态，同时保留裁切线、透视顶点和采样网格交互。假透明棋盘格叠加由

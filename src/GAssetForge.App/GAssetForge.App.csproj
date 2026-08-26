@@ -13,6 +13,7 @@
     <Copyright>Copyright © GAssetForge 2026</Copyright>
     <NeutralLanguage>zh-CN</NeutralLanguage>
     <ApplicationIcon>Assets\Branding\GAssetForge.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
   </PropertyGroup>
 
   <ItemGroup>

@@ -1,0 +1,71 @@
+<Window x:Class="GAssetForge.App.Views.ScreenEyedropperWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="屏幕吸管"
+        AllowsTransparency="True"
+        Background="#01000000"
+        Cursor="Cross"
+        Focusable="True"
+        ResizeMode="NoResize"
+        ShowActivated="True"
+        ShowInTaskbar="False"
+        SizeToContent="Manual"
+        Topmost="True"
+        WindowStartupLocation="Manual"
+        WindowStyle="None">
+    <Grid Background="#01000000">
+        <Border x:Name="StatusPanel"
+                Width="310"
+                Margin="24"
+                Padding="12"
+                HorizontalAlignment="Left"
+                VerticalAlignment="Top"
+                Background="{DynamicResource App.SurfaceRaisedBrush}"
+                BorderBrush="{DynamicResource App.BorderStrongBrush}"
+                BorderThickness="1"
+                CornerRadius="6"
+                IsHitTestVisible="False">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="50" />
+                    <ColumnDefinition Width="12" />
+                    <ColumnDefinition Width="*" />
+                </Grid.ColumnDefinitions>
+                <Border x:Name="ColorSwatch"
+                        Background="#FF000000"
+                        BorderBrush="{DynamicResource App.BorderStrongBrush}"
+                        BorderThickness="1"
+                        CornerRadius="3" />
+                <StackPanel Grid.Column="2">
+                    <TextBlock Foreground="{DynamicResource App.TextPrimaryBrush}"
+                               FontSize="14"
+                               FontWeight="SemiBold"
+                               Text="屏幕吸管" />
+                    <TextBlock x:Name="HexText"
+                               Margin="0,5,0,0"
+                               Foreground="{DynamicResource App.TextPrimaryBrush}"
+                               FontFamily="Consolas"
+                               FontSize="15"
+                               Text="#000000" />
+                    <TextBlock x:Name="RgbText"
+                               Margin="0,2,0,0"
+                               Foreground="{DynamicResource App.TextSecondaryBrush}"
+                               FontFamily="Consolas"
+                               Text="RGB 0, 0, 0" />
+                    <TextBlock x:Name="CoordinateText"
+                               Margin="0,2,0,0"
+                               Foreground="{DynamicResource App.TextMutedBrush}"
+                               FontFamily="Consolas"
+                               FontSize="11"
+                               Text="X 0  Y 0" />
+                    <TextBlock x:Name="StatusText"
+                               Margin="0,7,0,0"
+                               Foreground="{DynamicResource App.TextSecondaryBrush}"
+                               FontSize="11"
+                               Text="左键确认 · 右键或 Esc 取消"
+                               TextWrapping="Wrap" />
+                </StackPanel>
+            </Grid>
+        </Border>
+    </Grid>
+</Window>

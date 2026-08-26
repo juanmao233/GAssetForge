@@ -248,10 +248,24 @@
         </Grid>
 
         <Grid Grid.Row="4">
-            <Button HorizontalAlignment="Left"
-                    Command="{Binding ResetToOriginalCommand}"
-                    Content="恢复原色"
-                    Style="{StaticResource App.ButtonStyle}" />
+            <StackPanel HorizontalAlignment="Left" Orientation="Horizontal">
+                <Button x:Name="ScreenEyedropperButton"
+                        Margin="0,0,8,0"
+                        Command="{Binding PickScreenColorCommand}"
+                        Style="{StaticResource App.ButtonStyle}"
+                        ToolTip="从 GAssetForge 或其他应用的屏幕像素吸取颜色">
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Margin="0,0,6,0"
+                                   FontFamily="Segoe UI Symbol"
+                                   FontSize="15"
+                                   Text="⌖" />
+                        <TextBlock VerticalAlignment="Center" Text="屏幕吸管" />
+                    </StackPanel>
+                </Button>
+                <Button Command="{Binding ResetToOriginalCommand}"
+                        Content="恢复原色"
+                        Style="{StaticResource App.ButtonStyle}" />
+            </StackPanel>
             <StackPanel HorizontalAlignment="Right" Orientation="Horizontal">
                 <Button MinWidth="88"
                         Margin="0,0,8,0"

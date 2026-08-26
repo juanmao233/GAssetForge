@@ -17,6 +17,9 @@ internal static class ImageProcessingUiSmokeTests
     public static void Run(string temporaryRoot)
     {
         ColorConversionAndPickerStateStaySynchronized();
+        ScreenEyedropperStateStaysSynchronized();
+        ScreenEyedropperButtonIsWired();
+        Win32ScreenColorSamplerDecodesAndReleasesDeviceContext();
         ToolColorCommandsCommitOnlyConfirmedPickerResults();
         PreviewCachePublishesTheExactRenderedBytes(temporaryRoot);
         PreviewCacheProtectsPinnedResultsFromCleanup(temporaryRoot);
@@ -65,6 +68,98 @@ internal static class ImageProcessingUiSmokeTests
         Equal("#112233", viewModel.SelectedHex, "合法 Hex 应同步 RGB/HSV 颜色状态");
         viewModel.ResetToOriginalCommand.Execute(null);
         Equal("#4A90E2", viewModel.SelectedHex, "恢复原色应回到弹窗打开时颜色");
+    }
+
+    private static void ScreenEyedropperStateStaysSynchronized()
+    {
+        var sampledColor = new RgbColor(18, 52, 86);
+        var eyedropper = new SequencedScreenEyedropperService(sampledColor, null);
+        var viewModel = new ColorPickerViewModel("#A1B2C3", eyedropper);
+
+        viewModel.HexInput = "#12";
+        True(viewModel.HasHexError, "吸管确认前的非法 Hex 应保持校验状态");
+
+        viewModel.PickScreenColorCommand.Execute(null);
+        Equal(sampledColor, viewModel.SelectedRgb, "吸管确认应采用屏幕采样 RGB");
+        Equal(sampledColor.Hex, viewModel.SelectedHex, "吸管确认应同步规范化 Hex");
+        Equal(ColorConversion.ToHsv(sampledColor), viewModel.SelectedHsv,
+            "吸管确认应同步 HSV");
+        False(viewModel.HasHexError, "吸管确认应清除旧的 Hex 校验错误");
+
+        viewModel.PickScreenColorCommand.Execute(null);
+        Equal(sampledColor, viewModel.SelectedRgb, "吸管取消不得修改当前颜色");
+        Equal(2, eyedropper.PickCount, "每次吸管命令应只启动一次屏幕取色会话");
+
+        viewModel.ResetToOriginalCommand.Execute(null);
+        Equal("#A1B2C3", viewModel.SelectedHex,
+            "屏幕吸色后恢复原色仍应回到拾色器打开时的颜色");
+    }
+
+    private static void Win32ScreenColorSamplerDecodesAndReleasesDeviceContext()
+    {
+        var sampledPoint = new PhysicalScreenPoint(-128, 240);
+        var nativeApi = new FakeScreenColorNativeApi
+        {
+            DeviceContext = new IntPtr(0x1234),
+            ColorReference = 0x00563412
+        };
+        var sampler = new Win32ScreenColorSampler(nativeApi);
+
+        True(sampler.TrySample(sampledPoint, out var sampledColor),
+            "有效 Win32 COLORREF 应能完成屏幕采样");
+        Equal(new RgbColor(0x12, 0x34, 0x56), sampledColor,
+            "Win32 COLORREF 必须按 0x00BBGGRR 转换为 RGB");
+        Equal(sampledPoint.X, nativeApi.LastPixelX, "采样必须保留虚拟屏幕负 X 坐标");
+        Equal(sampledPoint.Y, nativeApi.LastPixelY, "采样必须传递物理屏幕 Y 坐标");
+        Equal(1, nativeApi.ReleaseCount, "成功采样后必须释放桌面设备上下文");
+        Equal(nativeApi.DeviceContext, nativeApi.LastReleasedDeviceContext,
+            "必须释放实际取得的桌面设备上下文");
+
+        var invalidColorApi = new FakeScreenColorNativeApi
+        {
+            DeviceContext = new IntPtr(0x2345),
+            ColorReference = 0xFFFFFFFF
+        };
+        False(new Win32ScreenColorSampler(invalidColorApi).TrySample(sampledPoint, out _),
+            "CLR_INVALID 不得被误当成白色采样结果");
+        Equal(1, invalidColorApi.ReleaseCount,
+            "COLORREF 无效时仍必须释放桌面设备上下文");
+
+        var throwingApi = new FakeScreenColorNativeApi
+        {
+            DeviceContext = new IntPtr(0x3456),
+            GetPixelException = new InvalidOperationException("test GetPixel failure")
+        };
+        var throwingSampler = new Win32ScreenColorSampler(throwingApi);
+        Throws<InvalidOperationException>(
+            () => _ = throwingSampler.TrySample(sampledPoint, out _),
+            "GetPixel 异常应向调用方传播");
+        Equal(1, throwingApi.ReleaseCount,
+            "GetPixel 抛出异常时 ReleaseDC 仍必须由 finally 执行");
+        Equal(throwingApi.DeviceContext, throwingApi.LastReleasedDeviceContext,
+            "异常路径必须释放同一个桌面设备上下文");
+    }
+
+    private static void ScreenEyedropperButtonIsWired()
+    {
+        var viewModel = new ColorPickerViewModel(
+            "#102030",
+            new SequencedScreenEyedropperService((RgbColor?)null));
+        var dialog = new GAssetForge.App.Views.ColorPickerDialog(viewModel);
+        var button = dialog.FindName("ScreenEyedropperButton") as System.Windows.Controls.Button;
+
+        True(button is not null, "共享拾色器必须真实呈现屏幕吸管入口");
+        var commandBinding = System.Windows.Data.BindingOperations.GetBinding(
+            button!,
+            System.Windows.Controls.Button.CommandProperty);
+        Equal("PickScreenColorCommand", commandBinding?.Path?.Path,
+            "屏幕吸管按钮必须绑定 ViewModel 的取色命令");
+        True(ReferenceEquals(viewModel, dialog.DataContext),
+            "共享拾色器必须以包含吸管命令的 ViewModel 作为数据上下文");
+        Equal("屏幕吸管", ((System.Windows.Controls.TextBlock)
+                ((System.Windows.Controls.StackPanel)button!.Content).Children[1]).Text,
+            "屏幕吸管按钮应有明确可见标题");
+        dialog.Close();
     }
 
     private static void PreviewCachePublishesTheExactRenderedBytes(string temporaryRoot)
@@ -478,5 +573,66 @@ internal static class ImageProcessingUiSmokeTests
             RequestedTitles.Add(title ?? string.Empty);
             return _results.Count == 0 ? null : _results.Dequeue();
         }
+    }
+
+    private sealed class SequencedScreenEyedropperService(params RgbColor?[] results)
+        : IScreenEyedropperService
+    {
+        private readonly Queue<RgbColor?> _results = new(results);
+
+        public int PickCount { get; private set; }
+
+        public RgbColor? PickColor()
+        {
+            PickCount++;
+            return _results.Count == 0 ? null : _results.Dequeue();
+        }
+    }
+
+    private sealed class FakeScreenColorNativeApi : IScreenColorNativeApi
+    {
+        public IntPtr DeviceContext { get; init; }
+
+        public uint ColorReference { get; init; }
+
+        public Exception? GetPixelException { get; init; }
+
+        public int LastPixelX { get; private set; }
+
+        public int LastPixelY { get; private set; }
+
+        public int ReleaseCount { get; private set; }
+
+        public IntPtr LastReleasedDeviceContext { get; private set; }
+
+        public bool GetCursorPosition(out NativeScreenPoint point)
+        {
+            point = default;
+            return false;
+        }
+
+        public IntPtr GetDesktopDeviceContext() => DeviceContext;
+
+        public uint GetPixel(IntPtr deviceContext, int x, int y)
+        {
+            Equal(DeviceContext, deviceContext,
+                "GetPixel 必须使用刚取得的桌面设备上下文");
+            LastPixelX = x;
+            LastPixelY = y;
+            if (GetPixelException is not null)
+            {
+                throw GetPixelException;
+            }
+
+            return ColorReference;
+        }
+
+        public void ReleaseDesktopDeviceContext(IntPtr deviceContext)
+        {
+            ReleaseCount++;
+            LastReleasedDeviceContext = deviceContext;
+        }
+
+        public int GetSystemMetrics(int index) => 0;
     }
 }

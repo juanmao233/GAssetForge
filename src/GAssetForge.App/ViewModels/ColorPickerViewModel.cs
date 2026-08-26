@@ -1,6 +1,7 @@
 using System.Windows.Input;
 using System.Windows.Media;
 using GAssetForge.App.Infrastructure;
+using GAssetForge.App.Services;
 using GAssetForge.Core.Imaging;
 
 namespace GAssetForge.App.ViewModels;
@@ -16,22 +17,30 @@ public sealed class ColorPickerViewModel : ObservableObject
     private string _hexInput;
     private string _hexValidationMessage = string.Empty;
     private double _fallbackHue;
+    private readonly IScreenEyedropperService _screenEyedropperService;
 
-    public ColorPickerViewModel(string? initialColorHex = null)
+    public ColorPickerViewModel(
+        string? initialColorHex = null,
+        IScreenEyedropperService? screenEyedropperService = null)
         : this(ColorConversion.TryParseHex(initialColorHex, out var parsed)
             ? parsed
-            : new RgbColor(0, 0, 0))
+            : new RgbColor(0, 0, 0),
+            screenEyedropperService)
     {
     }
 
-    public ColorPickerViewModel(RgbColor initialColor)
+    public ColorPickerViewModel(
+        RgbColor initialColor,
+        IScreenEyedropperService? screenEyedropperService = null)
     {
+        _screenEyedropperService = screenEyedropperService ?? new DesktopScreenEyedropperService();
         _originalRgb = initialColor;
         _selectedRgb = initialColor;
         _selectedHsv = ColorConversion.ToHsv(initialColor);
         _fallbackHue = _selectedHsv.Hue;
         _hexInput = initialColor.Hex;
         ResetToOriginalCommand = new RelayCommand(ResetToOriginal);
+        PickScreenColorCommand = new RelayCommand(PickScreenColor);
     }
 
     public int Red
@@ -141,9 +150,20 @@ public sealed class ColorPickerViewModel : ObservableObject
 
     public ICommand ResetToOriginalCommand { get; }
 
+    public ICommand PickScreenColorCommand { get; }
+
     public void SetColor(RgbColor color) => ApplyRgb(color);
 
     public void ResetToOriginal() => ApplyRgb(_originalRgb);
+
+    private void PickScreenColor()
+    {
+        var sampledColor = _screenEyedropperService.PickColor();
+        if (sampledColor is { } color)
+        {
+            SetColor(color);
+        }
+    }
 
     private void ApplyRgb(RgbColor rgb)
     {

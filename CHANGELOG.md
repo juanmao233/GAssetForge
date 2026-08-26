@@ -5,6 +5,25 @@ development track; versioning policy will be finalized before the first public r
 
 ## Unreleased
 
+## 1.0.17t1 - 2026-08-26
+
+### Added
+
+- Added a desktop-wide eyedropper to the shared HSV/RGB color picker. It previews the current screen
+  pixel and coordinates, accepts with the left mouse button, and cancels with the right mouse button
+  or Escape without changing the pending color.
+- Added explicit Per-Monitor-V2 DPI awareness so the native virtual-screen bounds, cursor position,
+  and sampled pixel remain in the same coordinate system across scaled and negative-coordinate
+  monitors.
+
+### Changed
+
+- Screen sampling now hides the modal picker without ending its dialog session, uses a temporary
+  topmost overlay to capture input across applications, and removes that overlay from composition
+  before committing the authoritative RGB value.
+- Isolated Win32 desktop pixel access behind a testable App service and guaranteed that every screen
+  device context is released on success, invalid-color, and exception paths.
+
 ## 1.0.16t1 - 2026-08-26
 
 ### Added
