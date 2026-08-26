@@ -33,10 +33,10 @@ public sealed record BackgroundRemovalToolSettingsSnapshot(
     string CheckerColorAHex,
     string CheckerColorBHex,
     bool EnableCheckerGridAlignment,
-    int CheckerCellSize,
-    int CheckerOffsetX,
-    int CheckerOffsetY,
-    int CheckerBoundaryTolerance,
+    double CheckerCellSize,
+    double CheckerOffsetX,
+    double CheckerOffsetY,
+    double CheckerBoundaryTolerance,
     string? LastInputDirectory,
     string? LastOutputDirectory);
 
@@ -185,6 +185,9 @@ public sealed class BackgroundRemovalBatchItemViewModel : ObservableObject
 public sealed class BackgroundRemovalViewModel : ObservableObject
 {
     private const string LogSource = "BackgroundRemoval";
+    private const double MinimumCheckerCellSize = 0.25d;
+    private const double MaximumCheckerCellSize = 4096d;
+    private const double MaximumCheckerBoundaryTolerance = 8d;
     public const int MaximumBatchItemCount = 256;
 
     private static readonly IReadOnlyList<BackgroundRemovalPresetOption> SupportedPresets =
@@ -235,10 +238,15 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
     private string _checkerColorAHex;
     private string _checkerColorBHex;
     private bool _enableCheckerGridAlignment;
-    private int _checkerCellSize;
-    private int _checkerOffsetX;
-    private int _checkerOffsetY;
-    private int _checkerBoundaryTolerance;
+    private double _checkerCellSize;
+    private double _checkerOffsetX;
+    private double _checkerOffsetY;
+    private double _checkerBoundaryTolerance;
+    private bool _isCheckerAlignmentEditActive;
+    private double _checkerAlignmentEditStartCellSize;
+    private double _checkerAlignmentEditStartOffsetX;
+    private double _checkerAlignmentEditStartOffsetY;
+    private double _checkerAlignmentEditStartBoundaryTolerance;
     private string _inputPath = string.Empty;
     private int _sourcePixelWidth;
     private int _sourcePixelHeight;
@@ -280,10 +288,10 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         string? checkerColorAHex = null,
         string? checkerColorBHex = null,
         bool enableCheckerGridAlignment = true,
-        int checkerCellSize = 16,
-        int checkerOffsetX = 0,
-        int checkerOffsetY = 0,
-        int checkerBoundaryTolerance = 1,
+        double checkerCellSize = 16d,
+        double checkerOffsetX = 0d,
+        double checkerOffsetY = 0d,
+        double checkerBoundaryTolerance = 1d,
         string? lastInputDirectory = null,
         string? lastOutputDirectory = null,
         IWorkbenchLogSink? workbenchLogSink = null,
@@ -309,10 +317,18 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         _checkerColorAHex = NormalizeInitialCustomColor(checkerColorAHex ?? "#FFFFFF");
         _checkerColorBHex = NormalizeInitialCustomColor(checkerColorBHex ?? "#CCCCCC");
         _enableCheckerGridAlignment = enableCheckerGridAlignment;
-        _checkerCellSize = Math.Clamp(checkerCellSize, 2, 512);
+        _checkerCellSize = NormalizeFinite(
+            checkerCellSize,
+            16d,
+            MinimumCheckerCellSize,
+            MaximumCheckerCellSize);
         _checkerOffsetX = NormalizeCheckerOffset(checkerOffsetX, _checkerCellSize);
         _checkerOffsetY = NormalizeCheckerOffset(checkerOffsetY, _checkerCellSize);
-        _checkerBoundaryTolerance = Math.Clamp(checkerBoundaryTolerance, 0, 8);
+        _checkerBoundaryTolerance = NormalizeFinite(
+            checkerBoundaryTolerance,
+            1d,
+            0d,
+            MaximumCheckerBoundaryTolerance);
         _lastInputDirectory = NormalizeExistingDirectory(lastInputDirectory);
         _lastOutputDirectory = NormalizeExistingDirectory(lastOutputDirectory);
 
@@ -609,12 +625,16 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         }
     }
 
-    public int CheckerCellSize
+    public double CheckerCellSize
     {
         get => _checkerCellSize;
         set
         {
-            var normalized = Math.Clamp(value, 2, 512);
+            var normalized = NormalizeFinite(
+                value,
+                double.IsFinite(_checkerCellSize) ? _checkerCellSize : 16d,
+                MinimumCheckerCellSize,
+                MaximumCheckerCellSize);
             if (!SetProperty(ref _checkerCellSize, normalized))
             {
                 return;
@@ -626,13 +646,13 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             OnPropertyChanged(nameof(CheckerAlignmentSummary));
             MarkPreviewStale();
             RefreshValidationAndCommands();
-            NotifySettingsChanged();
+            NotifyCheckerAlignmentSettingsChanged();
         }
     }
 
-    public int CheckerOffsetMaximum => Math.Max(1, CheckerCellSize - 1);
+    public double CheckerOffsetMaximum => CheckerCellSize;
 
-    public int CheckerOffsetX
+    public double CheckerOffsetX
     {
         get => _checkerOffsetX;
         set
@@ -643,12 +663,12 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
                 OnPropertyChanged(nameof(CheckerAlignmentSummary));
                 MarkPreviewStale();
                 RefreshValidationAndCommands();
-                NotifySettingsChanged();
+                NotifyCheckerAlignmentSettingsChanged();
             }
         }
     }
 
-    public int CheckerOffsetY
+    public double CheckerOffsetY
     {
         get => _checkerOffsetY;
         set
@@ -659,32 +679,86 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
                 OnPropertyChanged(nameof(CheckerAlignmentSummary));
                 MarkPreviewStale();
                 RefreshValidationAndCommands();
-                NotifySettingsChanged();
+                NotifyCheckerAlignmentSettingsChanged();
             }
         }
     }
 
-    public int CheckerBoundaryTolerance
+    public double CheckerBoundaryTolerance
     {
         get => _checkerBoundaryTolerance;
         set
         {
-            var normalized = Math.Clamp(value, 0, 8);
+            var normalized = NormalizeFinite(
+                value,
+                double.IsFinite(_checkerBoundaryTolerance) ? _checkerBoundaryTolerance : 1d,
+                0d,
+                MaximumCheckerBoundaryTolerance);
             if (SetProperty(ref _checkerBoundaryTolerance, normalized))
             {
                 OnPropertyChanged(nameof(CheckerAlignmentSummary));
                 MarkPreviewStale();
                 RefreshValidationAndCommands();
-                NotifySettingsChanged();
+                NotifyCheckerAlignmentSettingsChanged();
             }
         }
     }
 
     public string CheckerAlignmentSummary => EnableCheckerGridAlignment
-        ? $"按 {CheckerCellSize}px 方格、偏移 ({CheckerOffsetX},{CheckerOffsetY}) 对齐；格线 ±{CheckerBoundaryTolerance}px 内允许匹配任一底色。"
+        ? $"按 {CheckerCellSize:0.###}px 方格、偏移 ({CheckerOffsetX:0.###},{CheckerOffsetY:0.###}) 对齐；格线 ±{CheckerBoundaryTolerance:0.###}px 内允许匹配任一底色。"
         : "关闭网格对齐后，任意位置只要接近两种底色之一就会进入剔除候选，误删风险更高。";
 
     public bool ShowCheckerGridOverlay => UseFakeTransparencyGrid && EnableCheckerGridAlignment;
+
+    public void BeginCheckerAlignmentEdit()
+    {
+        if (_isCheckerAlignmentEditActive)
+        {
+            return;
+        }
+
+        _checkerAlignmentEditStartCellSize = CheckerCellSize;
+        _checkerAlignmentEditStartOffsetX = CheckerOffsetX;
+        _checkerAlignmentEditStartOffsetY = CheckerOffsetY;
+        _checkerAlignmentEditStartBoundaryTolerance = CheckerBoundaryTolerance;
+        _isCheckerAlignmentEditActive = true;
+    }
+
+    public void CommitCheckerAlignmentEdit()
+    {
+        if (!_isCheckerAlignmentEditActive)
+        {
+            return;
+        }
+
+        var changed = CheckerCellSize != _checkerAlignmentEditStartCellSize ||
+                      CheckerOffsetX != _checkerAlignmentEditStartOffsetX ||
+                      CheckerOffsetY != _checkerAlignmentEditStartOffsetY ||
+                      CheckerBoundaryTolerance != _checkerAlignmentEditStartBoundaryTolerance;
+        _isCheckerAlignmentEditActive = false;
+        if (changed)
+        {
+            NotifySettingsChanged();
+        }
+    }
+
+    public void CancelCheckerAlignmentEdit()
+    {
+        if (!_isCheckerAlignmentEditActive)
+        {
+            return;
+        }
+
+        var cellSize = _checkerAlignmentEditStartCellSize;
+        var offsetX = _checkerAlignmentEditStartOffsetX;
+        var offsetY = _checkerAlignmentEditStartOffsetY;
+        var boundaryTolerance = _checkerAlignmentEditStartBoundaryTolerance;
+        CheckerCellSize = cellSize;
+        CheckerOffsetX = offsetX;
+        CheckerOffsetY = offsetY;
+        CheckerBoundaryTolerance = boundaryTolerance;
+        _isCheckerAlignmentEditActive = false;
+    }
 
     public string InputPath
     {
@@ -1741,15 +1815,23 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             return false;
         }
 
-        if (CheckerCellSize is < 2 or > 512)
+        if (!double.IsFinite(CheckerCellSize) ||
+            CheckerCellSize is < MinimumCheckerCellSize or > MaximumCheckerCellSize)
         {
-            reason = "假透明网格尺寸必须位于 2 到 512 像素之间。";
+            reason = "假透明网格尺寸必须是 0.25 到 4096 之间的有限像素值。";
             return false;
         }
 
-        if (CheckerBoundaryTolerance is < 0 or > 8)
+        if (!double.IsFinite(CheckerOffsetX) || !double.IsFinite(CheckerOffsetY))
         {
-            reason = "网格边界容差必须位于 0 到 8 像素之间。";
+            reason = "假透明网格偏移必须是有限像素值。";
+            return false;
+        }
+
+        if (!double.IsFinite(CheckerBoundaryTolerance) ||
+            CheckerBoundaryTolerance is < 0d or > MaximumCheckerBoundaryTolerance)
+        {
+            reason = "网格边界容差必须是 0 到 8 之间的有限像素值。";
             return false;
         }
 
@@ -1847,6 +1929,16 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         SettingsChanged?.Invoke(this, new BackgroundRemovalSettingsChangedEventArgs(CaptureSettings()));
     }
 
+    private void NotifyCheckerAlignmentSettingsChanged()
+    {
+        if (_isCheckerAlignmentEditActive)
+        {
+            return;
+        }
+
+        NotifySettingsChanged();
+    }
+
     public BackgroundRemovalToolSettingsSnapshot CaptureSettings() => new(
         SelectedPreset.Preset.ToString().ToLowerInvariant(),
         CustomColorHex,
@@ -1929,11 +2021,32 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
                 "Workspace",
                 ImageProcessingPreviewCache.DefaultDirectoryName));
 
-    private static int NormalizeCheckerOffset(int value, int cellSize)
+    private static double NormalizeFinite(
+        double value,
+        double fallback,
+        double minimum,
+        double maximum) =>
+        double.IsFinite(value) ? Math.Clamp(value, minimum, maximum) : fallback;
+
+    private static double NormalizeCheckerOffset(double value, double cellSize)
     {
-        var normalizedCellSize = Math.Clamp(cellSize, 2, 512);
+        if (!double.IsFinite(value))
+        {
+            return 0d;
+        }
+
+        var normalizedCellSize = NormalizeFinite(
+            cellSize,
+            16d,
+            MinimumCheckerCellSize,
+            MaximumCheckerCellSize);
         var remainder = value % normalizedCellSize;
-        return remainder < 0 ? remainder + normalizedCellSize : remainder;
+        if (remainder == 0d)
+        {
+            return 0d;
+        }
+
+        return remainder < 0d ? remainder + normalizedCellSize : remainder;
     }
 
     private static (double Transparent, double Opaque) NormalizeInitialThresholds(

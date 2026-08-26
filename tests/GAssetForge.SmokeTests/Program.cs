@@ -1214,6 +1214,22 @@ internal static class Program
                 backgroundRemovalPropertiesView,
                 "BackgroundRemovalPropertiesCheckerColorBTextBox",
                 "背景剔除属性页缺少网格颜色 B。");
+            var checkerCellSizeInput = RequireNamedElement<TextBox>(
+                backgroundRemovalPropertiesView,
+                "BackgroundRemovalPropertiesCheckerCellSizeTextBox",
+                "背景剔除属性页缺少浮点网格尺寸输入。");
+            var checkerBoundaryToleranceInput = RequireNamedElement<TextBox>(
+                backgroundRemovalPropertiesView,
+                "BackgroundRemovalPropertiesCheckerBoundaryToleranceTextBox",
+                "背景剔除属性页缺少浮点边界容差输入。");
+            var checkerOffsetXInput = RequireNamedElement<TextBox>(
+                backgroundRemovalPropertiesView,
+                "BackgroundRemovalPropertiesCheckerOffsetXTextBox",
+                "背景剔除属性页缺少浮点 X 偏移输入。");
+            var checkerOffsetYInput = RequireNamedElement<TextBox>(
+                backgroundRemovalPropertiesView,
+                "BackgroundRemovalPropertiesCheckerOffsetYTextBox",
+                "背景剔除属性页缺少浮点 Y 偏移输入。");
             var checkerPreview = RequireNamedElement<CheckerGridImagePreviewControl>(
                 backgroundRemovalView,
                 "BackgroundRemovalInputPreview",
@@ -1256,8 +1272,52 @@ internal static class Program
                 BindingOperations.GetBindingExpression(checkerColorB, TextBox.TextProperty)?.ParentBinding.Path.Path,
                 "网格颜色 B 绑定");
             Equal(nameof(BackgroundRemovalViewModel.CheckerCellSize),
-                BindingOperations.GetBindingExpression(checkerPreview, CheckerGridImagePreviewControl.CellSizeProperty)?.ParentBinding.Path.Path,
+                BindingOperations.GetBindingExpression(checkerCellSizeInput, TextBox.TextProperty)?.ParentBinding.Path.Path,
+                "属性页浮点网格尺寸绑定");
+            Equal(nameof(BackgroundRemovalViewModel.CheckerBoundaryTolerance),
+                BindingOperations.GetBindingExpression(checkerBoundaryToleranceInput, TextBox.TextProperty)?.ParentBinding.Path.Path,
+                "属性页浮点边界容差绑定");
+            Equal(nameof(BackgroundRemovalViewModel.CheckerOffsetX),
+                BindingOperations.GetBindingExpression(checkerOffsetXInput, TextBox.TextProperty)?.ParentBinding.Path.Path,
+                "属性页浮点 X 偏移绑定");
+            Equal(nameof(BackgroundRemovalViewModel.CheckerOffsetY),
+                BindingOperations.GetBindingExpression(checkerOffsetYInput, TextBox.TextProperty)?.ParentBinding.Path.Path,
+                "属性页浮点 Y 偏移绑定");
+            var checkerCellBinding = BindingOperations.GetBindingExpression(
+                checkerPreview,
+                CheckerGridImagePreviewControl.CellSizeProperty)?.ParentBinding;
+            var checkerOffsetXBinding = BindingOperations.GetBindingExpression(
+                checkerPreview,
+                CheckerGridImagePreviewControl.OffsetXProperty)?.ParentBinding;
+            var checkerOffsetYBinding = BindingOperations.GetBindingExpression(
+                checkerPreview,
+                CheckerGridImagePreviewControl.OffsetYProperty)?.ParentBinding;
+            Equal(nameof(BackgroundRemovalViewModel.CheckerCellSize), checkerCellBinding?.Path.Path,
                 "网格源图预览尺寸绑定");
+            Equal(nameof(BackgroundRemovalViewModel.CheckerOffsetX), checkerOffsetXBinding?.Path.Path,
+                "网格源图预览 X 偏移绑定");
+            Equal(nameof(BackgroundRemovalViewModel.CheckerOffsetY), checkerOffsetYBinding?.Path.Path,
+                "网格源图预览 Y 偏移绑定");
+            Equal(BindingMode.TwoWay, checkerCellBinding?.Mode ?? BindingMode.Default,
+                "标尺修改格宽必须双向回写 ViewModel");
+            Equal(BindingMode.TwoWay, checkerOffsetXBinding?.Mode ?? BindingMode.Default,
+                "标尺修改 X 相位必须双向回写 ViewModel");
+            Equal(BindingMode.TwoWay, checkerOffsetYBinding?.Mode ?? BindingMode.Default,
+                "标尺修改 Y 相位必须双向回写 ViewModel");
+            Equal(nameof(BackgroundRemovalViewModel.ShowCheckerGridOverlay),
+                BindingOperations.GetBindingExpression(
+                    checkerPreview,
+                    CheckerGridImagePreviewControl.IsRulerEditingEnabledProperty)?.ParentBinding.Path.Path,
+                "标尺编辑状态应跟随假透明网格对齐开关");
+            Equal(typeof(double), CheckerGridImagePreviewControl.CellSizeProperty.PropertyType,
+                "预览格宽 DP 必须支持浮点源像素");
+            Equal(typeof(double), CheckerGridImagePreviewControl.OffsetXProperty.PropertyType,
+                "预览 X 偏移 DP 必须支持浮点源像素");
+            Equal(typeof(double), CheckerGridImagePreviewControl.OffsetYProperty.PropertyType,
+                "预览 Y 偏移 DP 必须支持浮点源像素");
+            True(((FrameworkPropertyMetadata)CheckerGridImagePreviewControl.CellSizeProperty
+                    .GetMetadata(typeof(CheckerGridImagePreviewControl))).BindsTwoWayByDefault,
+                "预览格宽 DP 应默认双向绑定");
             Equal(nameof(BackgroundRemovalViewModel.SourcePixelWidth),
                 BindingOperations.GetBindingExpression(checkerPreview, CheckerGridImagePreviewControl.SourcePixelWidthProperty)?.ParentBinding.Path.Path,
                 "网格源图预览源图宽度绑定");

@@ -54,6 +54,9 @@ public sealed class ImageSharpBackgroundRemovalService : IBackgroundRemovalServi
         var checkerColorB = settings.UseFakeTransparencyGrid
             ? ParseColor(settings.CheckerColorBHex)
             : default;
+        var checkerGrid = settings.UseFakeTransparencyGrid
+            ? CreateCheckerGridGeometry(settings)
+            : default;
         var originalAlpha = new byte[checked(image.Width * image.Height)];
         var distances = new float[originalAlpha.Length];
         if (settings.UseFakeTransparencyGrid)
@@ -62,7 +65,7 @@ public sealed class ImageSharpBackgroundRemovalService : IBackgroundRemovalServi
                 image,
                 checkerColorA,
                 checkerColorB,
-                settings,
+                checkerGrid,
                 originalAlpha,
                 distances);
         }
@@ -93,7 +96,8 @@ public sealed class ImageSharpBackgroundRemovalService : IBackgroundRemovalServi
                 matte,
                 checkerColorA,
                 checkerColorB,
-                settings)
+                settings.Despill,
+                checkerGrid)
             : ApplyMatte(image, originalAlpha, matte, key, settings.Despill);
         var temporaryPath = Path.Combine(
             outputDirectory,
@@ -139,14 +143,26 @@ public sealed class ImageSharpBackgroundRemovalService : IBackgroundRemovalServi
                 throw new ArgumentException("假透明网格的两种颜色不能相同。", nameof(settings));
             }
 
-            if (settings.CheckerCellSize is < 2 or > 512)
+            if (!double.IsFinite(settings.CheckerCellSize) ||
+                settings.CheckerCellSize is < 0.25d or > 4096d)
             {
-                throw new ArgumentException("假透明网格单元尺寸必须位于 2 到 512 像素之间。", nameof(settings));
+                throw new ArgumentException(
+                    "假透明网格单元尺寸必须是 0.25 到 4096 之间的有限像素值。",
+                    nameof(settings));
             }
 
-            if (settings.CheckerBoundaryTolerance is < 0 or > 8)
+            if (!double.IsFinite(settings.CheckerOffsetX) ||
+                !double.IsFinite(settings.CheckerOffsetY))
             {
-                throw new ArgumentException("假透明网格边界容差必须位于 0 到 8 像素之间。", nameof(settings));
+                throw new ArgumentException("假透明网格偏移必须是有限像素值。", nameof(settings));
+            }
+
+            if (!double.IsFinite(settings.CheckerBoundaryTolerance) ||
+                settings.CheckerBoundaryTolerance is < 0d or > 8d)
+            {
+                throw new ArgumentException(
+                    "假透明网格边界容差必须是 0 到 8 之间的有限像素值。",
+                    nameof(settings));
             }
         }
 
@@ -206,7 +222,7 @@ public sealed class ImageSharpBackgroundRemovalService : IBackgroundRemovalServi
         Image<Rgba32> image,
         Rgba32 checkerColorA,
         Rgba32 checkerColorB,
-        BackgroundRemovalSettings settings,
+        CheckerGridGeometry checkerGrid,
         byte[] originalAlpha,
         float[] distances)
     {
@@ -226,7 +242,7 @@ public sealed class ImageSharpBackgroundRemovalService : IBackgroundRemovalServi
                         y,
                         checkerColorA,
                         checkerColorB,
-                        settings).Distance;
+                        checkerGrid).Distance;
                 }
             }
         });
@@ -453,7 +469,8 @@ public sealed class ImageSharpBackgroundRemovalService : IBackgroundRemovalServi
         IReadOnlyList<byte> matte,
         Rgba32 checkerColorA,
         Rgba32 checkerColorB,
-        BackgroundRemovalSettings settings)
+        bool despill,
+        CheckerGridGeometry checkerGrid)
     {
         long removed = 0;
         long transparent = 0;
@@ -484,7 +501,7 @@ public sealed class ImageSharpBackgroundRemovalService : IBackgroundRemovalServi
                     }
                     else
                     {
-                        if (settings.Despill && sourceA > 0 && targetA < sourceA)
+                        if (despill && sourceA > 0 && targetA < sourceA)
                         {
                             var key = ResolveCheckerKey(
                                 pixel,
@@ -492,7 +509,7 @@ public sealed class ImageSharpBackgroundRemovalService : IBackgroundRemovalServi
                                 y,
                                 checkerColorA,
                                 checkerColorB,
-                                settings).Key;
+                                checkerGrid).Key;
                             var coverage = Math.Clamp(targetA / (double)sourceA, 1d / 255d, 1d);
                             pixel.R = Unmix(pixel.R, key.R, coverage);
                             pixel.G = Unmix(pixel.G, key.G, coverage);
@@ -524,20 +541,24 @@ public sealed class ImageSharpBackgroundRemovalService : IBackgroundRemovalServi
         int y,
         Rgba32 checkerColorA,
         Rgba32 checkerColorB,
-        BackgroundRemovalSettings settings)
+        CheckerGridGeometry checkerGrid)
     {
         var distanceA = Distance(pixel, checkerColorA);
         var distanceB = Distance(pixel, checkerColorB);
-        if (!settings.EnableCheckerGridAlignment || IsNearCheckerBoundary(x, y, settings))
+        if (!checkerGrid.EnableAlignment || IsNearCheckerBoundary(x, y, checkerGrid))
         {
             return distanceA <= distanceB
                 ? new CheckerKey(checkerColorA, distanceA)
                 : new CheckerKey(checkerColorB, distanceB);
         }
 
-        var cellX = FloorDiv((long)x - settings.CheckerOffsetX, settings.CheckerCellSize);
-        var cellY = FloorDiv((long)y - settings.CheckerOffsetY, settings.CheckerCellSize);
-        var expectsColorA = PositiveModulo(cellX + cellY, 2) == 0;
+        var sampleX = x + 0.5d;
+        var sampleY = y + 0.5d;
+        var cellX = (long)Math.Floor(
+            (sampleX - checkerGrid.PhaseOffsetX) / checkerGrid.CellSize);
+        var cellY = (long)Math.Floor(
+            (sampleY - checkerGrid.PhaseOffsetY) / checkerGrid.CellSize);
+        var expectsColorA = ((cellX + cellY) & 1L) == 0L;
         var expectedKey = expectsColorA ? checkerColorA : checkerColorB;
         var expectedDistance = expectsColorA ? distanceA : distanceB;
         var oppositeDistance = expectsColorA ? distanceB : distanceA;
@@ -557,35 +578,47 @@ public sealed class ImageSharpBackgroundRemovalService : IBackgroundRemovalServi
     private static bool IsNearCheckerBoundary(
         int x,
         int y,
-        BackgroundRemovalSettings settings)
+        CheckerGridGeometry checkerGrid)
     {
-        var tolerance = settings.CheckerBoundaryTolerance;
-        if (tolerance <= 0)
+        var tolerance = checkerGrid.BoundaryTolerance;
+        if (tolerance <= 0d)
         {
             return false;
         }
 
+        var sampleX = x + 0.5d;
+        var sampleY = y + 0.5d;
         var localX = PositiveModulo(
-            (long)x - settings.CheckerOffsetX,
-            settings.CheckerCellSize);
+            sampleX - checkerGrid.PhaseOffsetX,
+            checkerGrid.CellSize);
         var localY = PositiveModulo(
-            (long)y - settings.CheckerOffsetY,
-            settings.CheckerCellSize);
-        return localX < tolerance || localX >= settings.CheckerCellSize - tolerance ||
-               localY < tolerance || localY >= settings.CheckerCellSize - tolerance;
+            sampleY - checkerGrid.PhaseOffsetY,
+            checkerGrid.CellSize);
+        var boundaryDistanceX = Math.Min(localX, checkerGrid.CellSize - localX);
+        var boundaryDistanceY = Math.Min(localY, checkerGrid.CellSize - localY);
+        return boundaryDistanceX < tolerance || boundaryDistanceY < tolerance;
     }
 
-    private static long FloorDiv(long value, int divisor)
+    private static CheckerGridGeometry CreateCheckerGridGeometry(BackgroundRemovalSettings settings)
     {
-        var quotient = value / divisor;
-        var remainder = value % divisor;
-        return remainder < 0 ? quotient - 1 : quotient;
+        var phasePeriod = settings.CheckerCellSize * 2d;
+        return new CheckerGridGeometry(
+            settings.EnableCheckerGridAlignment,
+            settings.CheckerCellSize,
+            PositiveModulo(settings.CheckerOffsetX, phasePeriod),
+            PositiveModulo(settings.CheckerOffsetY, phasePeriod),
+            settings.CheckerBoundaryTolerance);
     }
 
-    private static int PositiveModulo(long value, int divisor)
+    private static double PositiveModulo(double value, double divisor)
     {
         var remainder = value % divisor;
-        return (int)(remainder < 0 ? remainder + divisor : remainder);
+        if (remainder < 0d)
+        {
+            remainder += divisor;
+        }
+
+        return remainder >= divisor ? 0d : remainder;
     }
 
     private static byte Unmix(byte observed, byte key, double coverage) =>
@@ -603,4 +636,11 @@ public sealed class ImageSharpBackgroundRemovalService : IBackgroundRemovalServi
     }
 
     private readonly record struct CheckerKey(Rgba32 Key, float Distance);
+
+    private readonly record struct CheckerGridGeometry(
+        bool EnableAlignment,
+        double CellSize,
+        double PhaseOffsetX,
+        double PhaseOffsetY,
+        double BoundaryTolerance);
 }

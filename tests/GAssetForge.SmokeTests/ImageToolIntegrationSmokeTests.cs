@@ -20,6 +20,8 @@ internal static class ImageToolIntegrationSmokeTests
         Directory.CreateDirectory(testRoot);
         ImageOutlineBatchContinuesAfterIndividualFailures(testRoot);
         ShellLoadsAndPersistsOutlineAndCheckerPreferences(testRoot);
+        CheckerAlignmentEditPersistsOnlyOnCommit(testRoot);
+        LegacyIntegerCheckerSettingsLoadIntoFractionalModel(testRoot);
         LegacyBackgroundRemovalSettingsEnableHollowRemovalByDefault(testRoot);
     }
 
@@ -101,10 +103,10 @@ internal static class ImageToolIntegrationSmokeTests
             BackgroundRemovalCheckerColorAHex = "#F0F0F0",
             BackgroundRemovalCheckerColorBHex = "#A0A0A0",
             BackgroundRemovalEnableCheckerGridAlignment = true,
-            BackgroundRemovalCheckerCellSize = 20,
-            BackgroundRemovalCheckerOffsetX = 3,
-            BackgroundRemovalCheckerOffsetY = 5,
-            BackgroundRemovalCheckerBoundaryTolerance = 2
+            BackgroundRemovalCheckerCellSize = 20.5d,
+            BackgroundRemovalCheckerOffsetX = 3.25d,
+            BackgroundRemovalCheckerOffsetY = 5.75d,
+            BackgroundRemovalCheckerBoundaryTolerance = 1.5d
         });
         var editor = new EditorWorkspaceViewModel(
             new JsonProjectRepository(paths),
@@ -127,10 +129,10 @@ internal static class ImageToolIntegrationSmokeTests
             True(checker.UseFakeTransparencyGrid, "Shell 加载假透明网格开关");
             Equal("#F0F0F0", checker.CheckerColorAHex, "Shell 加载棋盘色 A");
             Equal("#A0A0A0", checker.CheckerColorBHex, "Shell 加载棋盘色 B");
-            Equal(20, checker.CheckerCellSize, "Shell 加载棋盘格尺寸");
-            Equal(3, checker.CheckerOffsetX, "Shell 加载棋盘 X 偏移");
-            Equal(5, checker.CheckerOffsetY, "Shell 加载棋盘 Y 偏移");
-            Equal(2, checker.CheckerBoundaryTolerance, "Shell 加载棋盘边界容差");
+            Near(20.5d, checker.CheckerCellSize, 0.000001d, "Shell 加载小数棋盘格尺寸");
+            Near(3.25d, checker.CheckerOffsetX, 0.000001d, "Shell 加载小数棋盘 X 偏移");
+            Near(5.75d, checker.CheckerOffsetY, 0.000001d, "Shell 加载小数棋盘 Y 偏移");
+            Near(1.5d, checker.CheckerBoundaryTolerance, 0.000001d, "Shell 加载小数棋盘边界容差");
             True(shell.BackgroundRemoval.RemoveEnclosedBackground,
                 "新设置应默认识别并剔除镂空内部底色");
             False(checker.EdgeConnectedOnly,
@@ -145,10 +147,10 @@ internal static class ImageToolIntegrationSmokeTests
             shell.BackgroundRemoval.UseFakeTransparencyGrid = true;
             shell.BackgroundRemoval.CheckerColorAHex = "#EEEEEE";
             shell.BackgroundRemoval.CheckerColorBHex = "#999999";
-            shell.BackgroundRemoval.CheckerCellSize = 24;
-            shell.BackgroundRemoval.CheckerOffsetX = 6;
-            shell.BackgroundRemoval.CheckerOffsetY = 8;
-            shell.BackgroundRemoval.CheckerBoundaryTolerance = 3;
+            shell.BackgroundRemoval.CheckerCellSize = 24.75d;
+            shell.BackgroundRemoval.CheckerOffsetX = 6.125d;
+            shell.BackgroundRemoval.CheckerOffsetY = 8.875d;
+            shell.BackgroundRemoval.CheckerBoundaryTolerance = 2.25d;
 
             var persisted = settingsService.Load();
             Equal(ImageOutlinePlacement.Inside.ToString(), persisted.ImageOutlinePlacement,
@@ -163,14 +165,14 @@ internal static class ImageToolIntegrationSmokeTests
                 "棋盘色 A 变化应即时持久化");
             Equal("#999999", persisted.BackgroundRemovalCheckerColorBHex,
                 "棋盘色 B 变化应即时持久化");
-            Equal(24, persisted.BackgroundRemovalCheckerCellSize,
-                "棋盘格尺寸变化应即时持久化");
-            Equal(6, persisted.BackgroundRemovalCheckerOffsetX,
-                "棋盘 X 偏移变化应即时持久化");
-            Equal(8, persisted.BackgroundRemovalCheckerOffsetY,
-                "棋盘 Y 偏移变化应即时持久化");
-            Equal(3, persisted.BackgroundRemovalCheckerBoundaryTolerance,
-                "棋盘边界容差变化应即时持久化");
+            Near(24.75d, persisted.BackgroundRemovalCheckerCellSize, 0.000001d,
+                "小数棋盘格尺寸变化应即时持久化");
+            Near(6.125d, persisted.BackgroundRemovalCheckerOffsetX, 0.000001d,
+                "小数棋盘 X 偏移变化应即时持久化");
+            Near(8.875d, persisted.BackgroundRemovalCheckerOffsetY, 0.000001d,
+                "小数棋盘 Y 偏移变化应即时持久化");
+            Near(2.25d, persisted.BackgroundRemovalCheckerBoundaryTolerance, 0.000001d,
+                "小数棋盘边界容差变化应即时持久化");
 
             var generationSpec = shell.BackgroundRemoval.CreateGenerationSpec();
             False(generationSpec.ColorHex is "#EEEEEE" or "#999999",
@@ -180,6 +182,131 @@ internal static class ImageToolIntegrationSmokeTests
             var serialized = File.ReadAllText(paths.UserSettingsPath);
             False(serialized.Contains("batchItems", StringComparison.OrdinalIgnoreCase),
                 "图片描边批处理队列不得进入用户设置");
+        }
+        finally
+        {
+            shell.Shutdown();
+        }
+    }
+
+    private static void LegacyIntegerCheckerSettingsLoadIntoFractionalModel(string testRoot)
+    {
+        var settingsRoot = Path.Combine(testRoot, "legacy-integer-checker-settings");
+        var paths = new WorkspacePaths(settingsRoot);
+        Directory.CreateDirectory(settingsRoot);
+        File.WriteAllText(
+            paths.UserSettingsPath,
+            """
+            {
+              "schemaVersion": 1,
+              "theme": 1,
+              "activeWorkflowKey": "tilemap",
+              "hasCompletedWorkflowSelection": true,
+              "backgroundRemovalUseFakeTransparencyGrid": true,
+              "backgroundRemovalCheckerCellSize": 21,
+              "backgroundRemovalCheckerOffsetX": 4,
+              "backgroundRemovalCheckerOffsetY": 6,
+              "backgroundRemovalCheckerBoundaryTolerance": 2
+            }
+            """);
+
+        var settings = new UserSettingsService(paths).Load();
+        Equal(AppTheme.Light, settings.Theme,
+            "读取旧整数网格设置失败时不得把整份用户设置重置为默认值");
+        Equal("tilemap", settings.ActiveWorkflowKey,
+            "旧设置中的工作流标记必须保留");
+        Near(21d, settings.BackgroundRemovalCheckerCellSize, 0.000001d,
+            "旧整数格宽必须兼容读取为 double");
+        Near(4d, settings.BackgroundRemovalCheckerOffsetX, 0.000001d,
+            "旧整数 X 偏移必须兼容读取为 double");
+        Near(6d, settings.BackgroundRemovalCheckerOffsetY, 0.000001d,
+            "旧整数 Y 偏移必须兼容读取为 double");
+        Near(2d, settings.BackgroundRemovalCheckerBoundaryTolerance, 0.000001d,
+            "旧整数边界容差必须兼容读取为 double");
+    }
+
+    private static void CheckerAlignmentEditPersistsOnlyOnCommit(string testRoot)
+    {
+        var settingsRoot = Path.Combine(testRoot, "checker-alignment-edit-transaction");
+        var paths = new WorkspacePaths(settingsRoot);
+        var settingsService = new UserSettingsService(paths);
+        settingsService.Save(new UserSettingsModel
+        {
+            HasCompletedWorkflowSelection = true,
+            BackgroundRemovalUseFakeTransparencyGrid = true,
+            BackgroundRemovalCheckerCellSize = 16.5d,
+            BackgroundRemovalCheckerOffsetX = 2.25d,
+            BackgroundRemovalCheckerOffsetY = 3.75d,
+            BackgroundRemovalCheckerBoundaryTolerance = 1.25d
+        });
+        var editor = new EditorWorkspaceViewModel(
+            new JsonProjectRepository(paths),
+            new DesktopFileDialogService(),
+            new ProjectHistoryService());
+        var shell = new ShellViewModel(new ThemeService(), settingsService, editor);
+
+        try
+        {
+            var settingsChangedCount = 0;
+            shell.BackgroundRemoval.SettingsChanged += (_, _) => settingsChangedCount++;
+
+            shell.BackgroundRemoval.BeginCheckerAlignmentEdit();
+            shell.BackgroundRemoval.CheckerCellSize = 31.5d;
+            shell.BackgroundRemoval.CheckerOffsetX = 7.125d;
+            shell.BackgroundRemoval.CheckerOffsetY = 9.875d;
+            shell.BackgroundRemoval.CheckerBoundaryTolerance = 2.5d;
+
+            Equal(0, settingsChangedCount,
+                "拖动标尺期间棋盘参数变化不得触发用户设置写盘事件");
+            var whileDragging = settingsService.Load();
+            Near(16.5d, whileDragging.BackgroundRemovalCheckerCellSize, 0.000001d,
+                "拖动标尺期间持久化格宽必须保持起始值");
+            Near(2.25d, whileDragging.BackgroundRemovalCheckerOffsetX, 0.000001d,
+                "拖动标尺期间持久化 X 偏移必须保持起始值");
+            Near(3.75d, whileDragging.BackgroundRemovalCheckerOffsetY, 0.000001d,
+                "拖动标尺期间持久化 Y 偏移必须保持起始值");
+            Near(1.25d, whileDragging.BackgroundRemovalCheckerBoundaryTolerance, 0.000001d,
+                "拖动标尺期间持久化边界容差必须保持起始值");
+
+            shell.BackgroundRemoval.CommitCheckerAlignmentEdit();
+            Equal(1, settingsChangedCount,
+                "完成一次标尺拖动只能发布一次用户设置变化事件");
+            var committed = settingsService.Load();
+            Near(31.5d, committed.BackgroundRemovalCheckerCellSize, 0.000001d,
+                "提交标尺后小数格宽必须落盘");
+            Near(7.125d, committed.BackgroundRemovalCheckerOffsetX, 0.000001d,
+                "提交标尺后小数 X 偏移必须落盘");
+            Near(9.875d, committed.BackgroundRemovalCheckerOffsetY, 0.000001d,
+                "提交标尺后小数 Y 偏移必须落盘");
+            Near(2.5d, committed.BackgroundRemovalCheckerBoundaryTolerance, 0.000001d,
+                "提交标尺后小数边界容差必须落盘");
+
+            shell.BackgroundRemoval.BeginCheckerAlignmentEdit();
+            shell.BackgroundRemoval.CheckerCellSize = 48.25d;
+            shell.BackgroundRemoval.CheckerOffsetX = 12.5d;
+            shell.BackgroundRemoval.CheckerOffsetY = 14.75d;
+            shell.BackgroundRemoval.CheckerBoundaryTolerance = 4.5d;
+            shell.BackgroundRemoval.CancelCheckerAlignmentEdit();
+
+            Equal(1, settingsChangedCount,
+                "取消标尺拖动不得发布新的用户设置变化事件");
+            Near(31.5d, shell.BackgroundRemoval.CheckerCellSize, 0.000001d,
+                "取消标尺拖动应恢复起始格宽");
+            Near(7.125d, shell.BackgroundRemoval.CheckerOffsetX, 0.000001d,
+                "取消标尺拖动应恢复起始 X 偏移");
+            Near(9.875d, shell.BackgroundRemoval.CheckerOffsetY, 0.000001d,
+                "取消标尺拖动应恢复起始 Y 偏移");
+            Near(2.5d, shell.BackgroundRemoval.CheckerBoundaryTolerance, 0.000001d,
+                "取消标尺拖动应恢复起始边界容差");
+            var afterCancel = settingsService.Load();
+            Near(31.5d, afterCancel.BackgroundRemovalCheckerCellSize, 0.000001d,
+                "取消标尺拖动不得覆盖已提交格宽");
+            Near(7.125d, afterCancel.BackgroundRemovalCheckerOffsetX, 0.000001d,
+                "取消标尺拖动不得覆盖已提交 X 偏移");
+            Near(9.875d, afterCancel.BackgroundRemovalCheckerOffsetY, 0.000001d,
+                "取消标尺拖动不得覆盖已提交 Y 偏移");
+            Near(2.5d, afterCancel.BackgroundRemovalCheckerBoundaryTolerance, 0.000001d,
+                "取消标尺拖动不得覆盖已提交边界容差");
         }
         finally
         {
@@ -288,6 +415,15 @@ internal static class ImageToolIntegrationSmokeTests
         if (!EqualityComparer<T>.Default.Equals(expected, actual))
         {
             throw new InvalidOperationException($"{message}：预期 {expected}，实际 {actual}。");
+        }
+    }
+
+    private static void Near(double expected, double actual, double tolerance, string message)
+    {
+        if (!double.IsFinite(actual) || Math.Abs(expected - actual) > tolerance)
+        {
+            throw new InvalidOperationException(
+                $"{message}：预期 {expected} ± {tolerance}，实际 {actual}。");
         }
     }
 

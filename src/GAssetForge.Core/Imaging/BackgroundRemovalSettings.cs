@@ -12,13 +12,13 @@ public sealed record BackgroundRemovalSettings
 
     public bool EnableCheckerGridAlignment { get; init; } = true;
 
-    public int CheckerCellSize { get; init; } = 16;
+    public double CheckerCellSize { get; init; } = 16d;
 
-    public int CheckerOffsetX { get; init; }
+    public double CheckerOffsetX { get; init; }
 
-    public int CheckerOffsetY { get; init; }
+    public double CheckerOffsetY { get; init; }
 
-    public int CheckerBoundaryTolerance { get; init; }
+    public double CheckerBoundaryTolerance { get; init; }
 
     public double TransparentThreshold { get; init; } = 30d;
 

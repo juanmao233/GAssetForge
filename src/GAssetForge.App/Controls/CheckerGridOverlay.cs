@@ -32,21 +32,30 @@ public sealed class CheckerGridOverlay : FrameworkElement
 
     public static readonly DependencyProperty CellSizeProperty = DependencyProperty.Register(
         nameof(CellSize),
-        typeof(int),
+        typeof(double),
         typeof(CheckerGridOverlay),
-        new FrameworkPropertyMetadata(16, FrameworkPropertyMetadataOptions.AffectsRender));
+        new FrameworkPropertyMetadata(
+            16d,
+            FrameworkPropertyMetadataOptions.AffectsRender |
+            FrameworkPropertyMetadataOptions.BindsTwoWayByDefault));
 
     public static readonly DependencyProperty OffsetXProperty = DependencyProperty.Register(
         nameof(OffsetX),
-        typeof(int),
+        typeof(double),
         typeof(CheckerGridOverlay),
-        new FrameworkPropertyMetadata(0, FrameworkPropertyMetadataOptions.AffectsRender));
+        new FrameworkPropertyMetadata(
+            0d,
+            FrameworkPropertyMetadataOptions.AffectsRender |
+            FrameworkPropertyMetadataOptions.BindsTwoWayByDefault));
 
     public static readonly DependencyProperty OffsetYProperty = DependencyProperty.Register(
         nameof(OffsetY),
-        typeof(int),
+        typeof(double),
         typeof(CheckerGridOverlay),
-        new FrameworkPropertyMetadata(0, FrameworkPropertyMetadataOptions.AffectsRender));
+        new FrameworkPropertyMetadata(
+            0d,
+            FrameworkPropertyMetadataOptions.AffectsRender |
+            FrameworkPropertyMetadataOptions.BindsTwoWayByDefault));
 
     public ImageSource? ImageSource
     {
@@ -72,21 +81,21 @@ public sealed class CheckerGridOverlay : FrameworkElement
         set => SetValue(ShowGridProperty, value);
     }
 
-    public int CellSize
+    public double CellSize
     {
-        get => (int)GetValue(CellSizeProperty);
+        get => (double)GetValue(CellSizeProperty);
         set => SetValue(CellSizeProperty, value);
     }
 
-    public int OffsetX
+    public double OffsetX
     {
-        get => (int)GetValue(OffsetXProperty);
+        get => (double)GetValue(OffsetXProperty);
         set => SetValue(OffsetXProperty, value);
     }
 
-    public int OffsetY
+    public double OffsetY
     {
-        get => (int)GetValue(OffsetYProperty);
+        get => (double)GetValue(OffsetYProperty);
         set => SetValue(OffsetYProperty, value);
     }
 
@@ -103,7 +112,6 @@ public sealed class CheckerGridOverlay : FrameworkElement
         var hasSourcePixelSize = SourcePixelWidth > 0 && SourcePixelHeight > 0;
         var sourcePixelWidth = hasSourcePixelSize ? SourcePixelWidth : bitmap.PixelWidth;
         var sourcePixelHeight = hasSourcePixelSize ? SourcePixelHeight : bitmap.PixelHeight;
-        var cellSize = Math.Clamp(CellSize, 2, 512);
         var scale = Math.Min(ActualWidth / sourcePixelWidth, ActualHeight / sourcePixelHeight);
         if (!double.IsFinite(scale) || scale <= 0d)
         {
@@ -119,7 +127,7 @@ public sealed class CheckerGridOverlay : FrameworkElement
             new Rect(left, top, renderWidth, renderHeight),
             sourcePixelWidth,
             sourcePixelHeight,
-            cellSize,
+            CellSize,
             OffsetX,
             OffsetY);
     }

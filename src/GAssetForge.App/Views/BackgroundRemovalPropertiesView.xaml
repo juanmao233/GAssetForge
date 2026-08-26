@@ -179,15 +179,17 @@
                                     <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
                                 <StackPanel>
-                                    <TextBlock Margin="0,0,0,4" Text="格子尺寸"
+                                    <TextBlock Margin="0,0,0,4" Text="格子尺寸（px，可小数）"
                                                Style="{StaticResource BackgroundRemovalPropertyLabelStyle}" />
-                                    <TextBox Text="{Binding CheckerCellSize, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
+                                    <TextBox x:Name="BackgroundRemovalPropertiesCheckerCellSizeTextBox"
+                                             Text="{Binding CheckerCellSize, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.###}}"
                                              Style="{DynamicResource App.TextBoxStyle}" />
                                 </StackPanel>
                                 <StackPanel Grid.Column="2">
-                                    <TextBlock Margin="0,0,0,4" Text="边界容差"
+                                    <TextBlock Margin="0,0,0,4" Text="边界容差（px，可小数）"
                                                Style="{StaticResource BackgroundRemovalPropertyLabelStyle}" />
-                                    <TextBox Text="{Binding CheckerBoundaryTolerance, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
+                                    <TextBox x:Name="BackgroundRemovalPropertiesCheckerBoundaryToleranceTextBox"
+                                             Text="{Binding CheckerBoundaryTolerance, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.###}}"
                                              Style="{DynamicResource App.TextBoxStyle}" />
                                 </StackPanel>
                             </Grid>
@@ -199,18 +201,25 @@
                                     <ColumnDefinition Width="*" />
                                 </Grid.ColumnDefinitions>
                                 <StackPanel>
-                                    <TextBlock Margin="0,0,0,4" Text="X 偏移"
+                                    <TextBlock Margin="0,0,0,4" Text="X 偏移（px，可小数）"
                                                Style="{StaticResource BackgroundRemovalPropertyLabelStyle}" />
-                                    <TextBox Text="{Binding CheckerOffsetX, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
+                                    <TextBox x:Name="BackgroundRemovalPropertiesCheckerOffsetXTextBox"
+                                             Text="{Binding CheckerOffsetX, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.###}}"
                                              Style="{DynamicResource App.TextBoxStyle}" />
                                 </StackPanel>
                                 <StackPanel Grid.Column="2">
-                                    <TextBlock Margin="0,0,0,4" Text="Y 偏移"
+                                    <TextBlock Margin="0,0,0,4" Text="Y 偏移（px，可小数）"
                                                Style="{StaticResource BackgroundRemovalPropertyLabelStyle}" />
-                                    <TextBox Text="{Binding CheckerOffsetY, Mode=TwoWay, UpdateSourceTrigger=LostFocus}"
+                                    <TextBox x:Name="BackgroundRemovalPropertiesCheckerOffsetYTextBox"
+                                             Text="{Binding CheckerOffsetY, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.###}}"
                                              Style="{DynamicResource App.TextBoxStyle}" />
                                 </StackPanel>
                             </Grid>
+                            <TextBlock Margin="0,7,0,0"
+                                       Foreground="{DynamicResource App.AccentBrush}"
+                                       FontSize="10"
+                                       Text="也可在原图空白处拖出标准正方形；拖框体定位、拖四角缩放，结束后按源图像素边长和左上角偏移更新网格。"
+                                       TextWrapping="Wrap" />
                             <TextBlock Margin="0,7,0,0"
                                        Foreground="{DynamicResource App.TextMutedBrush}"
                                        FontSize="10"

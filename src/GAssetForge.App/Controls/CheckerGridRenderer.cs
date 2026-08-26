@@ -5,21 +5,25 @@ namespace GAssetForge.App.Controls;
 
 internal static class CheckerGridRenderer
 {
+    private const int MaximumRenderedLinesPerAxis = 2048;
+
     internal static void Draw(
         DrawingContext drawingContext,
         Rect imageBounds,
         int sourcePixelWidth,
         int sourcePixelHeight,
-        int cellSize,
-        int offsetX,
-        int offsetY)
+        double cellSize,
+        double offsetX,
+        double offsetY)
     {
-        if (imageBounds.IsEmpty || sourcePixelWidth <= 0 || sourcePixelHeight <= 0)
+        if (imageBounds.IsEmpty || sourcePixelWidth <= 0 || sourcePixelHeight <= 0 ||
+            !double.IsFinite(cellSize) || cellSize <= 0d ||
+            !double.IsFinite(offsetX) || !double.IsFinite(offsetY))
         {
             return;
         }
 
-        var safeCellSize = Math.Clamp(cellSize, 2, 512);
+        var safeCellSize = Math.Clamp(cellSize, 0.25d, 4096d);
         var scaleX = imageBounds.Width / sourcePixelWidth;
         var scaleY = imageBounds.Height / sourcePixelHeight;
         if (!double.IsFinite(scaleX) || !double.IsFinite(scaleY) || scaleX <= 0d || scaleY <= 0d)
@@ -41,39 +45,26 @@ internal static class CheckerGridRenderer
 
         var normalizedOffsetX = PositiveModulo(offsetX, safeCellSize);
         var normalizedOffsetY = PositiveModulo(offsetY, safeCellSize);
-        var firstX = normalizedOffsetX;
-        while (firstX > 0)
-        {
-            firstX -= safeCellSize;
-        }
-
-        for (var pixelX = firstX; pixelX <= sourcePixelWidth; pixelX += safeCellSize)
-        {
-            var x = imageBounds.Left + pixelX * scaleX;
-            DrawGuideLine(
-                drawingContext,
-                shadowPen,
-                guidePen,
-                new Point(x, imageBounds.Top),
-                new Point(x, imageBounds.Bottom));
-        }
-
-        var firstY = normalizedOffsetY;
-        while (firstY > 0)
-        {
-            firstY -= safeCellSize;
-        }
-
-        for (var pixelY = firstY; pixelY <= sourcePixelHeight; pixelY += safeCellSize)
-        {
-            var y = imageBounds.Top + pixelY * scaleY;
-            DrawGuideLine(
-                drawingContext,
-                shadowPen,
-                guidePen,
-                new Point(imageBounds.Left, y),
-                new Point(imageBounds.Right, y));
-        }
+        DrawAxisGuides(
+            drawingContext,
+            shadowPen,
+            guidePen,
+            imageBounds,
+            sourcePixelWidth,
+            safeCellSize,
+            normalizedOffsetX,
+            scaleX,
+            vertical: true);
+        DrawAxisGuides(
+            drawingContext,
+            shadowPen,
+            guidePen,
+            imageBounds,
+            sourcePixelHeight,
+            safeCellSize,
+            normalizedOffsetY,
+            scaleY,
+            vertical: false);
 
         var originX = imageBounds.Left + normalizedOffsetX * scaleX;
         var originY = imageBounds.Top + normalizedOffsetY * scaleY;
@@ -81,6 +72,52 @@ internal static class CheckerGridRenderer
         originPen.Freeze();
         drawingContext.DrawEllipse(null, originPen, new Point(originX, originY), 4d, 4d);
         drawingContext.Pop();
+    }
+
+    private static void DrawAxisGuides(
+        DrawingContext context,
+        Pen shadowPen,
+        Pen guidePen,
+        Rect imageBounds,
+        int sourceExtent,
+        double cellSize,
+        double normalizedOffset,
+        double viewportScale,
+        bool vertical)
+    {
+        var firstIndex = (long)Math.Ceiling(-normalizedOffset / cellSize);
+        var lastIndex = (long)Math.Floor((sourceExtent - normalizedOffset) / cellSize);
+        if (lastIndex < firstIndex)
+        {
+            return;
+        }
+
+        var lineCount = lastIndex - firstIndex + 1L;
+        var indexStride = Math.Max(
+            1L,
+            (long)Math.Ceiling(lineCount / (double)MaximumRenderedLinesPerAxis));
+        for (var index = firstIndex; index <= lastIndex; index += indexStride)
+        {
+            var sourceCoordinate = normalizedOffset + index * cellSize;
+            var viewportCoordinate = vertical
+                ? imageBounds.Left + sourceCoordinate * viewportScale
+                : imageBounds.Top + sourceCoordinate * viewportScale;
+            DrawGuideLine(
+                context,
+                shadowPen,
+                guidePen,
+                vertical
+                    ? new Point(viewportCoordinate, imageBounds.Top)
+                    : new Point(imageBounds.Left, viewportCoordinate),
+                vertical
+                    ? new Point(viewportCoordinate, imageBounds.Bottom)
+                    : new Point(imageBounds.Right, viewportCoordinate));
+
+            if (lastIndex - index < indexStride)
+            {
+                break;
+            }
+        }
     }
 
     private static void DrawGuideLine(
@@ -94,7 +131,7 @@ internal static class CheckerGridRenderer
         context.DrawLine(guidePen, start, end);
     }
 
-    private static int PositiveModulo(int value, int divisor)
+    private static double PositiveModulo(double value, double divisor)
     {
         var remainder = value % divisor;
         return remainder < 0 ? remainder + divisor : remainder;

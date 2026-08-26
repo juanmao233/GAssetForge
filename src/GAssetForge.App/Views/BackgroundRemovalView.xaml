@@ -52,7 +52,7 @@
                            VerticalAlignment="Center"
                            Foreground="{DynamicResource App.TextMutedBrush}"
                            FontSize="9"
-                           Text="滚轮缩放 · 中键平移 · 右键复位" />
+                           Text="左键标尺 · 滚轮缩放 · 中键平移 · 右键复位" />
                 <StackPanel>
                     <TextBlock Style="{StaticResource App.ImageToolTitleStyle}"
                                Text="背景剔除工具" />
@@ -95,9 +95,13 @@
                                 SourcePixelWidth="{Binding SourcePixelWidth}"
                                 SourcePixelHeight="{Binding SourcePixelHeight}"
                                 ShowGrid="{Binding ShowCheckerGridOverlay}"
-                                CellSize="{Binding CheckerCellSize}"
-                                OffsetX="{Binding CheckerOffsetX}"
-                                OffsetY="{Binding CheckerOffsetY}"
+                                CellSize="{Binding CheckerCellSize, Mode=TwoWay}"
+                                OffsetX="{Binding CheckerOffsetX, Mode=TwoWay}"
+                                OffsetY="{Binding CheckerOffsetY, Mode=TwoWay}"
+                                IsRulerEditingEnabled="{Binding ShowCheckerGridOverlay}"
+                                RulerEditStarted="BackgroundRemovalInputPreview_OnRulerEditStarted"
+                                RulerEditCompleted="BackgroundRemovalInputPreview_OnRulerEditCompleted"
+                                RulerEditCanceled="BackgroundRemovalInputPreview_OnRulerEditCanceled"
                                 Background="{DynamicResource App.InputBackgroundBrush}"
                                 BitmapScalingMode="HighQuality"
                                 PlaceholderForeground="{DynamicResource App.TextMutedBrush}"

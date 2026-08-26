@@ -34,6 +34,8 @@ internal static class BackgroundRemovalSmokeTests
         {
             PresetsRemoveTheirKeyColorsAndKeepSourceDimensions(testRoot);
             ExactCheckerboardBecomesTransparent(testRoot);
+            FractionalCheckerGeometryRemovesScaledGrid(testRoot);
+            FractionalCheckerBoundaryToleranceIsSymmetric(testRoot);
             GridAlignmentPreservesOppositeCheckerColorSubject(testRoot);
             UnalignedCheckerModeRemovesBothColors(testRoot);
             CheckerOffsetsUseMathematicalFloorDivision(testRoot);
@@ -50,6 +52,8 @@ internal static class BackgroundRemovalSmokeTests
             ExistingAlphaIsPreserved(testRoot);
             InputSelectionCapturesOriginalPixelDimensions(testRoot);
             CheckerGridOverlayUsesOriginalPixelDimensions();
+            CheckerRulerUsesSourcePixelCoordinatesAfterViewportNavigation();
+            FractionalCheckerValuesNormalizeWithoutRounding();
             InvalidImagesAreReportedByTheViewModel(testRoot);
             OutputIsAtomicallyReplacedWithoutTemporaryResidue(testRoot);
             BatchProcessingUsesUniqueOutputsAndContinuesAfterFailures(testRoot);
@@ -95,6 +99,117 @@ internal static class BackgroundRemovalSmokeTests
         Equal((byte)0, output[2, 0].A, "精确棋盘格 B 色应透明");
         Equal(subject, output[3, 3], "棋盘格中的非底色主体应保持不透明原色");
         Equal(47L, result.RemovedPixelCount, "除主体外的精确棋盘格像素都应被剔除");
+    }
+
+    private static void FractionalCheckerGeometryRemovesScaledGrid(string testRoot)
+    {
+        const string colorAHex = "#FFFFFF";
+        const string colorBHex = "#CCCCCC";
+        const double cellSize = 2.5d;
+        const double offsetX = -4.25d;
+        const double offsetY = 11.25d;
+        const int subjectX = 4;
+        const int subjectY = 3;
+        var colorA = ParseHex(colorAHex);
+        var colorB = ParseHex(colorBHex);
+        var inputPath = Path.Combine(testRoot, "checker-fractional-input.png");
+        var outputPath = Path.Combine(testRoot, "checker-fractional-output.png");
+        SaveFractionalCheckerFixture(
+            inputPath,
+            12,
+            10,
+            colorA,
+            colorB,
+            cellSize,
+            offsetX,
+            offsetY,
+            image =>
+            {
+                var expected = ExpectedCheckerColor(
+                    subjectX,
+                    subjectY,
+                    colorA,
+                    colorB,
+                    cellSize,
+                    offsetX,
+                    offsetY);
+                image[subjectX, subjectY] = expected == colorA ? colorB : colorA;
+            });
+
+        Service.RemoveToPng(
+            inputPath,
+            outputPath,
+            CreateExactCheckerSettings(
+                colorAHex,
+                colorBHex,
+                enableGridAlignment: true,
+                cellSize,
+                offsetX,
+                offsetY));
+
+        using var output = Image.Load<Rgba32>(outputPath);
+        for (var y = 0; y < output.Height; y++)
+        {
+            for (var x = 0; x < output.Width; x++)
+            {
+                if (x == subjectX && y == subjectY)
+                {
+                    Equal((byte)255, output[x, y].A,
+                        "小数网格中错相位的同色主体必须保持不透明");
+                    continue;
+                }
+
+                Equal((byte)0, output[x, y].A,
+                    $"小数格宽和偏移必须精确匹配缩放后的棋盘背景 ({x},{y})");
+            }
+        }
+    }
+
+    private static void FractionalCheckerBoundaryToleranceIsSymmetric(string testRoot)
+    {
+        const string colorAHex = "#FFFFFF";
+        const string colorBHex = "#CCCCCC";
+        const double cellSize = 4d;
+        const double boundaryTolerance = 0.75d;
+        var colorA = ParseHex(colorAHex);
+        var colorB = ParseHex(colorBHex);
+        var inputPath = Path.Combine(testRoot, "checker-fractional-boundary-input.png");
+        var outputPath = Path.Combine(testRoot, "checker-fractional-boundary-output.png");
+        SaveFractionalCheckerFixture(
+            inputPath,
+            8,
+            4,
+            colorA,
+            colorB,
+            cellSize,
+            0d,
+            0d,
+            image =>
+            {
+                image[0, 1] = colorB;
+                image[3, 1] = colorB;
+                image[1, 1] = colorB;
+            });
+
+        Service.RemoveToPng(
+            inputPath,
+            outputPath,
+            CreateExactCheckerSettings(
+                colorAHex,
+                colorBHex,
+                enableGridAlignment: true,
+                cellSize) with
+            {
+                CheckerBoundaryTolerance = boundaryTolerance
+            });
+
+        using var output = Image.Load<Rgba32>(outputPath);
+        Equal((byte)0, output[0, 1].A,
+            "格子左边界内的反相底色应按最近色剔除");
+        Equal((byte)0, output[3, 1].A,
+            "格子右边界内的反相底色应与左边界对称剔除");
+        Equal((byte)255, output[1, 1].A,
+            "边界容差外的反相同色主体仍应保持不透明");
     }
 
     private static void GridAlignmentPreservesOppositeCheckerColorSubject(string testRoot)
@@ -310,10 +425,16 @@ internal static class BackgroundRemovalSmokeTests
             valid with { CheckerColorAHex = "#GGGGGG" },
             valid with { CheckerColorBHex = "not-a-color" },
             valid with { CheckerColorBHex = "#FFFFFF" },
-            valid with { CheckerCellSize = 1 },
-            valid with { CheckerCellSize = 513 },
+            valid with { CheckerCellSize = 0.249d },
+            valid with { CheckerCellSize = 4096.001d },
+            valid with { CheckerCellSize = double.NaN },
+            valid with { CheckerCellSize = double.PositiveInfinity },
+            valid with { CheckerOffsetX = double.NaN },
+            valid with { CheckerOffsetY = double.NegativeInfinity },
             valid with { CheckerBoundaryTolerance = -1 },
-            valid with { CheckerBoundaryTolerance = 9 }
+            valid with { CheckerBoundaryTolerance = 9 },
+            valid with { CheckerBoundaryTolerance = double.NaN },
+            valid with { CheckerBoundaryTolerance = double.PositiveInfinity }
         };
         foreach (var settings in cases)
         {
@@ -711,6 +832,84 @@ internal static class BackgroundRemovalSmokeTests
             "1000px 源图的 100px 网格在 200px 预览中应落在 x=20，而不是按 100px 缩略图尺寸绘制");
     }
 
+    private static void CheckerRulerUsesSourcePixelCoordinatesAfterViewportNavigation()
+    {
+        var preview = new WriteableBitmap(
+            100,
+            50,
+            96d,
+            96d,
+            PixelFormats.Bgra32,
+            null);
+        var control = new CheckerGridImagePreviewControl
+        {
+            Width = 420d,
+            Height = 260d,
+            Source = preview,
+            SourcePixelWidth = 1000,
+            SourcePixelHeight = 500,
+            ShowGrid = true,
+            IsRulerEditingEnabled = true,
+            CellSize = 16d,
+            OffsetX = 0d,
+            OffsetY = 0d,
+            ViewportPadding = new Thickness(8d)
+        };
+        control.Measure(new System.Windows.Size(420d, 260d));
+        control.Arrange(new Rect(0d, 0d, 420d, 260d));
+        control.UpdateLayout();
+        control.ZoomAt(new System.Windows.Point(211d, 131d), 1.75d);
+        control.PanBy(new Vector(23.5d, -17.25d));
+
+        var sourceStart = new System.Windows.Point(123.25d, 89.5d);
+        var sourceEnd = new System.Windows.Point(198.75d, 165d);
+        var viewportStart = control.SourceToViewport(sourceStart);
+        var viewportEnd = control.SourceToViewport(sourceEnd);
+        control.SetRulerFromViewportPoints(viewportStart, viewportEnd);
+
+        Near(75.5d, control.CellSize, 0.000001d,
+            "缩放和平移后拖出的标尺边长必须使用原图像素坐标");
+        Near(47.75d, control.OffsetX, 0.000001d,
+            "标尺 X 偏移必须按单格几何周期正取模");
+        Near(14d, control.OffsetY, 0.000001d,
+            "标尺 Y 偏移必须按单格几何周期正取模");
+        var sourceRect = control.RulerSourceRect;
+        Near(123.25d, sourceRect.Left, 0.000001d, "标尺参考框应保留源图 X 位置");
+        Near(89.5d, sourceRect.Top, 0.000001d, "标尺参考框应保留源图 Y 位置");
+        Near(75.5d, sourceRect.Width, 0.000001d, "标尺参考框必须保持正方形");
+        Near(sourceRect.Width, sourceRect.Height, 0.000001d, "标尺参考框宽高必须相等");
+        var sourceRoundTrip = control.ViewportToSource(control.SourceToViewport(sourceStart));
+        Near(sourceStart.X, sourceRoundTrip.X, 0.000001d,
+            "预览/源图 X 坐标往返不得受缩放和平移影响");
+        Near(sourceStart.Y, sourceRoundTrip.Y, 0.000001d,
+            "预览/源图 Y 坐标往返不得受缩放和平移影响");
+    }
+
+    private static void FractionalCheckerValuesNormalizeWithoutRounding()
+    {
+        var viewModel = new BackgroundRemovalViewModel(
+            Service,
+            new FixedInputPicker(string.Empty),
+            new FixedOutputPicker(string.Empty),
+            checkerCellSize: 7.5d,
+            checkerOffsetX: -0.25d,
+            checkerOffsetY: 23d,
+            checkerBoundaryTolerance: 0.5d);
+
+        Near(7.5d, viewModel.CheckerCellSize, 0.000001d, "小数格宽不得被取整");
+        Near(7.25d, viewModel.CheckerOffsetX, 0.000001d,
+            "负小数 X 偏移必须按单格几何周期正取模");
+        Near(0.5d, viewModel.CheckerOffsetY, 0.000001d,
+            "超周期 Y 偏移必须按单格几何周期正取模");
+        Near(0.5d, viewModel.CheckerBoundaryTolerance, 0.000001d, "小数边界容差不得被取整");
+
+        viewModel.CheckerCellSize = 5.5d;
+        Near(1.75d, viewModel.CheckerOffsetX, 0.000001d,
+            "改变格宽后 X 相位仍应按浮点周期规范化");
+        Near(0.5d, viewModel.CheckerOffsetY, 0.000001d,
+            "改变格宽后 Y 相位仍应保持浮点精度");
+    }
+
     private static void OutputIsAtomicallyReplacedWithoutTemporaryResidue(string testRoot)
     {
         const string keyHex = "#0000FF";
@@ -872,9 +1071,9 @@ internal static class BackgroundRemovalSmokeTests
         string colorAHex,
         string colorBHex,
         bool enableGridAlignment,
-        int cellSize,
-        int offsetX = 0,
-        int offsetY = 0,
+        double cellSize,
+        double offsetX = 0d,
+        double offsetY = 0d,
         bool edgeConnectedOnly = false) => new()
     {
         UseFakeTransparencyGrid = true,
@@ -892,6 +1091,51 @@ internal static class BackgroundRemovalSmokeTests
         Despill = false,
         EdgeConnectedOnly = edgeConnectedOnly
     };
+
+    private static void SaveFractionalCheckerFixture(
+        string path,
+        int width,
+        int height,
+        Rgba32 colorA,
+        Rgba32 colorB,
+        double cellSize,
+        double offsetX,
+        double offsetY,
+        Action<Image<Rgba32>> mutate)
+    {
+        using var image = new Image<Rgba32>(width, height);
+        for (var y = 0; y < height; y++)
+        {
+            for (var x = 0; x < width; x++)
+            {
+                image[x, y] = ExpectedCheckerColor(
+                    x,
+                    y,
+                    colorA,
+                    colorB,
+                    cellSize,
+                    offsetX,
+                    offsetY);
+            }
+        }
+
+        mutate(image);
+        image.Save(path, new PngEncoder { ColorType = PngColorType.RgbWithAlpha });
+    }
+
+    private static Rgba32 ExpectedCheckerColor(
+        int x,
+        int y,
+        Rgba32 colorA,
+        Rgba32 colorB,
+        double cellSize,
+        double offsetX,
+        double offsetY)
+    {
+        var cellX = (long)Math.Floor(((x + 0.5d) - offsetX) / cellSize);
+        var cellY = (long)Math.Floor(((y + 0.5d) - offsetY) / cellSize);
+        return ((cellX + cellY) & 1L) == 0L ? colorA : colorB;
+    }
 
     private static void SaveEnclosedKeyFixture(string path, Rgba32 key)
     {
@@ -1034,6 +1278,15 @@ internal static class BackgroundRemovalSmokeTests
         if (!EqualityComparer<T>.Default.Equals(expected, actual))
         {
             throw new InvalidOperationException($"{message}：预期 {expected}，实际 {actual}。");
+        }
+    }
+
+    private static void Near(double expected, double actual, double tolerance, string message)
+    {
+        if (!double.IsFinite(actual) || Math.Abs(expected - actual) > tolerance)
+        {
+            throw new InvalidOperationException(
+                $"{message}：预期 {expected} ± {tolerance}，实际 {actual}。");
         }
     }
 

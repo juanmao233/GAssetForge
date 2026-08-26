@@ -65,10 +65,10 @@ public sealed class UserSettingsModel
     public string BackgroundRemovalCheckerColorAHex { get; set; } = "#FFFFFF";
     public string BackgroundRemovalCheckerColorBHex { get; set; } = "#CCCCCC";
     public bool BackgroundRemovalEnableCheckerGridAlignment { get; set; } = true;
-    public int BackgroundRemovalCheckerCellSize { get; set; } = 16;
-    public int BackgroundRemovalCheckerOffsetX { get; set; }
-    public int BackgroundRemovalCheckerOffsetY { get; set; }
-    public int BackgroundRemovalCheckerBoundaryTolerance { get; set; } = 1;
+    public double BackgroundRemovalCheckerCellSize { get; set; } = 16d;
+    public double BackgroundRemovalCheckerOffsetX { get; set; }
+    public double BackgroundRemovalCheckerOffsetY { get; set; }
+    public double BackgroundRemovalCheckerBoundaryTolerance { get; set; } = 1d;
     public string? BackgroundRemovalLastInputDirectory { get; set; }
     public string? BackgroundRemovalLastOutputDirectory { get; set; }
     public string ImageOutlinePlacement { get; set; } = "Outside";
@@ -142,14 +142,22 @@ public sealed class UserSettingsService
                 settings.AssetGenerationAutoRetryCount,
                 0,
                 10);
-            settings.BackgroundRemovalCheckerCellSize = Math.Clamp(
+            settings.BackgroundRemovalCheckerCellSize = NormalizeFinite(
                 settings.BackgroundRemovalCheckerCellSize,
-                2,
-                512);
-            settings.BackgroundRemovalCheckerBoundaryTolerance = Math.Clamp(
+                16d,
+                0.25d,
+                4096d);
+            settings.BackgroundRemovalCheckerOffsetX = NormalizePositiveOffset(
+                settings.BackgroundRemovalCheckerOffsetX,
+                settings.BackgroundRemovalCheckerCellSize);
+            settings.BackgroundRemovalCheckerOffsetY = NormalizePositiveOffset(
+                settings.BackgroundRemovalCheckerOffsetY,
+                settings.BackgroundRemovalCheckerCellSize);
+            settings.BackgroundRemovalCheckerBoundaryTolerance = NormalizeFinite(
                 settings.BackgroundRemovalCheckerBoundaryTolerance,
-                0,
-                8);
+                1d,
+                0d,
+                8d);
             settings.ImageOutlineWidth = Math.Clamp(
                 settings.ImageOutlineWidth,
                 ImageOutlineLimits.MinimumWidth,
@@ -216,4 +224,20 @@ public sealed class UserSettingsService
         double minimum,
         double maximum) =>
         double.IsFinite(value) ? Math.Clamp(value, minimum, maximum) : fallback;
+
+    private static double NormalizePositiveOffset(double value, double cellSize)
+    {
+        if (!double.IsFinite(value) || !double.IsFinite(cellSize) || cellSize <= 0d)
+        {
+            return 0d;
+        }
+
+        var remainder = value % cellSize;
+        if (remainder == 0d)
+        {
+            return 0d;
+        }
+
+        return remainder < 0d ? remainder + cellSize : remainder;
+    }
 }
