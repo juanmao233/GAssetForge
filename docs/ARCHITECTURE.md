@@ -8,12 +8,12 @@ GAssetForge.Core
   Workflows/         五类业务入口定义
   ArtStyles/         风格组、参考素材元数据、统一提示词样本、稳定指纹、校验与 JSON 契约
   Generation/        AI 约束包、Tilemap 规则、单图任务状态机、Run Schema 与阶段日志
-  Imaging/           背景/棋盘格剔除、Alpha 描边、像素对齐、几何矫正、自动调色板与原子 PNG 输出
+  Imaging/           sRGB/HSV 颜色模型、背景/棋盘格剔除、Alpha 描边、像素对齐、几何矫正、自动调色板与原子 PNG 输出
 
 GAssetForge.App
   ViewModels/        Shell 与 UI 编辑器状态/命令
   Views/             原生 WPF 面板和画布
-  Services/          项目、布局、主题、设置、风格分析协议、生成 Harness、Run 工作区、日志与 Agent Runtime
+  Services/          项目、布局、主题、设置、共享取色器、图像预览缓存、风格分析协议、生成 Harness、Run 工作区、日志与 Agent Runtime
   Services/AgentRuntime/
                      Codex App Server stdio JSONL、codex exec JSONL 降级与统一会话契约
   Themes/            暗亮调色板与控件资源
@@ -65,6 +65,7 @@ AvalonDock 的模块接口只承担面板拓扑、大小、停靠位置、隐藏
 | 风格提示词分析请求 | `AgentArtStylePromptAnalysisService` | Agent 工作目录下 `.gassetforge\style-analysis\<requestId>` 的一次性 request/result/diagnostics；不作为风格库真相源 |
 | AI 生成任务 | `JsonGenerationTaskStore` | 本地跨进程持久化单图任务、原子状态迁移、风格快照与冻结交付计划 |
 | 生成 Run | `GenerationRunWorkspaceService` | `<Assets>\Generated\GAssetForge\Runs\<batchId>`；manifest、提示、参考图、模型原图、中间结果与 timeline |
+| 图像工具预览 | `ImageProcessingPreviewCache` | `%LocalAppData%\GAssetForge\Desktop\Workspace\ImageProcessingPreviews`；短期、唯一、非项目资产的 PNG 缓存 |
 | 工作台日志 | `WorkbenchConsoleService` | `%LocalAppData%\GAssetForge\Desktop\Logs\workbench-*.jsonl`；Agent、Turn、工具和调度阶段的结构化会话日志 |
 
 Shell 会在一次项目激活中协调项目清单、UI repository、Project Browser 和全局设置，但项目内容不会复制进
@@ -84,10 +85,30 @@ domain separation 的稳定 SHA-256。重命名风格组不会令样本过期；
 或媒体类型会改变当前指纹，使旧样本保留但标记为 stale。分析完成时 ViewModel 会再次核对当前指纹并原子
 保存；分析期间发生编辑、保存失败、取消或 Agent 错误都不会覆盖旧样本。
 
+### 共享取色器与单图预览发布边界
+
+颜色换算位于 Core 的 `RgbColor`、`HsvColor` 与 `ColorConversion`，只描述不透明 sRGB、HSV 和规范化
+`#RRGGBB`，不依赖 WPF。App 层的 `IColorPickerService` / `DesktopColorPickerService` 打开共享模态窗口：
+`HsvSaturationValueSurface` 提供二维饱和度/明度选择，`HueSpectrumSlider` 提供 Hue 色条，ViewModel 负责保持
+HSV、RGB 与 Hex 双向同步并保留灰色状态下最近有效 Hue。窗口同时展示原色和新色；只有确认才返回结果，取消返回
+`null`，调用方不会收到临时编辑。当前描边颜色、背景剔除自定义色和棋盘格 A/B 色使用同一服务。
+
+`IImageProcessingPreviewCache` 把背景剔除、图片描边和像素对齐单图模式的渲染结果与正式项目输出分离。ViewModel
+向 `Workspace/ImageProcessingPreviews/<tool-id>` 申请唯一 `.png` 路径，再调用现有 Core ImageSharp 服务直接
+生成完整预览文件；缓存不是 `Assets` 产物，也不会自动进入项目浏览器。每次刷新使用新路径，成功后才替换当前
+预览引用；失败时旧预览可继续用于比较，但不能被误认为当前结果。
+
+预览状态与生成参数绑定：输入或任何影响像素的设置发生变化时，旧预览标记 stale 并禁用保存，输出路径变化不使
+像素结果过期。保存通过目标目录内临时文件复制并原子重命名，发布的是同一缓存 PNG 的原始字节，不重新调用 Core
+算法；这也保证像素工具的 Palette PNG 不会在保存阶段被二次编码。缓存服务校验受管目录并完整解码 PNG；每个
+ViewModel 会 pin 当前采用或正在渲染的缓存路径，按年龄、数量和总容量执行的机会式清理会跳过这些活动预览，替换、
+切换输入或主动释放时再解除保护。批量描边与批量像素对齐仍由现有 App 队列逐项直接写入正式目录，不经过单图人工确认。
+
 ### 像素对齐与批处理边界
 
 `ImageSharpPixelAlignmentService` 保持单图、确定性和原子落盘：先执行裁切与几何矫正，再生成逻辑格子采样结果，
-最后按可选颜色索引策略保存 PNG。自动索引只作用于最终逻辑图片，不改写源图或最近邻检查工作图；它使用无抖动
+最后按可选颜色索引策略保存 PNG。单图 UI 可把该正式结果写入上述预览缓存，批量 UI 则直接规划最终路径；Core
+不区分二者。自动索引只作用于最终逻辑图片，不改写源图或最近邻检查工作图；它使用无抖动
 Wu 量化并输出 Palette PNG，关闭时使用 RGBA PNG。完全透明像素在建立调色板前规范化为透明黑，半透明 Alpha
 作为 RGBA 索引的一部分保留。
 
@@ -112,7 +133,8 @@ expansion 防止外描边被裁切。
 
 `ImageOutlineViewModel` 负责单图与最多 256 项的顺序批处理、碰撞安全文件名、逐项状态和进度。与像素工具一致，
 批量清单属于会话瞬态状态，不进入用户设置；描边种类、宽度、颜色、Alpha threshold、扩画布开关和最近目录即时
-持久化。Core 服务不依赖 AvalonDock、项目 Schema、Agent 或 MCP。
+持久化。单图刷新把同一个 Core 服务的输出写入预览缓存，确认保存时仅发布缓存；批量继续直接调用 Core 服务写入
+正式目录。Core 服务不依赖 AvalonDock、项目 Schema、Agent 或 MCP。
 
 ### Icon 指定角度投影边界
 

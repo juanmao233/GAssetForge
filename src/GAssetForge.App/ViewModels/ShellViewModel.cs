@@ -20,6 +20,7 @@ public sealed class ShellViewModel : ObservableObject
     private readonly ProjectWorkspaceService _projectWorkspaceService;
     private readonly IProjectLocationPicker _projectLocationPicker;
     private readonly WorkbenchConsoleService _workbenchConsoleService;
+    private readonly IImageProcessingPreviewCache _imageProcessingPreviewCache;
     private readonly IGenerationTaskStore _generationTaskStore;
     private readonly GenerationBatchTurnReconciler _generationBatchTurnReconciler;
     private readonly Dispatcher _dispatcher;
@@ -60,6 +61,8 @@ public sealed class ShellViewModel : ObservableObject
         EditorWorkspace = editorWorkspace;
         _settings = settingsService.Load();
         _workbenchConsoleService = new WorkbenchConsoleService(settingsService.Paths);
+        _imageProcessingPreviewCache = CreateImageProcessingPreviewCache(settingsService.Paths);
+        var colorPickerService = new DesktopColorPickerService();
         CommandConsole = new CommandConsoleViewModel(_workbenchConsoleService);
         Blueprint = new BlueprintViewModel(
             new JsonBlueprintRepository(settingsService.Paths),
@@ -156,7 +159,9 @@ public sealed class ShellViewModel : ObservableObject
             _settings.BackgroundRemovalCheckerBoundaryTolerance,
             _settings.BackgroundRemovalLastInputDirectory,
             _settings.BackgroundRemovalLastOutputDirectory,
-            _workbenchConsoleService);
+            _workbenchConsoleService,
+            previewCache: _imageProcessingPreviewCache,
+            colorPickerService: colorPickerService);
         BackgroundRemoval.SettingsChanged += OnBackgroundRemovalSettingsChanged;
         PixelAlignment = new PixelAlignmentViewModel(
             new ImageSharpPixelAlignmentService(),
@@ -178,7 +183,8 @@ public sealed class ShellViewModel : ObservableObject
             targetEdgeAngleDegrees: _settings.PixelAlignmentTargetEdgeAngleDegrees,
             lastInputDirectory: _settings.PixelAlignmentLastInputDirectory,
             lastOutputDirectory: _settings.PixelAlignmentLastOutputDirectory,
-            workbenchLogSink: _workbenchConsoleService);
+            workbenchLogSink: _workbenchConsoleService,
+            previewCache: _imageProcessingPreviewCache);
         PixelAlignment.SettingsChanged += OnPixelAlignmentSettingsChanged;
         ImageOutline = new ImageOutlineViewModel(
             new ImageSharpImageOutlineService(),
@@ -191,7 +197,9 @@ public sealed class ShellViewModel : ObservableObject
             _settings.ImageOutlineExpandCanvas,
             _settings.ImageOutlineLastInputDirectory,
             _settings.ImageOutlineLastOutputDirectory,
-            _workbenchConsoleService);
+            _workbenchConsoleService,
+            previewCache: _imageProcessingPreviewCache,
+            colorPickerService: colorPickerService);
         ImageOutline.SettingsChanged += OnImageOutlineSettingsChanged;
         IconDesign = new IconDesignViewModel(
             initialSettings: new IconDesignSettingsSnapshot(
@@ -2090,6 +2098,38 @@ public sealed class ShellViewModel : ObservableObject
             _ => (string.Empty, string.Empty)
         };
         return contentId.Length > 0;
+    }
+
+    private IImageProcessingPreviewCache CreateImageProcessingPreviewCache(WorkspacePaths paths)
+    {
+        try
+        {
+            var cache = new ImageProcessingPreviewCache(paths);
+            var cleanup = cache.CleanupExpiredAndExcessPreviews();
+            if (cleanup.RemovedFileCount > 0)
+            {
+                _workbenchConsoleService.Write(
+                    WorkbenchLogLevel.Information,
+                    "ImageTools",
+                    $"已清理 {cleanup.RemovedFileCount} 个过期图像预览缓存，释放 {cleanup.RemovedByteCount:N0} 字节。");
+            }
+
+            return cache;
+        }
+        catch (Exception exception)
+        {
+            var fallbackRoot = Path.Combine(
+                Path.GetTempPath(),
+                "GAssetForge",
+                "Workspace",
+                ImageProcessingPreviewCache.DefaultDirectoryName);
+            _workbenchConsoleService.Write(
+                WorkbenchLogLevel.Warning,
+                "ImageTools",
+                $"工作区预览缓存不可用，已回退到系统临时目录：{exception.Message}",
+                exception: exception);
+            return new ImageProcessingPreviewCache(fallbackRoot);
+        }
     }
 
     private void SaveSettings()

@@ -181,6 +181,7 @@ public sealed class PixelAlignmentViewModel : ObservableObject
     private readonly IPixelAlignmentService _service;
     private readonly IPixelAlignmentInputPicker _inputPicker;
     private readonly IPixelAlignmentOutputPicker _outputPicker;
+    private readonly IImageProcessingPreviewCache _previewCache;
     private readonly IWorkbenchLogSink? _workbenchLogSink;
     private readonly RelayCommand _chooseInputCommand;
     private readonly RelayCommand _chooseOutputCommand;
@@ -195,6 +196,8 @@ public sealed class PixelAlignmentViewModel : ObservableObject
     private readonly RelayCommand _syncGridToAspectRatioCommand;
     private readonly RelayCommand<double> _setRotationPresetCommand;
     private readonly RelayCommand _resetPerspectivePointsCommand;
+    private readonly AsyncRelayCommand _refreshPreviewCommand;
+    private readonly AsyncRelayCommand _saveResultCommand;
     private readonly AsyncRelayCommand _processCommand;
     private readonly AsyncRelayCommand _processBatchCommand;
     private readonly AsyncRelayCommand _exportWorkingImageCommand;
@@ -216,6 +219,12 @@ public sealed class PixelAlignmentViewModel : ObservableObject
     private string _inputPath = string.Empty;
     private string _outputPath = string.Empty;
     private string _outputPreviewPath = string.Empty;
+    private string _singlePreviewPath = string.Empty;
+    private string _lastSavedOutputPath = string.Empty;
+    private bool _isPreviewCurrent;
+    private bool _isPreviewStale;
+    private string _previewStatusText = "尚未刷新预览。";
+    private long _previewSettingsRevision;
     private string? _lastInputDirectory;
     private string? _lastOutputDirectory;
     private int _sourceWidth;
@@ -268,12 +277,19 @@ public sealed class PixelAlignmentViewModel : ObservableObject
         int maximumIndexedColors = PixelAlignmentLimits.MaximumIndexedColorCount,
         string? lastInputDirectory = null,
         string? lastOutputDirectory = null,
-        IWorkbenchLogSink? workbenchLogSink = null)
+        IWorkbenchLogSink? workbenchLogSink = null,
+        IImageProcessingPreviewCache? previewCache = null)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
         _inputPicker = inputPicker ?? throw new ArgumentNullException(nameof(inputPicker));
         _outputPicker = outputPicker ?? throw new ArgumentNullException(nameof(outputPicker));
         _workbenchLogSink = workbenchLogSink;
+        _previewCache = previewCache ?? new ImageProcessingPreviewCache(
+            Path.Combine(
+                Path.GetTempPath(),
+                "GAssetForge",
+                "Workspace",
+                ImageProcessingPreviewCache.DefaultDirectoryName));
         _minimumUpscaleFactor = Math.Clamp(minimumUpscaleFactor, 1, 1024);
         _columns = Math.Clamp(columns, 1, MaximumGridDimension);
         _rows = Math.Clamp(rows, 1, MaximumGridDimension);
@@ -307,10 +323,12 @@ public sealed class PixelAlignmentViewModel : ObservableObject
         _syncGridToAspectRatioCommand = new RelayCommand(SyncGridToAspectRatio, () => !IsBusy);
         _setRotationPresetCommand = new RelayCommand<double>(SetRotationPreset, _ => !IsBusy);
         _resetPerspectivePointsCommand = new RelayCommand(ResetPerspectivePoints, () => !IsBusy && HasInput);
-        _processCommand = new AsyncRelayCommand(ProcessAsync, () => CanProcess);
+        _refreshPreviewCommand = new AsyncRelayCommand(RefreshPreviewAsync, () => CanRefreshPreview);
+        _saveResultCommand = new AsyncRelayCommand(SaveResultAsync, () => CanSaveResult);
+        _processCommand = new AsyncRelayCommand(ProcessLegacyAsync, () => CanProcess);
         _processBatchCommand = new AsyncRelayCommand(ProcessBatchAsync, () => CanProcessBatch);
         _exportWorkingImageCommand = new AsyncRelayCommand(ExportWorkingImageAsync, () => CanExportWorkingImage);
-        _openOutputDirectoryCommand = new RelayCommand(OpenOutputDirectory, () => HasOutputPreview);
+        _openOutputDirectoryCommand = new RelayCommand(OpenOutputDirectory, () => HasSavedOutput);
         ChooseInputCommand = _chooseInputCommand;
         ChooseOutputCommand = _chooseOutputCommand;
         ChooseBatchInputsCommand = _chooseBatchInputsCommand;
@@ -324,6 +342,8 @@ public sealed class PixelAlignmentViewModel : ObservableObject
         SyncGridToAspectRatioCommand = _syncGridToAspectRatioCommand;
         SetRotationPresetCommand = _setRotationPresetCommand;
         ResetPerspectivePointsCommand = _resetPerspectivePointsCommand;
+        RefreshPreviewCommand = _refreshPreviewCommand;
+        SaveResultCommand = _saveResultCommand;
         ProcessCommand = _processCommand;
         ProcessBatchCommand = _processBatchCommand;
         ExportWorkingImageCommand = _exportWorkingImageCommand;
@@ -409,6 +429,7 @@ public sealed class PixelAlignmentViewModel : ObservableObject
             if (SetProperty(ref _enableAutomaticColorIndex, value))
             {
                 OnPropertyChanged(nameof(ColorIndexDescription));
+                MarkPreviewStale();
                 NotifySettingsChanged();
             }
         }
@@ -426,6 +447,7 @@ public sealed class PixelAlignmentViewModel : ObservableObject
             if (SetProperty(ref _maximumIndexedColors, normalized))
             {
                 OnPropertyChanged(nameof(ColorIndexDescription));
+                MarkPreviewStale();
                 NotifySettingsChanged();
             }
         }
@@ -446,6 +468,8 @@ public sealed class PixelAlignmentViewModel : ObservableObject
             }
 
             OnPropertyChanged(nameof(CanProcessBatch));
+            OnPropertyChanged(nameof(CanRefreshPreview));
+            OnPropertyChanged(nameof(CanSaveResult));
             StatusText = value
                 ? "批量模式：添加多张图片后，当前标尺和透视点会按基准图片尺寸等比映射。"
                 : "单图模式：选择图片后，可拖动四条标尺线确定采样范围。";
@@ -829,6 +853,46 @@ public sealed class PixelAlignmentViewModel : ObservableObject
 
     public bool HasOutputPreview => File.Exists(OutputPreviewPath);
 
+    public bool IsPreviewCurrent
+    {
+        get => _isPreviewCurrent;
+        private set
+        {
+            if (SetProperty(ref _isPreviewCurrent, value))
+            {
+                OnPropertyChanged(nameof(CanSaveResult));
+                RefreshCommands();
+            }
+        }
+    }
+
+    public bool IsPreviewStale
+    {
+        get => _isPreviewStale;
+        private set => SetProperty(ref _isPreviewStale, value);
+    }
+
+    public string PreviewStatusText
+    {
+        get => _previewStatusText;
+        private set => SetProperty(ref _previewStatusText, value);
+    }
+
+    public string LastSavedOutputPath
+    {
+        get => _lastSavedOutputPath;
+        private set
+        {
+            if (SetProperty(ref _lastSavedOutputPath, value))
+            {
+                OnPropertyChanged(nameof(HasSavedOutput));
+                RefreshCommands();
+            }
+        }
+    }
+
+    public bool HasSavedOutput => File.Exists(LastSavedOutputPath);
+
     public string PreviewTitle
     {
         get => _previewTitle;
@@ -1043,6 +1107,8 @@ public sealed class PixelAlignmentViewModel : ObservableObject
             if (SetProperty(ref _isBusy, value))
             {
                 OnPropertyChanged(nameof(CanProcess));
+                OnPropertyChanged(nameof(CanRefreshPreview));
+                OnPropertyChanged(nameof(CanSaveResult));
                 OnPropertyChanged(nameof(CanProcessBatch));
                 OnPropertyChanged(nameof(CanExportWorkingImage));
                 RefreshCommands();
@@ -1051,8 +1117,17 @@ public sealed class PixelAlignmentViewModel : ObservableObject
     }
 
     public bool CanProcess => !IsBusy && HasInput && CurrentPlan is not null &&
-                              !string.IsNullOrWhiteSpace(OutputPath) &&
-                              !PathsEqual(InputPath, OutputPath);
+                               !string.IsNullOrWhiteSpace(OutputPath) &&
+                               !PathsEqual(InputPath, OutputPath);
+
+    public bool CanRefreshPreview => !IsBusy && !IsBatchMode && HasInput && CurrentPlan is not null;
+
+    public bool CanSaveResult =>
+        !IsBusy && !IsBatchMode && IsPreviewCurrent && !IsPreviewStale &&
+        !string.IsNullOrWhiteSpace(_singlePreviewPath) &&
+        File.Exists(_singlePreviewPath) &&
+        _previewCache.IsManagedPreviewPath(_singlePreviewPath) &&
+        (string.IsNullOrWhiteSpace(OutputPath) || !PathsEqual(InputPath, OutputPath));
 
     public bool CanExportWorkingImage =>
         !IsBusy && HasInput && CurrentPlan is not null && CanMaterializeWorkingImage(CurrentPlan);
@@ -1086,6 +1161,10 @@ public sealed class PixelAlignmentViewModel : ObservableObject
     public ICommand SetRotationPresetCommand { get; }
 
     public ICommand ResetPerspectivePointsCommand { get; }
+
+    public ICommand RefreshPreviewCommand { get; }
+
+    public ICommand SaveResultCommand { get; }
 
     public ICommand ProcessCommand { get; }
 
@@ -1349,10 +1428,10 @@ public sealed class PixelAlignmentViewModel : ObservableObject
             }
 
             OutputPath = NormalizePngPath(selected);
-            OutputPreviewPath = string.Empty;
-            ResetPreviewMetadata();
             _lastOutputDirectory = Path.GetDirectoryName(OutputPath);
-            StatusText = $"对齐结果将保存到：{OutputPath}";
+            StatusText = IsPreviewCurrent
+                ? $"输出位置已设置；当前预览可保存到：{OutputPath}"
+                : $"对齐结果将保存到：{OutputPath}";
             NotifySettingsChanged();
         }
         catch (Exception exception) when (IsExpectedOperationException(exception))
@@ -1361,53 +1440,198 @@ public sealed class PixelAlignmentViewModel : ObservableObject
         }
     }
 
-    private async Task ProcessAsync()
+    private async Task RefreshPreviewAsync()
     {
-        if (!CanProcess || CurrentPlan is null)
+        if (!CanRefreshPreview || CurrentPlan is null)
         {
-            StatusText = "当前输入、标尺、网格或输出位置尚未就绪。";
+            StatusText = "当前输入、标尺或网格尚未就绪，无法刷新预览。";
             return;
         }
 
         var inputPath = InputPath;
-        var outputPath = OutputPath;
         var settings = BuildSettings();
+        var previousPreviewPath = _singlePreviewPath;
+        var candidatePreviewPath = string.Empty;
         IsBusy = true;
-        OutputPreviewPath = string.Empty;
-        StatusText = $"正在按 {Columns}×{Rows} 网格进行{SelectedSamplingMode.DisplayName}…";
+        MarkPreviewStale();
+        var settingsRevision = _previewSettingsRevision;
+        PreviewStatusText = "正在使用正式像素对齐算法刷新缓存预览…";
+        StatusText = $"正在按 {Columns}×{Rows} 网格刷新{SelectedSamplingMode.DisplayName}预览…";
         _workbenchLogSink?.Write(
             WorkbenchLogLevel.Information,
             LogSource,
-            $"开始像素对齐：{Path.GetFileName(inputPath)} · crop {CropWidth}×{CropHeight} · " +
+            $"开始刷新像素对齐缓存预览：{Path.GetFileName(inputPath)} · crop {CropWidth}×{CropHeight} · " +
             $"grid {Columns}×{Rows} · minimum {MinimumUpscaleFactor}×");
         try
         {
+            candidatePreviewPath = _previewCache.ReservePreviewPath("pixel-alignment");
+            _previewCache.PinPreview(candidatePreviewPath);
             var result = await Task.Run(() =>
-                    _service.AlignToPng(inputPath, outputPath, settings, overwrite: true))
+                    _service.AlignToPng(inputPath, candidatePreviewPath, settings, overwrite: false))
                 .ConfigureAwait(true);
-            CurrentPlan = result.Plan;
-            OutputPreviewPath = result.OutputPath;
+            var renderedPath = Path.GetFullPath(result.OutputPath);
+            if (!_previewCache.IsManagedPreviewPath(renderedPath) || !File.Exists(renderedPath))
+            {
+                throw new InvalidOperationException("像素对齐服务未返回有效的受管预览缓存 PNG。");
+            }
+
+            if (!PathsEqual(candidatePreviewPath, renderedPath))
+            {
+                _previewCache.PinPreview(renderedPath);
+                TryReleasePreview(candidatePreviewPath);
+                candidatePreviewPath = renderedPath;
+            }
+
+            if (!PathsEqual(inputPath, InputPath))
+            {
+                TryReleasePreview(renderedPath);
+                PreviewStatusText = "刷新期间输入图片发生变化；已丢弃旧输入的预览结果。";
+                StatusText = "像素对齐预览已丢弃，请针对当前输入重新刷新。";
+                return;
+            }
+
+            var remainsCurrent = settingsRevision == _previewSettingsRevision;
+            if (remainsCurrent)
+            {
+                CurrentPlan = result.Plan;
+            }
+
+            _singlePreviewPath = renderedPath;
+            OutputPreviewPath = renderedPath;
             PreviewTitle = "对齐结果预览";
             PreviewSizeText = $"{result.OutputWidth} × {result.OutputHeight} px";
             ResultSummary =
                 $"输出 {result.OutputWidth} × {result.OutputHeight} px · 工作尺寸 " +
                 $"{result.Plan.WorkingWidth:N0} × {result.Plan.WorkingHeight:N0} · " +
                 $"{SelectedSamplingMode.DisplayName} · {FormatColorIndexResult(result)}";
-            StatusText = $"像素对齐完成：{result.OutputPath}";
+            IsPreviewStale = !remainsCurrent;
+            IsPreviewCurrent = remainsCurrent;
+            PreviewStatusText = remainsCurrent
+                ? "预览已按当前参数刷新，可确认保存；参数变化后需再次刷新。"
+                : "刷新期间参数发生变化；结果仅供对比，请再次刷新。";
+            StatusText = remainsCurrent
+                ? "像素对齐预览已刷新，尚未写入最终输出位置。"
+                : "像素对齐预览已生成，但参数已变化，需要再次刷新。";
+            if (!string.IsNullOrWhiteSpace(previousPreviewPath) &&
+                !PathsEqual(previousPreviewPath, renderedPath))
+            {
+                TryReleasePreview(previousPreviewPath);
+            }
+
             _workbenchLogSink?.Write(
                 WorkbenchLogLevel.Success,
                 LogSource,
-                $"像素对齐完成：{result.OutputPath} · {ResultSummary}");
+                $"像素对齐缓存预览已刷新：{renderedPath} · {ResultSummary}");
         }
         catch (Exception exception) when (IsExpectedOperationException(exception))
         {
-            ResultSummary = "处理失败，输入图片保持不变。";
-            StatusText = $"像素对齐失败：{exception.Message}";
+            if (!string.IsNullOrWhiteSpace(candidatePreviewPath) &&
+                !PathsEqual(candidatePreviewPath, previousPreviewPath))
+            {
+                TryReleasePreview(candidatePreviewPath);
+            }
+
+            _singlePreviewPath = previousPreviewPath;
+            if (!string.IsNullOrWhiteSpace(previousPreviewPath) && File.Exists(previousPreviewPath))
+            {
+                OutputPreviewPath = previousPreviewPath;
+                IsPreviewStale = true;
+                PreviewStatusText = $"刷新失败，已保留上一次预览用于对比；该预览不可保存。{exception.Message}";
+                ResultSummary = "刷新失败；上一次缓存预览已保留，但必须重新刷新后才能保存。";
+            }
+            else
+            {
+                _singlePreviewPath = string.Empty;
+                OutputPreviewPath = string.Empty;
+                IsPreviewStale = false;
+                PreviewStatusText = $"预览刷新失败：{exception.Message}";
+                ResultSummary = "预览刷新失败，输入图片保持不变。";
+            }
+
+            IsPreviewCurrent = false;
+            StatusText = $"像素对齐预览刷新失败：{exception.Message}";
             _workbenchLogSink?.Write(WorkbenchLogLevel.Error, LogSource, StatusText, exception: exception);
         }
         finally
         {
             IsBusy = false;
+        }
+    }
+
+    private async Task SaveResultAsync()
+    {
+        if (!CanSaveResult)
+        {
+            StatusText = IsPreviewStale
+                ? "当前预览已过期，请先刷新预览再保存。"
+                : "请先刷新出与当前参数一致的预览。";
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(OutputPath))
+        {
+            ChooseOutput();
+        }
+
+        if (string.IsNullOrWhiteSpace(OutputPath))
+        {
+            return;
+        }
+
+        if (PathsEqual(InputPath, OutputPath))
+        {
+            StatusText = "最终输出路径不能覆盖输入图片，请重新设置输出位置。";
+            return;
+        }
+
+        var previewPath = _singlePreviewPath;
+        var outputPath = OutputPath;
+        IsBusy = true;
+        StatusText = $"正在保存像素对齐结果：{outputPath}";
+        try
+        {
+            var publishedPath = await Task.Run(() => _previewCache.PublishPreview(
+                    previewPath,
+                    outputPath,
+                    overwrite: true))
+                .ConfigureAwait(true);
+            LastSavedOutputPath = publishedPath;
+            _lastOutputDirectory = Path.GetDirectoryName(publishedPath);
+            PreviewStatusText = $"当前预览已原样保存：{Path.GetFileName(publishedPath)}";
+            StatusText = $"像素对齐结果已保存：{publishedPath}";
+            NotifySettingsChanged();
+            _workbenchLogSink?.Write(
+                WorkbenchLogLevel.Success,
+                LogSource,
+                $"缓存预览已按原始 PNG 字节发布：{publishedPath}");
+        }
+        catch (Exception exception) when (IsExpectedOperationException(exception))
+        {
+            StatusText = $"像素对齐结果保存失败：{exception.Message}";
+            _workbenchLogSink?.Write(WorkbenchLogLevel.Error, LogSource, StatusText, exception: exception);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task ProcessLegacyAsync()
+    {
+        if (!CanProcess)
+        {
+            StatusText = "当前输入、标尺、网格或输出位置尚未就绪。";
+            return;
+        }
+
+        if (!IsPreviewCurrent || IsPreviewStale)
+        {
+            await RefreshPreviewAsync().ConfigureAwait(true);
+        }
+
+        if (CanSaveResult)
+        {
+            await SaveResultAsync().ConfigureAwait(true);
         }
     }
 
@@ -1427,10 +1651,11 @@ public sealed class PixelAlignmentViewModel : ObservableObject
         PixelAlignmentResult? lastSuccessfulResult = null;
 
         ResetBatchProgress(resetItems: true);
+        ClearSinglePreview(clearVisiblePreview: true);
         IsBusy = true;
-        OutputPreviewPath = string.Empty;
         PreviewTitle = "批处理结果预览";
         PreviewSizeText = "—";
+        PreviewStatusText = "批量模式会继续按原有逻辑逐项直接保存；此处显示最后一个成功结果。";
         ResultSummary = $"正在顺序处理 {BatchItems.Count} 张图片；单项失败不会终止批次。";
         _workbenchLogSink?.Write(
             WorkbenchLogLevel.Information,
@@ -1505,8 +1730,10 @@ public sealed class PixelAlignmentViewModel : ObservableObject
             if (lastSuccessfulResult is not null)
             {
                 OutputPreviewPath = lastSuccessfulResult.OutputPath;
+                LastSavedOutputPath = lastSuccessfulResult.OutputPath;
                 PreviewTitle = "批处理最后成功结果";
                 PreviewSizeText = $"{lastSuccessfulResult.OutputWidth} × {lastSuccessfulResult.OutputHeight} px";
+                PreviewStatusText = "批量结果已经直接写入所选输出目录。";
             }
 
             _lastOutputDirectory = outputDirectory;
@@ -1570,10 +1797,13 @@ public sealed class PixelAlignmentViewModel : ObservableObject
                 CurrentPlan = result.Plan;
             }
 
+            ClearSinglePreview(clearVisiblePreview: false);
             _lastOutputDirectory = Path.GetDirectoryName(result.OutputPath);
             OutputPreviewPath = result.OutputPath;
+            LastSavedOutputPath = result.OutputPath;
             PreviewTitle = result.IsCorrectionApplied ? "矫正工作图预览" : "最近邻工作图预览";
             PreviewSizeText = $"{result.Width:N0} × {result.Height:N0} px";
+            PreviewStatusText = "工作图已经直接导出到所选位置。";
             ResultSummary =
                 $"{(result.IsCorrectionApplied ? "矫正工作图" : "最近邻工作图")} " +
                 $"{result.Width:N0} × {result.Height:N0} px · {result.Scale}× · 未使用插值";
@@ -1803,6 +2033,7 @@ public sealed class PixelAlignmentViewModel : ObservableObject
 
     private void RefreshPlan()
     {
+        MarkPreviewStale();
         if (!HasInput || CropWidth <= 0 || CropHeight <= 0)
         {
             CurrentPlan = null;
@@ -1879,6 +2110,8 @@ public sealed class PixelAlignmentViewModel : ObservableObject
         OnPropertyChanged(nameof(IsGeometryFitPaddingRequired));
         OnPropertyChanged(nameof(GeometryFitStatusText));
         OnPropertyChanged(nameof(CanProcess));
+        OnPropertyChanged(nameof(CanRefreshPreview));
+        OnPropertyChanged(nameof(CanSaveResult));
         OnPropertyChanged(nameof(CanProcessBatch));
         OnPropertyChanged(nameof(CanExportWorkingImage));
         RefreshCommands();
@@ -1956,6 +2189,8 @@ public sealed class PixelAlignmentViewModel : ObservableObject
         _setRotationPresetCommand.RaiseCanExecuteChanged();
         _resetPerspectivePointsCommand.RaiseCanExecuteChanged();
         _processCommand.RaiseCanExecuteChanged();
+        _refreshPreviewCommand.RaiseCanExecuteChanged();
+        _saveResultCommand.RaiseCanExecuteChanged();
         _processBatchCommand.RaiseCanExecuteChanged();
         _exportWorkingImageCommand.RaiseCanExecuteChanged();
         _openOutputDirectoryCommand.RaiseCanExecuteChanged();
@@ -1963,7 +2198,7 @@ public sealed class PixelAlignmentViewModel : ObservableObject
 
     private void OpenOutputDirectory()
     {
-        var directory = Path.GetDirectoryName(OutputPreviewPath);
+        var directory = Path.GetDirectoryName(LastSavedOutputPath);
         if (string.IsNullOrWhiteSpace(directory) || !Directory.Exists(directory))
         {
             return;
@@ -1985,6 +2220,8 @@ public sealed class PixelAlignmentViewModel : ObservableObject
 
     private void LoadInputInfo(PixelAlignmentImageInfo info)
     {
+        ClearSinglePreview(clearVisiblePreview: true);
+        LastSavedOutputPath = string.Empty;
         _suppressPlanRefresh = true;
         InputPath = info.InputPath;
         SourceWidth = info.Width;
@@ -2001,8 +2238,8 @@ public sealed class PixelAlignmentViewModel : ObservableObject
         _suppressPlanRefresh = false;
         _lastInputDirectory = Path.GetDirectoryName(info.InputPath);
         OutputPath = string.Empty;
-        OutputPreviewPath = string.Empty;
         ResetPreviewMetadata();
+        PreviewStatusText = "输入图片已变化，请刷新预览。";
         RefreshCropAndPlan();
     }
 
@@ -2134,6 +2371,8 @@ public sealed class PixelAlignmentViewModel : ObservableObject
 
     private void ResetInputState()
     {
+        ClearSinglePreview(clearVisiblePreview: true);
+        LastSavedOutputPath = string.Empty;
         _suppressPlanRefresh = true;
         InputPath = string.Empty;
         SourceWidth = 0;
@@ -2158,8 +2397,8 @@ public sealed class PixelAlignmentViewModel : ObservableObject
         _suppressPlanRefresh = false;
         CurrentPlan = null;
         OutputPath = string.Empty;
-        OutputPreviewPath = string.Empty;
         ResetPreviewMetadata();
+        PreviewStatusText = "尚未刷新预览。";
         RefreshCropAndPlan();
     }
 
@@ -2179,6 +2418,72 @@ public sealed class PixelAlignmentViewModel : ObservableObject
     {
         PreviewTitle = "对齐结果预览";
         PreviewSizeText = "—";
+    }
+
+    private void MarkPreviewStale()
+    {
+        _previewSettingsRevision++;
+        if (string.IsNullOrWhiteSpace(_singlePreviewPath))
+        {
+            return;
+        }
+
+        if (!File.Exists(_singlePreviewPath))
+        {
+            TryReleasePreview(_singlePreviewPath);
+            _singlePreviewPath = string.Empty;
+            IsPreviewCurrent = false;
+            IsPreviewStale = false;
+            if (_previewCache.IsManagedPreviewPath(OutputPreviewPath))
+            {
+                OutputPreviewPath = string.Empty;
+                ResetPreviewMetadata();
+            }
+
+            PreviewStatusText = "预览缓存已不存在，请重新刷新。";
+            return;
+        }
+
+        IsPreviewCurrent = false;
+        IsPreviewStale = true;
+        PreviewStatusText = "参数已变化；当前预览仅供对比，刷新前不可保存。";
+    }
+
+    private void ClearSinglePreview(bool clearVisiblePreview)
+    {
+        _previewSettingsRevision++;
+        var oldPreviewPath = _singlePreviewPath;
+        _singlePreviewPath = string.Empty;
+        IsPreviewCurrent = false;
+        IsPreviewStale = false;
+        if (clearVisiblePreview || PathsEqual(OutputPreviewPath, oldPreviewPath))
+        {
+            OutputPreviewPath = string.Empty;
+        }
+
+        if (!string.IsNullOrWhiteSpace(oldPreviewPath))
+        {
+            TryReleasePreview(oldPreviewPath);
+        }
+    }
+
+    private void TryReleasePreview(string previewPath)
+    {
+        try
+        {
+            if (_previewCache.IsManagedPreviewPath(previewPath))
+            {
+                _previewCache.ReleasePreview(previewPath);
+            }
+        }
+        catch (Exception exception) when (IsExpectedOperationException(exception))
+        {
+            _workbenchLogSink?.Write(
+                WorkbenchLogLevel.Warning,
+                LogSource,
+                $"无法清理像素对齐预览缓存：{previewPath} · {exception.Message}",
+                exception: exception);
+        }
     }
 
     private static PixelSamplingModeOption ResolveSamplingMode(string? value)

@@ -67,12 +67,19 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
     private readonly IBackgroundRemovalService _backgroundRemovalService;
     private readonly IBackgroundRemovalInputPicker _inputPicker;
     private readonly IBackgroundRemovalOutputPicker _outputPicker;
+    private readonly IImageProcessingPreviewCache _previewCache;
+    private readonly IColorPickerService _colorPickerService;
     private readonly IWorkbenchLogSink? _workbenchLogSink;
     private readonly RelayCommand _chooseInputCommand;
     private readonly RelayCommand _chooseOutputCommand;
     private readonly AsyncRelayCommand _processCommand;
+    private readonly AsyncRelayCommand _refreshPreviewCommand;
+    private readonly AsyncRelayCommand _saveResultCommand;
     private readonly RelayCommand _openOutputDirectoryCommand;
     private readonly RelayCommand _swapCheckerColorsCommand;
+    private readonly RelayCommand _chooseCustomColorCommand;
+    private readonly RelayCommand _chooseCheckerColorACommand;
+    private readonly RelayCommand _chooseCheckerColorBCommand;
     private BackgroundRemovalPresetOption _selectedPreset;
     private string _customColorHex;
     private double _transparentThreshold;
@@ -94,6 +101,10 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
     private int _sourcePixelHeight;
     private string _outputPath = string.Empty;
     private string _outputPreviewPath = string.Empty;
+    private string _lastSavedOutputPath = string.Empty;
+    private bool _isPreviewCurrent;
+    private string _previewStatusText = "尚未刷新预览";
+    private long _previewSettingsRevision;
     private string? _lastInputDirectory;
     private string? _lastOutputDirectory;
     private string _statusText = "选择一张纯色背景图片，然后设置透明 PNG 的保存位置。";
@@ -123,11 +134,15 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         int checkerBoundaryTolerance = 1,
         string? lastInputDirectory = null,
         string? lastOutputDirectory = null,
-        IWorkbenchLogSink? workbenchLogSink = null)
+        IWorkbenchLogSink? workbenchLogSink = null,
+        IImageProcessingPreviewCache? previewCache = null,
+        IColorPickerService? colorPickerService = null)
     {
         _backgroundRemovalService = backgroundRemovalService ?? throw new ArgumentNullException(nameof(backgroundRemovalService));
         _inputPicker = inputPicker ?? throw new ArgumentNullException(nameof(inputPicker));
         _outputPicker = outputPicker ?? throw new ArgumentNullException(nameof(outputPicker));
+        _previewCache = previewCache ?? CreateFallbackPreviewCache();
+        _colorPickerService = colorPickerService ?? new DesktopColorPickerService();
         _workbenchLogSink = workbenchLogSink;
         _selectedPreset = ResolvePresetOption(presetKey);
         _customColorHex = NormalizeInitialCustomColor(customColorHex);
@@ -151,14 +166,24 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
 
         _chooseInputCommand = new RelayCommand(ChooseInput, () => !IsBusy);
         _chooseOutputCommand = new RelayCommand(ChooseOutput, () => !IsBusy && HasInput);
-        _processCommand = new AsyncRelayCommand(ProcessAsync, () => CanProcess);
-        _openOutputDirectoryCommand = new RelayCommand(OpenOutputDirectory, () => HasOutputPreview);
+        _refreshPreviewCommand = new AsyncRelayCommand(RefreshPreviewAsync, () => CanRefreshPreview);
+        _saveResultCommand = new AsyncRelayCommand(SaveResultAsync, () => CanSaveResult);
+        _processCommand = new AsyncRelayCommand(ProcessLegacyAsync, () => CanProcess);
+        _openOutputDirectoryCommand = new RelayCommand(OpenOutputDirectory, () => HasSavedOutput);
         _swapCheckerColorsCommand = new RelayCommand(SwapCheckerColors, () => !IsBusy);
+        _chooseCustomColorCommand = new RelayCommand(ChooseCustomColor, () => !IsBusy);
+        _chooseCheckerColorACommand = new RelayCommand(ChooseCheckerColorA, () => !IsBusy);
+        _chooseCheckerColorBCommand = new RelayCommand(ChooseCheckerColorB, () => !IsBusy);
         ChooseInputCommand = _chooseInputCommand;
         ChooseOutputCommand = _chooseOutputCommand;
         ProcessCommand = _processCommand;
+        RefreshPreviewCommand = _refreshPreviewCommand;
+        SaveResultCommand = _saveResultCommand;
         OpenOutputDirectoryCommand = _openOutputDirectoryCommand;
         SwapCheckerColorsCommand = _swapCheckerColorsCommand;
+        ChooseCustomColorCommand = _chooseCustomColorCommand;
+        ChooseCheckerColorACommand = _chooseCheckerColorACommand;
+        ChooseCheckerColorBCommand = _chooseCheckerColorBCommand;
         _suppressSettingsChanged = false;
     }
 
@@ -185,6 +210,7 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             OnPropertyChanged(nameof(EffectiveColorHex));
             OnPropertyChanged(nameof(SelectedPresetDisplayName));
             OnPropertyChanged(nameof(PresetGuidanceText));
+            MarkPreviewStale();
             RefreshValidationAndCommands();
             NotifySettingsChanged();
         }
@@ -208,6 +234,7 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             }
 
             OnPropertyChanged(nameof(EffectiveColorHex));
+            MarkPreviewStale();
             RefreshValidationAndCommands();
             NotifySettingsChanged();
         }
@@ -242,6 +269,7 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
                 return;
             }
 
+            MarkPreviewStale();
             RefreshValidationAndCommands();
             NotifySettingsChanged();
         }
@@ -257,6 +285,7 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
                 return;
             }
 
+            MarkPreviewStale();
             RefreshValidationAndCommands();
             NotifySettingsChanged();
         }
@@ -270,6 +299,8 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             var normalized = Math.Clamp(value, 0, 3);
             if (SetProperty(ref _edgeContract, normalized))
             {
+                MarkPreviewStale();
+                RefreshValidationAndCommands();
                 NotifySettingsChanged();
             }
         }
@@ -283,6 +314,8 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             var normalized = Math.Clamp(value, 0, 2);
             if (SetProperty(ref _edgeFeather, normalized))
             {
+                MarkPreviewStale();
+                RefreshValidationAndCommands();
                 NotifySettingsChanged();
             }
         }
@@ -295,6 +328,8 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         {
             if (SetProperty(ref _despill, value))
             {
+                MarkPreviewStale();
+                RefreshValidationAndCommands();
                 NotifySettingsChanged();
             }
         }
@@ -307,6 +342,8 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         {
             if (SetProperty(ref _edgeConnectedOnly, value))
             {
+                MarkPreviewStale();
+                RefreshValidationAndCommands();
                 NotifySettingsChanged();
             }
         }
@@ -326,6 +363,7 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             OnPropertyChanged(nameof(BackgroundModeText));
             OnPropertyChanged(nameof(CheckerAlignmentSummary));
             OnPropertyChanged(nameof(ShowCheckerGridOverlay));
+            MarkPreviewStale();
             RefreshValidationAndCommands();
             NotifySettingsChanged();
         }
@@ -346,6 +384,7 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             if (SetProperty(ref _checkerColorAHex, value))
             {
                 OnPropertyChanged(nameof(EffectiveCheckerColorAHex));
+                MarkPreviewStale();
                 RefreshValidationAndCommands();
                 NotifySettingsChanged();
             }
@@ -361,6 +400,7 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             if (SetProperty(ref _checkerColorBHex, value))
             {
                 OnPropertyChanged(nameof(EffectiveCheckerColorBHex));
+                MarkPreviewStale();
                 RefreshValidationAndCommands();
                 NotifySettingsChanged();
             }
@@ -380,6 +420,8 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             {
                 OnPropertyChanged(nameof(CheckerAlignmentSummary));
                 OnPropertyChanged(nameof(ShowCheckerGridOverlay));
+                MarkPreviewStale();
+                RefreshValidationAndCommands();
                 NotifySettingsChanged();
             }
         }
@@ -400,6 +442,7 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             CheckerOffsetY = NormalizeCheckerOffset(CheckerOffsetY, normalized);
             OnPropertyChanged(nameof(CheckerOffsetMaximum));
             OnPropertyChanged(nameof(CheckerAlignmentSummary));
+            MarkPreviewStale();
             RefreshValidationAndCommands();
             NotifySettingsChanged();
         }
@@ -416,6 +459,8 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             if (SetProperty(ref _checkerOffsetX, normalized))
             {
                 OnPropertyChanged(nameof(CheckerAlignmentSummary));
+                MarkPreviewStale();
+                RefreshValidationAndCommands();
                 NotifySettingsChanged();
             }
         }
@@ -430,6 +475,8 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             if (SetProperty(ref _checkerOffsetY, normalized))
             {
                 OnPropertyChanged(nameof(CheckerAlignmentSummary));
+                MarkPreviewStale();
+                RefreshValidationAndCommands();
                 NotifySettingsChanged();
             }
         }
@@ -444,6 +491,7 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             if (SetProperty(ref _checkerBoundaryTolerance, normalized))
             {
                 OnPropertyChanged(nameof(CheckerAlignmentSummary));
+                MarkPreviewStale();
                 RefreshValidationAndCommands();
                 NotifySettingsChanged();
             }
@@ -518,11 +566,50 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             }
 
             OnPropertyChanged(nameof(HasOutputPreview));
-            _openOutputDirectoryCommand.RaiseCanExecuteChanged();
+            OnPropertyChanged(nameof(IsPreviewStale));
+            OnPropertyChanged(nameof(CanSaveResult));
+            RaiseCommandStates();
         }
     }
 
     public bool HasOutputPreview => File.Exists(OutputPreviewPath);
+
+    public string LastSavedOutputPath
+    {
+        get => _lastSavedOutputPath;
+        private set
+        {
+            if (SetProperty(ref _lastSavedOutputPath, value))
+            {
+                OnPropertyChanged(nameof(HasSavedOutput));
+                _openOutputDirectoryCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
+
+    public bool HasSavedOutput => File.Exists(LastSavedOutputPath);
+
+    public bool IsPreviewCurrent
+    {
+        get => _isPreviewCurrent;
+        private set
+        {
+            if (SetProperty(ref _isPreviewCurrent, value))
+            {
+                OnPropertyChanged(nameof(IsPreviewStale));
+                OnPropertyChanged(nameof(CanSaveResult));
+                RaiseCommandStates();
+            }
+        }
+    }
+
+    public bool IsPreviewStale => HasOutputPreview && !IsPreviewCurrent;
+
+    public string PreviewStatusText
+    {
+        get => _previewStatusText;
+        private set => SetProperty(ref _previewStatusText, value);
+    }
 
     public string StatusText
     {
@@ -547,13 +634,20 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             }
 
             OnPropertyChanged(nameof(CanProcess));
+            OnPropertyChanged(nameof(CanRefreshPreview));
+            OnPropertyChanged(nameof(CanSaveResult));
             RaiseCommandStates();
         }
     }
 
-    public bool CanProcess => !IsBusy && HasInput &&
+    public bool CanRefreshPreview => !IsBusy && HasInput && IsConfigurationValid;
+
+    public bool CanSaveResult => !IsBusy && IsPreviewCurrent && HasOutputPreview &&
+                                 (string.IsNullOrWhiteSpace(OutputPath) ||
+                                  !PathsEqual(InputPath, OutputPath));
+
+    public bool CanProcess => CanRefreshPreview &&
                               !string.IsNullOrWhiteSpace(OutputPath) &&
-                              IsConfigurationValid &&
                               !PathsEqual(InputPath, OutputPath);
 
     public bool IsConfigurationValid => TryBuildSettings(out _, out _);
@@ -576,9 +670,19 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
 
     public ICommand ProcessCommand { get; }
 
+    public ICommand RefreshPreviewCommand { get; }
+
+    public ICommand SaveResultCommand { get; }
+
     public ICommand OpenOutputDirectoryCommand { get; }
 
     public ICommand SwapCheckerColorsCommand { get; }
+
+    public ICommand ChooseCustomColorCommand { get; }
+
+    public ICommand ChooseCheckerColorACommand { get; }
+
+    public ICommand ChooseCheckerColorBCommand { get; }
 
     private void ChooseInput()
     {
@@ -598,11 +702,13 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             }
 
             UpdateSourcePixelDimensions(normalized);
+            ClearPreview();
             InputPath = normalized;
             _lastInputDirectory = Path.GetDirectoryName(normalized);
             OutputPath = string.Empty;
-            OutputPreviewPath = string.Empty;
-            ResultSummary = "输入图片已就绪；请选择透明 PNG 的输出位置。";
+            LastSavedOutputPath = string.Empty;
+            ResultSummary = "输入图片已就绪；刷新预览不需要先设置输出位置。";
+            PreviewStatusText = "输入已变化，请刷新预览";
             StatusText = $"已选择：{Path.GetFileName(normalized)}";
             NotifySettingsChanged();
         }
@@ -666,9 +772,10 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             }
 
             OutputPath = normalized;
-            OutputPreviewPath = string.Empty;
             _lastOutputDirectory = Path.GetDirectoryName(normalized);
-            StatusText = $"输出位置：{normalized}";
+            StatusText = IsPreviewCurrent
+                ? $"输出位置：{normalized}；当前预览可直接保存。"
+                : $"输出位置：{normalized}";
             NotifySettingsChanged();
         }
         catch (Exception exception) when (IsExpectedOperationException(exception))
@@ -677,51 +784,161 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         }
     }
 
-    private async Task ProcessAsync()
+    private async Task RefreshPreviewAsync()
     {
-        if (!TryBuildSettings(out var settings, out var reason) || !CanProcess)
+        if (!TryBuildSettings(out var settings, out var reason) || !CanRefreshPreview)
         {
-            StatusText = string.IsNullOrWhiteSpace(reason) ? "当前输入、输出或参数尚未就绪。" : reason;
+            StatusText = string.IsNullOrWhiteSpace(reason) ? "当前输入或参数尚未就绪。" : reason;
             return;
         }
 
         var inputPath = InputPath;
-        var outputPath = OutputPath;
+        var settingsRevision = _previewSettingsRevision;
+        var previousPreviewPath = OutputPreviewPath;
+        string? reservedPreviewPath = null;
         IsBusy = true;
+        IsPreviewCurrent = false;
         var modeText = settings.UseFakeTransparencyGrid
             ? $"假透明棋盘格 {settings.CheckerColorAHex} / {settings.CheckerColorBHex}"
             : $"纯色 {settings.KeyColorHex}";
-        StatusText = $"正在使用{modeText}剔除背景…";
-        OutputPreviewPath = string.Empty;
+        PreviewStatusText = "正在刷新缓存预览…";
+        StatusText = $"正在使用{modeText}剔除背景并刷新预览…";
         _workbenchLogSink?.Write(
             WorkbenchLogLevel.Information,
             LogSource,
-            $"开始背景剔除：{Path.GetFileName(inputPath)} · {modeText} · 输出 {outputPath}");
+            $"开始刷新背景剔除预览：{Path.GetFileName(inputPath)} · {modeText}");
         try
         {
+            reservedPreviewPath = _previewCache.ReservePreviewPath("background-removal");
+            _previewCache.PinPreview(reservedPreviewPath);
             var result = await Task.Run(() =>
-                    _backgroundRemovalService.RemoveToPng(inputPath, outputPath, settings, overwrite: true))
+                    _backgroundRemovalService.RemoveToPng(inputPath, reservedPreviewPath, settings, overwrite: false))
                 .ConfigureAwait(true);
-            OutputPreviewPath = result.OutputPath;
+            var renderedPreviewPath = Path.GetFullPath(result.OutputPath);
+            if (!File.Exists(renderedPreviewPath) || !_previewCache.IsManagedPreviewPath(renderedPreviewPath))
+            {
+                throw new IOException("背景剔除服务未生成有效的受管缓存 PNG。");
+            }
+
+            if (!PathsEqual(reservedPreviewPath, renderedPreviewPath))
+            {
+                _previewCache.PinPreview(renderedPreviewPath);
+                ReleaseSupersededPreview(reservedPreviewPath, renderedPreviewPath);
+                reservedPreviewPath = renderedPreviewPath;
+            }
+
+            if (!PathsEqual(inputPath, InputPath))
+            {
+                ReleaseSupersededPreview(renderedPreviewPath, keepPath: null);
+                PreviewStatusText = "刷新期间输入图片发生变化；已丢弃旧输入的预览结果";
+                StatusText = "背景剔除预览已丢弃，请针对当前输入重新刷新。";
+                return;
+            }
+
+            OutputPreviewPath = renderedPreviewPath;
+            var remainsCurrent = settingsRevision == _previewSettingsRevision;
+            IsPreviewCurrent = remainsCurrent;
+            PreviewStatusText = remainsCurrent
+                ? "预览已刷新，可设置输出位置并保存结果"
+                : "刷新期间参数发生变化；结果仅供对比，请再次刷新";
             ResultSummary =
                 $"{result.Width} × {result.Height} px · 剔除 {result.RemovedPixelCount:N0} 像素 · " +
                 $"透明 {result.TransparentPixelCount:N0} · 半透明 {result.PartialPixelCount:N0}";
-            StatusText = $"背景剔除完成：{result.OutputPath}";
+            StatusText = remainsCurrent
+                ? "背景剔除预览已刷新；尚未写入最终输出位置。"
+                : "背景剔除预览已生成，但参数已变化，需要再次刷新。";
+            ReleaseSupersededPreview(previousPreviewPath, renderedPreviewPath);
             _workbenchLogSink?.Write(
                 WorkbenchLogLevel.Success,
                 LogSource,
-                $"背景剔除完成：{Path.GetFileName(inputPath)} → {result.OutputPath} · " +
+                $"背景剔除缓存预览完成：{Path.GetFileName(inputPath)} · " +
                 $"{result.Width}×{result.Height} px · 剔除 {result.RemovedPixelCount:N0} 像素");
         }
         catch (Exception exception) when (IsExpectedOperationException(exception))
         {
+            ReleaseSupersededPreview(reservedPreviewPath, previousPreviewPath);
             var errorMessage = GetOperationErrorMessage(exception);
-            ResultSummary = "处理失败，输入文件保持不变。";
+            PreviewStatusText = HasOutputPreview
+                ? "预览刷新失败；保留上一次结果但已标记为过期，不能保存"
+                : "预览刷新失败，尚无可用结果";
+            if (!HasOutputPreview)
+            {
+                ResultSummary = "处理失败，输入文件保持不变。";
+            }
+
             StatusText = $"背景剔除失败：{errorMessage}";
             _workbenchLogSink?.Write(
                 WorkbenchLogLevel.Error,
                 LogSource,
-                $"背景剔除失败：{Path.GetFileName(inputPath)} → {outputPath} · {errorMessage}",
+                $"背景剔除预览失败：{Path.GetFileName(inputPath)} · {errorMessage}",
+                exception: exception);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task ProcessLegacyAsync()
+    {
+        await RefreshPreviewAsync().ConfigureAwait(true);
+        if (!string.IsNullOrWhiteSpace(OutputPath) && CanSaveResult)
+        {
+            await SaveResultAsync().ConfigureAwait(true);
+        }
+    }
+
+    private async Task SaveResultAsync()
+    {
+        if (!CanSaveResult)
+        {
+            StatusText = IsPreviewStale
+                ? "当前预览已过期，请先刷新预览。"
+                : "请先刷新预览并设置最终输出位置。";
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(OutputPath))
+        {
+            ChooseOutput();
+        }
+
+        if (string.IsNullOrWhiteSpace(OutputPath))
+        {
+            return;
+        }
+
+        if (!CanSaveResult)
+        {
+            StatusText = "最终输出路径不能覆盖输入图片，请重新设置输出位置。";
+            return;
+        }
+
+        var previewPath = OutputPreviewPath;
+        var outputPath = OutputPath;
+        IsBusy = true;
+        StatusText = "正在保存当前预览…";
+        try
+        {
+            var publishedPath = await Task.Run(() =>
+                    _previewCache.PublishPreview(previewPath, outputPath, overwrite: true))
+                .ConfigureAwait(true);
+            LastSavedOutputPath = publishedPath;
+            PreviewStatusText = "当前预览已保存；参数变化后需重新刷新";
+            StatusText = $"背景剔除结果已保存：{publishedPath}";
+            _workbenchLogSink?.Write(
+                WorkbenchLogLevel.Success,
+                LogSource,
+                $"背景剔除预览已原样发布：{publishedPath}");
+        }
+        catch (Exception exception) when (IsExpectedOperationException(exception))
+        {
+            var errorMessage = GetOperationErrorMessage(exception);
+            StatusText = $"无法保存背景剔除结果：{errorMessage}";
+            _workbenchLogSink?.Write(
+                WorkbenchLogLevel.Error,
+                LogSource,
+                $"背景剔除保存失败：{outputPath} · {errorMessage}",
                 exception: exception);
         }
         finally
@@ -734,7 +951,7 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
     {
         try
         {
-            var directory = Path.GetDirectoryName(OutputPreviewPath);
+            var directory = Path.GetDirectoryName(LastSavedOutputPath);
             if (!Directory.Exists(directory))
             {
                 StatusText = "输出目录当前不可用。";
@@ -749,12 +966,93 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         }
     }
 
+    private void ChooseCustomColor() => PickColor(
+        CustomColorHex,
+        "选择背景剔除自定义颜色",
+        color => CustomColorHex = color);
+
+    private void ChooseCheckerColorA() => PickColor(
+        CheckerColorAHex,
+        "选择假透明网格颜色 A",
+        color => CheckerColorAHex = color);
+
+    private void ChooseCheckerColorB() => PickColor(
+        CheckerColorBHex,
+        "选择假透明网格颜色 B",
+        color => CheckerColorBHex = color);
+
+    private void PickColor(string initialColor, string title, Action<string> applyColor)
+    {
+        var selected = _colorPickerService.PickColor(initialColor, title);
+        if (selected is null)
+        {
+            return;
+        }
+
+        applyColor(selected.Hex);
+        StatusText = $"颜色已设置为 {selected.Hex}；请刷新预览。";
+    }
+
     private void SwapCheckerColors()
     {
         var colorA = CheckerColorAHex;
         CheckerColorAHex = CheckerColorBHex;
         CheckerColorBHex = colorA;
         StatusText = "已交换假透明网格的 A/B 颜色相位。";
+    }
+
+    private void MarkPreviewStale()
+    {
+        _previewSettingsRevision++;
+        var previewPath = OutputPreviewPath;
+        if (string.IsNullOrWhiteSpace(previewPath))
+        {
+            return;
+        }
+
+        if (!File.Exists(previewPath))
+        {
+            ReleaseSupersededPreview(previewPath, keepPath: null);
+            OutputPreviewPath = string.Empty;
+            IsPreviewCurrent = false;
+            PreviewStatusText = "预览缓存已不存在，请重新刷新";
+            return;
+        }
+
+        IsPreviewCurrent = false;
+        PreviewStatusText = "参数已变化；保留上一次预览用于对比，刷新后才能保存";
+    }
+
+    private void ClearPreview()
+    {
+        _previewSettingsRevision++;
+        var previousPreviewPath = OutputPreviewPath;
+        OutputPreviewPath = string.Empty;
+        IsPreviewCurrent = false;
+        PreviewStatusText = "尚未刷新预览";
+        ReleaseSupersededPreview(previousPreviewPath, keepPath: null);
+    }
+
+    private void ReleaseSupersededPreview(string? candidatePath, string? keepPath)
+    {
+        if (string.IsNullOrWhiteSpace(candidatePath) ||
+            PathsEqual(candidatePath, keepPath ?? string.Empty) ||
+            !_previewCache.IsManagedPreviewPath(candidatePath))
+        {
+            return;
+        }
+
+        try
+        {
+            _previewCache.ReleasePreview(candidatePath);
+        }
+        catch (Exception exception) when (IsExpectedOperationException(exception))
+        {
+            _workbenchLogSink?.Write(
+                WorkbenchLogLevel.Warning,
+                LogSource,
+                $"无法清理过期的背景剔除预览缓存：{exception.Message}");
+        }
     }
 
     private bool TryBuildSettings(out BackgroundRemovalSettings settings, out string reason)
@@ -859,6 +1157,8 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         OnPropertyChanged(nameof(ConfigurationValidationText));
         OnPropertyChanged(nameof(GenerationConfigurationValidationText));
         OnPropertyChanged(nameof(CanProcess));
+        OnPropertyChanged(nameof(CanRefreshPreview));
+        OnPropertyChanged(nameof(CanSaveResult));
         RaiseCommandStates();
     }
 
@@ -867,8 +1167,13 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         _chooseInputCommand.RaiseCanExecuteChanged();
         _chooseOutputCommand.RaiseCanExecuteChanged();
         _processCommand.RaiseCanExecuteChanged();
+        _refreshPreviewCommand.RaiseCanExecuteChanged();
+        _saveResultCommand.RaiseCanExecuteChanged();
         _openOutputDirectoryCommand.RaiseCanExecuteChanged();
         _swapCheckerColorsCommand.RaiseCanExecuteChanged();
+        _chooseCustomColorCommand.RaiseCanExecuteChanged();
+        _chooseCheckerColorACommand.RaiseCanExecuteChanged();
+        _chooseCheckerColorBCommand.RaiseCanExecuteChanged();
     }
 
     private void NotifySettingsChanged()
@@ -954,6 +1259,14 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             return "#00000000";
         }
     }
+
+    private static IImageProcessingPreviewCache CreateFallbackPreviewCache() =>
+        new ImageProcessingPreviewCache(
+            Path.Combine(
+                Path.GetTempPath(),
+                "GAssetForge",
+                "Workspace",
+                ImageProcessingPreviewCache.DefaultDirectoryName));
 
     private static int NormalizeCheckerOffset(int value, int cellSize)
     {

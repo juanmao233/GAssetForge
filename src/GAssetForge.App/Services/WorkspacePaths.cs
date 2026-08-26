@@ -43,6 +43,8 @@ public sealed class WorkspacePaths
     public string ProjectBackupPath => Path.Combine(ProjectDirectory, "default.pfui.json.bak");
     public string LayoutPath => Path.Combine(WorkspaceDirectory, "ui-layout-v1.json");
     public string LayoutBackupPath => Path.Combine(WorkspaceDirectory, "ui-layout-v1.json.bak");
+    public string ImageProcessingPreviewDirectory =>
+        Path.Combine(WorkspaceDirectory, ImageProcessingPreviewCache.DefaultDirectoryName);
     public string UserSettingsPath => Path.Combine(SettingsDirectory, "user-settings.json");
 
     private static string ResolveDefaultRootDirectory()

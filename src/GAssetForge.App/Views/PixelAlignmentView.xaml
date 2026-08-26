@@ -122,13 +122,8 @@
                                 Content="设置输出…" />
                         <Button x:Name="ExportPixelAlignmentWorkingButton"
                                 MinWidth="132"
-                                Margin="0,0,7,0"
                                 Command="{Binding ExportWorkingImageCommand}"
                                 Content="导出最近邻工作图" />
-                        <Button x:Name="ProcessPixelAlignmentButton"
-                                MinWidth="112"
-                                Command="{Binding ProcessCommand}"
-                                Content="生成对齐图" />
                     </WrapPanel>
 
                     <WrapPanel VerticalAlignment="Center"
@@ -817,6 +812,7 @@
                     <Grid>
                         <Grid.RowDefinitions>
                             <RowDefinition Height="Auto" />
+                            <RowDefinition Height="Auto" />
                             <RowDefinition Height="*" />
                             <RowDefinition Height="Auto" />
                         </Grid.RowDefinitions>
@@ -831,7 +827,42 @@
                             <TextBlock Style="{StaticResource App.PanelHeaderStyle}" Text="{Binding PreviewTitle}" />
                         </DockPanel>
 
-                        <Border Grid.Row="1"
+                        <StackPanel Grid.Row="1" Margin="0,8,0,0">
+                            <WrapPanel>
+                                <Button x:Name="RefreshPixelAlignmentPreviewButton"
+                                        MinWidth="92"
+                                        Margin="0,0,7,0"
+                                        Style="{StaticResource PixelAlignmentCompactButtonStyle}"
+                                        Command="{Binding RefreshPreviewCommand}"
+                                        Content="刷新预览" />
+                                <Button x:Name="SavePixelAlignmentResultButton"
+                                        MinWidth="92"
+                                        Style="{StaticResource PixelAlignmentCompactButtonStyle}"
+                                        Command="{Binding SaveResultCommand}"
+                                        Content="保存结果" />
+                            </WrapPanel>
+                            <TextBlock x:Name="PixelAlignmentPreviewStatusText"
+                                       Margin="0,6,0,0"
+                                       FontSize="9"
+                                       Text="{Binding PreviewStatusText}"
+                                       TextWrapping="Wrap">
+                                <TextBlock.Style>
+                                    <Style TargetType="{x:Type TextBlock}">
+                                        <Setter Property="Foreground" Value="{DynamicResource App.TextSecondaryBrush}" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsPreviewCurrent}" Value="True">
+                                                <Setter Property="Foreground" Value="{DynamicResource App.SuccessBrush}" />
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding IsPreviewStale}" Value="True">
+                                                <Setter Property="Foreground" Value="{DynamicResource App.WarningBrush}" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </TextBlock.Style>
+                            </TextBlock>
+                        </StackPanel>
+
+                        <Border Grid.Row="2"
                                 Margin="0,10,0,8"
                                 Background="{StaticResource PixelAlignmentCheckerBrush}"
                                 BorderBrush="{DynamicResource App.BorderBrush}"
@@ -861,7 +892,7 @@
                                                HorizontalAlignment="Center"
                                                Foreground="#FF555C68"
                                                FontSize="10"
-                                               Text="生成后在此显示像素采样结果" />
+                                               Text="刷新预览后在此显示像素采样结果" />
                                 </StackPanel>
                                 <Image x:Name="PixelAlignmentOutputPreview"
                                        Margin="10"
@@ -872,7 +903,7 @@
                             </Grid>
                         </Border>
 
-                        <TextBlock Grid.Row="2"
+                        <TextBlock Grid.Row="3"
                                    Foreground="{DynamicResource App.TextSecondaryBrush}"
                                    FontSize="9"
                                    Text="{Binding ResultSummary}"
@@ -882,7 +913,7 @@
 
                 <Border Grid.Row="2" Style="{StaticResource PixelAlignmentCardStyle}">
                     <StackPanel>
-                        <TextBlock Style="{StaticResource App.PanelHeaderStyle}" Text="当前预览文件" />
+                        <TextBlock Style="{StaticResource App.PanelHeaderStyle}" Text="预览缓存与保存位置" />
                         <TextBlock Margin="0,8,0,0"
                                    Foreground="{DynamicResource App.TextSecondaryBrush}"
                                    FontFamily="Consolas, Microsoft YaHei UI"
@@ -890,6 +921,17 @@
                                    Text="{Binding OutputPreviewPath}"
                                    TextTrimming="CharacterEllipsis"
                                    ToolTip="{Binding OutputPreviewPath}" />
+                        <TextBlock Margin="0,7,0,0"
+                                   Foreground="{DynamicResource App.TextMutedBrush}"
+                                   FontSize="9"
+                                   Text="最近保存" />
+                        <TextBlock Margin="0,2,0,0"
+                                   Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                   FontFamily="Consolas, Microsoft YaHei UI"
+                                   FontSize="9"
+                                   Text="{Binding LastSavedOutputPath}"
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTip="{Binding LastSavedOutputPath}" />
                         <Button x:Name="OpenPixelAlignmentOutputButton"
                                 Margin="0,9,0,0"
                                 Style="{StaticResource PixelAlignmentCompactButtonStyle}"

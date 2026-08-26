@@ -124,6 +124,8 @@ internal static class Program
             Console.WriteLine("PASS  背景剔除纯色与假透明棋盘格、连通/全局模式、原有 Alpha 与原子 PNG 输出可用");
             ImageOutlineSmokeTests.Run();
             Console.WriteLine("PASS  图片描边外/内/中心模式、Alpha 轮廓、扩展画布与原子 PNG 输出可用");
+            ImageProcessingUiSmokeTests.Run(_temporaryRoot);
+            Console.WriteLine("PASS  PS 风格 RGB/HSV 取色状态与图像处理预览缓存字节级发布可用");
             ImageToolIntegrationSmokeTests.Run(_temporaryRoot);
             Console.WriteLine("PASS  图片描边批处理、设置持久化与假透明网格工具集成可用");
             PixelAlignmentSmokeTests.Run();
@@ -999,6 +1001,18 @@ internal static class Program
                 imageOutlineView,
                 "ProcessImageOutlineButton",
                 "图片描边工具缺少单图执行按钮。");
+            var outlineColorPickerButton = RequireNamedElement<Button>(
+                imageOutlineView,
+                "ImageOutlineColorPickerButton",
+                "图片描边工具缺少共享取色器入口。");
+            var outlineResultRefreshButton = RequireNamedElement<Button>(
+                imageOutlineView,
+                "RefreshImageOutlineResultPreviewButton",
+                "图片描边结果区缺少刷新预览按钮。");
+            var outlineResultSaveButton = RequireNamedElement<Button>(
+                imageOutlineView,
+                "SaveImageOutlineResultButton",
+                "图片描边结果区缺少保存结果按钮。");
             var outlineBatchProcessButton = RequireNamedElement<Button>(
                 imageOutlineView,
                 "ProcessImageOutlineBatchButton",
@@ -1012,8 +1026,14 @@ internal static class Program
                 "描边颜色输入绑定");
             True(ReferenceEquals(shell.ImageOutline.BatchItems, outlineBatchDataGrid.ItemsSource),
                 "批处理表格应绑定图片描边队列");
-            True(ReferenceEquals(shell.ImageOutline.ProcessCommand, outlineProcessButton.Command),
-                "单图执行按钮应绑定图片描边命令");
+            True(ReferenceEquals(shell.ImageOutline.RefreshPreviewCommand, outlineProcessButton.Command),
+                "单图入口按钮应绑定图片描边预览刷新命令");
+            True(ReferenceEquals(shell.ImageOutline.ChooseOutlineColorCommand, outlineColorPickerButton.Command),
+                "描边色块应绑定共享取色器命令");
+            True(ReferenceEquals(shell.ImageOutline.RefreshPreviewCommand, outlineResultRefreshButton.Command),
+                "描边结果区应绑定刷新缓存预览命令");
+            True(ReferenceEquals(shell.ImageOutline.SaveResultCommand, outlineResultSaveButton.Command),
+                "描边结果区应绑定确认保存命令");
             True(ReferenceEquals(shell.ImageOutline.ProcessBatchCommand, outlineBatchProcessButton.Command),
                 "批量执行按钮应绑定批量描边命令");
 
@@ -1171,6 +1191,14 @@ internal static class Program
                 backgroundRemovalView,
                 "BackgroundRemovalCheckerGridOverlay",
                 "背景剔除工具缺少可视网格对齐叠加层。");
+            var backgroundResultRefreshButton = RequireNamedElement<Button>(
+                backgroundRemovalView,
+                "RefreshBackgroundRemovalResultPreviewButton",
+                "背景剔除结果区缺少刷新预览按钮。");
+            var backgroundResultSaveButton = RequireNamedElement<Button>(
+                backgroundRemovalView,
+                "SaveBackgroundRemovalResultButton",
+                "背景剔除结果区缺少保存结果按钮。");
             Equal(nameof(BackgroundRemovalViewModel.UseFakeTransparencyGrid),
                 BindingOperations.GetBindingExpression(fakeTransparencyCheckBox, ToggleButton.IsCheckedProperty)?.ParentBinding.Path.Path,
                 "假透明网格开关绑定");
@@ -1189,6 +1217,10 @@ internal static class Program
             Equal(nameof(BackgroundRemovalViewModel.SourcePixelHeight),
                 BindingOperations.GetBindingExpression(checkerOverlay, CheckerGridOverlay.SourcePixelHeightProperty)?.ParentBinding.Path.Path,
                 "网格对齐叠加层源图高度绑定");
+            True(ReferenceEquals(shell.BackgroundRemoval.RefreshPreviewCommand, backgroundResultRefreshButton.Command),
+                "背景剔除结果区应绑定刷新缓存预览命令");
+            True(ReferenceEquals(shell.BackgroundRemoval.SaveResultCommand, backgroundResultSaveButton.Command),
+                "背景剔除结果区应绑定确认保存命令");
 
             var commandConsole = FindDockContent(manager, MainWindow.CommandConsoleContentId) as LayoutAnchorable
                 ?? throw new SmokeTestException("停靠交互测试未找到指令日志面板。");

@@ -5,6 +5,38 @@ development track; versioning policy will be finalized before the first public r
 
 ## Unreleased
 
+## 1.0.13t1 - 2026-08-26
+
+### Added
+
+- Added a reusable Photoshop-style opaque-color picker with a two-dimensional HSV saturation/value
+  surface, Hue spectrum, synchronized HSV/RGB/`#RRGGBB` editing, original/new color comparison, and
+  cancel-without-commit semantics. Image Outline and all three custom Background Removal colors now
+  use the shared service.
+- Added a bounded `Workspace/ImageProcessingPreviews` PNG cache with managed-path validation, full PNG
+  decode verification, active-preview pinning, unique refresh paths, expiration/capacity cleanup, and
+  same-directory atomic publishing to final destinations.
+
+### Changed
+
+- Split single-image Image Outline, Background Removal, and Pixel Alignment into explicit “refresh
+  preview” and “save result” stages. A final output path is no longer required to render the real Core
+  ImageSharp result, and saving publishes the exact preview bytes without rerunning or re-encoding the
+  image operation.
+- Kept the last successful preview visible after parameter edits or refresh failures, while marking it
+  stale and disabling publication until a new matching render succeeds. Batch outline and pixel
+  alignment continue to write each item directly to their selected output directories.
+- Injected one shared preview cache and color-picker service from the Shell, while retaining isolated
+  temporary fallbacks for standalone ViewModel tests and tooling.
+
+### Fixed
+
+- Prevented parameter edits made during a long preview render from incorrectly marking the completed
+  image as current, and kept output-location changes independent from pixel-result validity.
+- Prevented opportunistic cache cleanup from removing a preview that is still displayed and available
+  for confirmation in another docked image tool.
+- Preserved Palette PNG bytes produced by Pixel Alignment when the confirmed preview is saved.
+
 ## 1.0.12t1 - 2026-08-26
 
 ### Changed

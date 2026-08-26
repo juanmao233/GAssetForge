@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
 using GAssetForge.App.Controls;
 using GAssetForge.App.Converters;
 using GAssetForge.App.Services;
@@ -980,9 +981,10 @@ internal static class PixelAlignmentSmokeTests
         }
 
         var viewModel = new PixelAlignmentViewModel(
-            Service,
+            new FailAfterAlignmentCountPixelAlignmentService(Service, successfulAlignmentCount: 2),
             new FixedInputPicker(inputPath),
-            new QueueOutputPicker(outputPath, workingPath));
+            new QueueOutputPicker(outputPath, workingPath),
+            previewCache: new ImageProcessingPreviewCache(Path.Combine(toolRoot, "preview-cache")));
 
         viewModel.ChooseInputCommand.Execute(null);
         Equal(PixelCellSamplingMode.CenterPixel, viewModel.SelectedSamplingMode.Mode,
@@ -1039,22 +1041,67 @@ internal static class PixelAlignmentSmokeTests
         viewModel.Columns = 32;
         viewModel.Rows = 32;
 
+        True(string.IsNullOrWhiteSpace(viewModel.OutputPath), "刷新前不应要求设置最终输出位置");
+        True(viewModel.CanRefreshPreview, "单图预览不得依赖最终输出位置");
+        viewModel.RefreshPreviewCommand.Execute(null);
+        WaitUntil(
+            () => !viewModel.IsBusy && viewModel.IsPreviewCurrent && File.Exists(viewModel.OutputPreviewPath),
+            TimeSpan.FromSeconds(5),
+            "像素对齐 ViewModel 未在超时前完成缓存预览");
+
+        var firstPreviewPath = viewModel.OutputPreviewPath;
+        False(File.Exists(outputPath), "刷新预览不得提前创建最终输出文件");
+        True(firstPreviewPath.Contains("preview-cache", StringComparison.OrdinalIgnoreCase),
+            "单图预览应写入受管缓存目录");
+        viewModel.Columns = 31;
+        True(viewModel.IsPreviewStale, "影响结果的参数变化后旧预览应标记为过期");
+        False(viewModel.CanSaveResult, "过期预览不得保存");
+        Equal(firstPreviewPath, viewModel.OutputPreviewPath, "参数变化后应保留旧预览用于对比");
+        viewModel.Columns = 32;
+        viewModel.RefreshPreviewCommand.Execute(null);
+        WaitUntil(
+            () => !viewModel.IsBusy && viewModel.IsPreviewCurrent &&
+                  !string.Equals(firstPreviewPath, viewModel.OutputPreviewPath, StringComparison.OrdinalIgnoreCase),
+            TimeSpan.FromSeconds(5),
+            "第二次刷新应生成新的缓存路径");
+
+        var currentPreviewPath = viewModel.OutputPreviewPath;
+        var previewBytes = File.ReadAllBytes(currentPreviewPath);
         viewModel.ChooseOutputCommand.Execute(null);
-        True(viewModel.CanProcess, "输入、计划和输出路径就绪后应允许生成");
-        viewModel.ProcessCommand.Execute(null);
+        True(viewModel.CanProcess, "输入、计划和输出路径就绪后应保留旧兼容生成入口");
+        True(viewModel.IsPreviewCurrent, "只修改最终输出位置不应使缓存预览过期");
+        viewModel.SaveResultCommand.Execute(null);
         WaitUntil(
             () => !viewModel.IsBusy && File.Exists(outputPath),
             TimeSpan.FromSeconds(5),
-            "像素对齐 ViewModel 未在超时前完成输出");
+            "像素对齐缓存预览未在超时前发布到最终输出");
 
         using var output = SixLabors.ImageSharp.Image.Load<Rgba32>(outputPath);
         Equal(32, output.Width, "ViewModel 最终输出宽度应等于网格列数");
         Equal(32, output.Height, "ViewModel 最终输出高度应等于网格行数");
-        Equal(Path.GetFullPath(outputPath), viewModel.OutputPreviewPath, "生成结果应立即成为右侧预览源");
+        Equal(
+            Convert.ToHexString(SHA256.HashData(previewBytes)),
+            Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(outputPath))),
+            "最终保存必须原样发布缓存 PNG，不能二次编码调色板文件");
+        Equal(currentPreviewPath, viewModel.OutputPreviewPath, "保存后右侧仍应显示已经确认的缓存预览");
+        Equal(Path.GetFullPath(outputPath), viewModel.LastSavedOutputPath, "正式保存路径应单独记录");
         Equal("对齐结果预览", viewModel.PreviewTitle, "采样结果预览标题");
         Equal("32 × 32 px", viewModel.PreviewSizeText, "采样结果预览尺寸");
-        True(viewModel.StatusText.StartsWith("像素对齐完成：", StringComparison.Ordinal),
+        True(viewModel.StatusText.StartsWith("像素对齐结果已保存：", StringComparison.Ordinal),
             "成功后应回传明确状态");
+
+        viewModel.Rows = 31;
+        viewModel.RefreshPreviewCommand.Execute(null);
+        WaitUntil(
+            () => !viewModel.IsBusy &&
+                  viewModel.StatusText.StartsWith("像素对齐预览刷新失败：", StringComparison.Ordinal),
+            TimeSpan.FromSeconds(5),
+            "模拟刷新失败未在超时前返回");
+        Equal(currentPreviewPath, viewModel.OutputPreviewPath, "刷新失败必须保留上一次预览用于对比");
+        True(File.Exists(currentPreviewPath), "刷新失败不得删除上一次有效缓存预览");
+        True(viewModel.IsPreviewStale, "刷新失败后保留的旧预览必须保持过期状态");
+        False(viewModel.CanSaveResult, "刷新失败后不得发布旧预览");
+        viewModel.Rows = 32;
 
         viewModel.ExportWorkingImageCommand.Execute(null);
         WaitUntil(
@@ -1232,7 +1279,9 @@ internal static class PixelAlignmentSmokeTests
 
         var chooseInput = RequireElement<Button>(view, "ChoosePixelAlignmentInputButton");
         var chooseOutput = RequireElement<Button>(view, "ChoosePixelAlignmentOutputButton");
-        var process = RequireElement<Button>(view, "ProcessPixelAlignmentButton");
+        var refreshPreview = RequireElement<Button>(view, "RefreshPixelAlignmentPreviewButton");
+        var saveResult = RequireElement<Button>(view, "SavePixelAlignmentResultButton");
+        var previewStatus = RequireElement<TextBlock>(view, "PixelAlignmentPreviewStatusText");
         var exportWorking = RequireElement<Button>(view, "ExportPixelAlignmentWorkingButton");
         var surface = RequireElement<PixelAlignmentSurface>(view, "PixelAlignmentSurface");
         var outputPreview = RequireElement<System.Windows.Controls.Image>(view, "PixelAlignmentOutputPreview");
@@ -1256,8 +1305,12 @@ internal static class PixelAlignmentSmokeTests
             "导入按钮命令绑定");
         Equal("ChooseOutputCommand", RequireBindingPath(chooseOutput, ButtonBase.CommandProperty, "输出按钮"),
             "输出按钮命令绑定");
-        Equal("ProcessCommand", RequireBindingPath(process, ButtonBase.CommandProperty, "生成按钮"),
-            "生成按钮命令绑定");
+        Equal("RefreshPreviewCommand", RequireBindingPath(refreshPreview, ButtonBase.CommandProperty, "刷新预览按钮"),
+            "刷新预览按钮命令绑定");
+        Equal("SaveResultCommand", RequireBindingPath(saveResult, ButtonBase.CommandProperty, "保存结果按钮"),
+            "保存结果按钮命令绑定");
+        Equal("PreviewStatusText", RequireBindingPath(previewStatus, TextBlock.TextProperty, "预览状态"),
+            "预览状态绑定");
         Equal("ExportWorkingImageCommand", RequireBindingPath(exportWorking, ButtonBase.CommandProperty, "工作图按钮"),
             "最近邻工作图命令绑定");
         Equal("Columns", RequireBindingPath(columns, TextBox.TextProperty, "自定义列数"),
@@ -1543,5 +1596,50 @@ internal static class PixelAlignmentSmokeTests
             Path.Combine(outputDirectory, suggestedFileName);
 
         public string? SelectOutputDirectory(string? initialDirectory) => outputDirectory;
+    }
+
+    private sealed class FailAfterAlignmentCountPixelAlignmentService(
+        IPixelAlignmentService inner,
+        int successfulAlignmentCount) : IPixelAlignmentService
+    {
+        private int _alignmentCount;
+
+        public PixelAlignmentImageInfo Inspect(string inputPath) => inner.Inspect(inputPath);
+
+        public PixelAlignmentPlan CreatePlan(string inputPath, PixelAlignmentSettings settings) =>
+            inner.CreatePlan(inputPath, settings);
+
+        public PixelAlignmentPlan CreatePlan(int sourceWidth, int sourceHeight, PixelAlignmentSettings settings) =>
+            inner.CreatePlan(sourceWidth, sourceHeight, settings);
+
+        public PixelNearestNeighborUpscaleResult UpscaleNearestNeighborToPng(
+            string inputPath,
+            string outputPath,
+            int scale,
+            PixelCropBounds? cropBounds = null,
+            bool overwrite = false) =>
+            inner.UpscaleNearestNeighborToPng(inputPath, outputPath, scale, cropBounds, overwrite);
+
+        public PixelNearestNeighborUpscaleResult ExportWorkingImageToPng(
+            string inputPath,
+            string outputPath,
+            PixelAlignmentSettings settings,
+            bool overwrite = false) =>
+            inner.ExportWorkingImageToPng(inputPath, outputPath, settings, overwrite);
+
+        public PixelAlignmentResult AlignToPng(
+            string inputPath,
+            string outputPath,
+            PixelAlignmentSettings settings,
+            bool overwrite = false)
+        {
+            _alignmentCount++;
+            if (_alignmentCount > successfulAlignmentCount)
+            {
+                throw new IOException("模拟预览刷新失败");
+            }
+
+            return inner.AlignToPng(inputPath, outputPath, settings, overwrite);
+        }
     }
 }

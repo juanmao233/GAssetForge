@@ -135,6 +135,8 @@ public sealed class ImageOutlineViewModel : ObservableObject
     private readonly IImageOutlineService _service;
     private readonly IImageOutlineInputPicker _inputPicker;
     private readonly IImageOutlineOutputPicker _outputPicker;
+    private readonly IImageProcessingPreviewCache _previewCache;
+    private readonly IColorPickerService _colorPickerService;
     private readonly IWorkbenchLogSink? _workbenchLogSink;
     private readonly RelayCommand _chooseInputCommand;
     private readonly RelayCommand _chooseOutputCommand;
@@ -143,8 +145,11 @@ public sealed class ImageOutlineViewModel : ObservableObject
     private readonly RelayCommand _removeSelectedBatchItemCommand;
     private readonly RelayCommand _clearBatchItemsCommand;
     private readonly AsyncRelayCommand _processCommand;
+    private readonly AsyncRelayCommand _refreshPreviewCommand;
+    private readonly AsyncRelayCommand _saveResultCommand;
     private readonly AsyncRelayCommand _processBatchCommand;
     private readonly RelayCommand _openOutputDirectoryCommand;
+    private readonly RelayCommand _chooseOutlineColorCommand;
     private ImageOutlineModeOption _selectedMode;
     private int _outlineWidth;
     private string _outlineColorHex;
@@ -160,6 +165,10 @@ public sealed class ImageOutlineViewModel : ObservableObject
     private string _inputPath = string.Empty;
     private string _outputPath = string.Empty;
     private string _outputPreviewPath = string.Empty;
+    private string _lastSavedOutputPath = string.Empty;
+    private bool _isPreviewCurrent;
+    private string _previewStatusText = "尚未刷新预览";
+    private long _previewSettingsRevision;
     private ImageOutlineImageInfo? _inputInfo;
     private string? _lastInputDirectory;
     private string? _lastOutputDirectory;
@@ -179,11 +188,15 @@ public sealed class ImageOutlineViewModel : ObservableObject
         bool expandCanvas = true,
         string? lastInputDirectory = null,
         string? lastOutputDirectory = null,
-        IWorkbenchLogSink? workbenchLogSink = null)
+        IWorkbenchLogSink? workbenchLogSink = null,
+        IImageProcessingPreviewCache? previewCache = null,
+        IColorPickerService? colorPickerService = null)
     {
         _service = service ?? throw new ArgumentNullException(nameof(service));
         _inputPicker = inputPicker ?? throw new ArgumentNullException(nameof(inputPicker));
         _outputPicker = outputPicker ?? throw new ArgumentNullException(nameof(outputPicker));
+        _previewCache = previewCache ?? CreateFallbackPreviewCache();
+        _colorPickerService = colorPickerService ?? new DesktopColorPickerService();
         _workbenchLogSink = workbenchLogSink;
         _selectedMode = ResolveMode(placement);
         _outlineWidth = Math.Clamp(width, 1, 128);
@@ -205,9 +218,14 @@ public sealed class ImageOutlineViewModel : ObservableObject
         _clearBatchItemsCommand = new RelayCommand(
             ClearBatchItems,
             () => !IsBusy && BatchItems.Count > 0);
-        _processCommand = new AsyncRelayCommand(ProcessAsync, () => CanProcess);
+        _refreshPreviewCommand = new AsyncRelayCommand(RefreshPreviewAsync, () => CanRefreshPreview);
+        _saveResultCommand = new AsyncRelayCommand(SaveResultAsync, () => CanSaveResult);
+        // Legacy integrations expect one command to both process and write the configured output.
+        // The interactive UI uses the two explicit commands below.
+        _processCommand = new AsyncRelayCommand(ProcessLegacyAsync, () => CanProcess);
         _processBatchCommand = new AsyncRelayCommand(ProcessBatchAsync, () => CanProcessBatch);
-        _openOutputDirectoryCommand = new RelayCommand(OpenOutputDirectory, () => HasOutputPreview);
+        _openOutputDirectoryCommand = new RelayCommand(OpenOutputDirectory, () => HasSavedOutput);
+        _chooseOutlineColorCommand = new RelayCommand(ChooseOutlineColor, () => !IsBusy);
 
         ChooseInputCommand = _chooseInputCommand;
         ChooseOutputCommand = _chooseOutputCommand;
@@ -216,8 +234,11 @@ public sealed class ImageOutlineViewModel : ObservableObject
         RemoveSelectedBatchItemCommand = _removeSelectedBatchItemCommand;
         ClearBatchItemsCommand = _clearBatchItemsCommand;
         ProcessCommand = _processCommand;
+        RefreshPreviewCommand = _refreshPreviewCommand;
+        SaveResultCommand = _saveResultCommand;
         ProcessBatchCommand = _processBatchCommand;
         OpenOutputDirectoryCommand = _openOutputDirectoryCommand;
+        ChooseOutlineColorCommand = _chooseOutlineColorCommand;
         _suppressSettingsChanged = false;
     }
 
@@ -239,6 +260,7 @@ public sealed class ImageOutlineViewModel : ObservableObject
 
             OnPropertyChanged(nameof(ModeDescription));
             OnPropertyChanged(nameof(CanvasBehaviorText));
+            MarkPreviewStale();
             RefreshValidationAndCommands();
             NotifySettingsChanged();
         }
@@ -255,6 +277,7 @@ public sealed class ImageOutlineViewModel : ObservableObject
             if (SetProperty(ref _outlineWidth, normalized))
             {
                 OnPropertyChanged(nameof(CanvasBehaviorText));
+                MarkPreviewStale();
                 RefreshValidationAndCommands();
                 NotifySettingsChanged();
             }
@@ -270,6 +293,7 @@ public sealed class ImageOutlineViewModel : ObservableObject
             if (SetProperty(ref _outlineColorHex, value))
             {
                 OnPropertyChanged(nameof(EffectiveColorHex));
+                MarkPreviewStale();
                 RefreshValidationAndCommands();
                 NotifySettingsChanged();
             }
@@ -299,6 +323,7 @@ public sealed class ImageOutlineViewModel : ObservableObject
             var normalized = Math.Clamp(value, 1, 254);
             if (SetProperty(ref _alphaThreshold, normalized))
             {
+                MarkPreviewStale();
                 RefreshValidationAndCommands();
                 NotifySettingsChanged();
             }
@@ -313,6 +338,8 @@ public sealed class ImageOutlineViewModel : ObservableObject
             if (SetProperty(ref _expandCanvas, value))
             {
                 OnPropertyChanged(nameof(CanvasBehaviorText));
+                MarkPreviewStale();
+                RefreshValidationAndCommands();
                 NotifySettingsChanged();
             }
         }
@@ -480,12 +507,51 @@ public sealed class ImageOutlineViewModel : ObservableObject
             if (SetProperty(ref _outputPreviewPath, value))
             {
                 OnPropertyChanged(nameof(HasOutputPreview));
-                _openOutputDirectoryCommand.RaiseCanExecuteChanged();
+                OnPropertyChanged(nameof(IsPreviewStale));
+                OnPropertyChanged(nameof(CanSaveResult));
+                RaiseCommandStates();
             }
         }
     }
 
     public bool HasOutputPreview => File.Exists(OutputPreviewPath);
+
+    public string LastSavedOutputPath
+    {
+        get => _lastSavedOutputPath;
+        private set
+        {
+            if (SetProperty(ref _lastSavedOutputPath, value))
+            {
+                OnPropertyChanged(nameof(HasSavedOutput));
+                _openOutputDirectoryCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
+
+    public bool HasSavedOutput => File.Exists(LastSavedOutputPath);
+
+    public bool IsPreviewCurrent
+    {
+        get => _isPreviewCurrent;
+        private set
+        {
+            if (SetProperty(ref _isPreviewCurrent, value))
+            {
+                OnPropertyChanged(nameof(IsPreviewStale));
+                OnPropertyChanged(nameof(CanSaveResult));
+                RaiseCommandStates();
+            }
+        }
+    }
+
+    public bool IsPreviewStale => HasOutputPreview && !IsPreviewCurrent;
+
+    public string PreviewStatusText
+    {
+        get => _previewStatusText;
+        private set => SetProperty(ref _previewStatusText, value);
+    }
 
     public string StatusText
     {
@@ -507,15 +573,24 @@ public sealed class ImageOutlineViewModel : ObservableObject
             if (SetProperty(ref _isBusy, value))
             {
                 OnPropertyChanged(nameof(CanProcess));
+                OnPropertyChanged(nameof(CanRefreshPreview));
+                OnPropertyChanged(nameof(CanSaveResult));
                 OnPropertyChanged(nameof(CanProcessBatch));
                 RaiseCommandStates();
             }
         }
     }
 
-    public bool CanProcess => !IsBusy && IsSingleMode && HasInput &&
+    public bool CanRefreshPreview => !IsBusy && IsSingleMode && HasInput && IsConfigurationValid;
+
+    public bool CanSaveResult => !IsBusy && IsSingleMode && IsPreviewCurrent && HasOutputPreview &&
+                                 (string.IsNullOrWhiteSpace(OutputPath) ||
+                                  !PathsEqual(InputPath, OutputPath));
+
+    // The legacy command still requires a configured destination because it refreshes and publishes
+    // in one invocation. The interactive UI uses the output-independent refresh command instead.
+    public bool CanProcess => CanRefreshPreview &&
                               !string.IsNullOrWhiteSpace(OutputPath) &&
-                              IsConfigurationValid &&
                               !PathsEqual(InputPath, OutputPath);
 
     public bool CanProcessBatch => !IsBusy && IsBatchMode &&
@@ -543,9 +618,15 @@ public sealed class ImageOutlineViewModel : ObservableObject
 
     public ICommand ProcessCommand { get; }
 
+    public ICommand RefreshPreviewCommand { get; }
+
+    public ICommand SaveResultCommand { get; }
+
     public ICommand ProcessBatchCommand { get; }
 
     public ICommand OpenOutputDirectoryCommand { get; }
+
+    public ICommand ChooseOutlineColorCommand { get; }
 
     public ImageOutlineToolSettingsSnapshot CaptureSettings() => new(
         SelectedMode.Placement.ToString(),
@@ -568,12 +649,14 @@ public sealed class ImageOutlineViewModel : ObservableObject
 
             var normalized = NormalizeSupportedInput(selected);
             _inputInfo = _service.Inspect(normalized);
+            ClearPreview();
             InputPath = normalized;
             OnPropertyChanged(nameof(InputSizeText));
             _lastInputDirectory = Path.GetDirectoryName(normalized);
             OutputPath = string.Empty;
-            OutputPreviewPath = string.Empty;
-            ResultSummary = "输入图片已就绪；请选择描边 PNG 的输出位置。";
+            LastSavedOutputPath = string.Empty;
+            ResultSummary = "输入图片已就绪；刷新预览不需要先设置输出位置。";
+            PreviewStatusText = "输入已变化，请刷新预览";
             StatusText = $"已选择：{Path.GetFileName(normalized)}";
             NotifySettingsChanged();
         }
@@ -603,9 +686,10 @@ public sealed class ImageOutlineViewModel : ObservableObject
 
             var normalized = EnsurePngPath(selected);
             OutputPath = normalized;
-            OutputPreviewPath = string.Empty;
             _lastOutputDirectory = Path.GetDirectoryName(normalized);
-            StatusText = $"输出位置：{normalized}";
+            StatusText = IsPreviewCurrent
+                ? $"输出位置：{normalized}；当前预览可直接保存。"
+                : $"输出位置：{normalized}";
             NotifySettingsChanged();
         }
         catch (Exception exception) when (IsExpectedOperationException(exception))
@@ -723,47 +807,156 @@ public sealed class ImageOutlineViewModel : ObservableObject
         StatusText = "已清空图片描边批处理队列。";
     }
 
-    private async Task ProcessAsync()
+    private async Task RefreshPreviewAsync()
     {
-        if (!TryBuildSettings(out var settings, out var reason) || !CanProcess)
+        if (!TryBuildSettings(out var settings, out var reason) || !CanRefreshPreview)
         {
-            StatusText = string.IsNullOrWhiteSpace(reason) ? "当前输入、输出或参数尚未就绪。" : reason;
+            StatusText = string.IsNullOrWhiteSpace(reason) ? "当前输入或参数尚未就绪。" : reason;
             return;
         }
 
         var inputPath = InputPath;
-        var outputPath = OutputPath;
+        var settingsRevision = _previewSettingsRevision;
+        var previousPreviewPath = OutputPreviewPath;
+        string? reservedPreviewPath = null;
         IsBusy = true;
-        OutputPreviewPath = string.Empty;
-        StatusText = $"正在添加 {SelectedMode.DisplayName}…";
+        IsPreviewCurrent = false;
+        PreviewStatusText = "正在刷新缓存预览…";
+        StatusText = $"正在添加 {SelectedMode.DisplayName}并刷新预览…";
         _workbenchLogSink?.Write(
             WorkbenchLogLevel.Information,
             LogSource,
-            $"开始图片描边：{Path.GetFileName(inputPath)} · {SelectedMode.DisplayName} {OutlineWidth}px {settings.ColorHex} · 输出 {outputPath}");
+            $"开始刷新图片描边预览：{Path.GetFileName(inputPath)} · {SelectedMode.DisplayName} {OutlineWidth}px {settings.ColorHex}");
         try
         {
+            reservedPreviewPath = _previewCache.ReservePreviewPath("image-outline");
+            _previewCache.PinPreview(reservedPreviewPath);
             var result = await Task.Run(() =>
-                    _service.ApplyOutlineToPng(inputPath, outputPath, settings, overwrite: true))
+                    _service.ApplyOutlineToPng(inputPath, reservedPreviewPath, settings, overwrite: false))
                 .ConfigureAwait(true);
-            OutputPreviewPath = result.OutputPath;
+            var renderedPreviewPath = Path.GetFullPath(result.OutputPath);
+            if (!File.Exists(renderedPreviewPath) || !_previewCache.IsManagedPreviewPath(renderedPreviewPath))
+            {
+                throw new IOException("描边服务未生成有效的受管缓存 PNG。");
+            }
+
+            if (!PathsEqual(reservedPreviewPath, renderedPreviewPath))
+            {
+                _previewCache.PinPreview(renderedPreviewPath);
+                ReleaseSupersededPreview(reservedPreviewPath, renderedPreviewPath);
+                reservedPreviewPath = renderedPreviewPath;
+            }
+
+            if (!PathsEqual(inputPath, InputPath))
+            {
+                ReleaseSupersededPreview(renderedPreviewPath, keepPath: null);
+                PreviewStatusText = "刷新期间输入图片发生变化；已丢弃旧输入的预览结果";
+                StatusText = "图片描边预览已丢弃，请针对当前输入重新刷新。";
+                return;
+            }
+
+            OutputPreviewPath = renderedPreviewPath;
+            var remainsCurrent = settingsRevision == _previewSettingsRevision;
+            IsPreviewCurrent = remainsCurrent;
+            PreviewStatusText = remainsCurrent
+                ? "预览已刷新，可设置输出位置并保存结果"
+                : "刷新期间参数发生变化；结果仅供对比，请再次刷新";
             ResultSummary =
                 $"{result.OutputWidth} × {result.OutputHeight} px · 描边像素 {result.OutlinedPixelCount:N0} · " +
                 $"画布扩展 {result.CanvasExpansion}px";
-            StatusText = $"图片描边完成：{result.OutputPath}";
+            StatusText = remainsCurrent
+                ? "图片描边预览已刷新；尚未写入最终输出位置。"
+                : "图片描边预览已生成，但参数已变化，需要再次刷新。";
+            ReleaseSupersededPreview(previousPreviewPath, renderedPreviewPath);
             _workbenchLogSink?.Write(
                 WorkbenchLogLevel.Success,
                 LogSource,
-                $"图片描边完成：{Path.GetFileName(inputPath)} → {result.OutputPath} · " +
+                $"图片描边缓存预览完成：{Path.GetFileName(inputPath)} · " +
                 $"{result.OutputWidth}×{result.OutputHeight} px · 描边 {result.OutlinedPixelCount:N0} 像素");
         }
         catch (Exception exception) when (IsExpectedOperationException(exception))
         {
-            ResultSummary = "处理失败，输入文件保持不变。";
-            StatusText = $"图片描边失败：{GetOperationErrorMessage(exception)}";
+            ReleaseSupersededPreview(reservedPreviewPath, previousPreviewPath);
+            PreviewStatusText = HasOutputPreview
+                ? "预览刷新失败；保留上一次结果但已标记为过期，不能保存"
+                : "预览刷新失败，尚无可用结果";
+            if (!HasOutputPreview)
+            {
+                ResultSummary = "处理失败，输入文件保持不变。";
+            }
+
+            StatusText = $"图片描边预览失败：{GetOperationErrorMessage(exception)}";
             _workbenchLogSink?.Write(
                 WorkbenchLogLevel.Error,
                 LogSource,
-                $"图片描边失败：{Path.GetFileName(inputPath)} → {outputPath} · {GetOperationErrorMessage(exception)}",
+                $"图片描边预览失败：{Path.GetFileName(inputPath)} · {GetOperationErrorMessage(exception)}",
+                exception: exception);
+        }
+        finally
+        {
+            IsBusy = false;
+        }
+    }
+
+    private async Task ProcessLegacyAsync()
+    {
+        await RefreshPreviewAsync().ConfigureAwait(true);
+        if (!string.IsNullOrWhiteSpace(OutputPath) && CanSaveResult)
+        {
+            await SaveResultAsync().ConfigureAwait(true);
+        }
+    }
+
+    private async Task SaveResultAsync()
+    {
+        if (!CanSaveResult)
+        {
+            StatusText = IsPreviewStale
+                ? "当前预览已过期，请先刷新预览。"
+                : "请先刷新预览并设置最终输出位置。";
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(OutputPath))
+        {
+            ChooseOutput();
+        }
+
+        if (string.IsNullOrWhiteSpace(OutputPath))
+        {
+            return;
+        }
+
+        if (!CanSaveResult)
+        {
+            StatusText = "最终输出路径不能覆盖输入图片，请重新设置输出位置。";
+            return;
+        }
+
+        var previewPath = OutputPreviewPath;
+        var outputPath = OutputPath;
+        IsBusy = true;
+        StatusText = "正在保存当前预览…";
+        try
+        {
+            var publishedPath = await Task.Run(() =>
+                    _previewCache.PublishPreview(previewPath, outputPath, overwrite: true))
+                .ConfigureAwait(true);
+            LastSavedOutputPath = publishedPath;
+            PreviewStatusText = "当前预览已保存；参数变化后需重新刷新";
+            StatusText = $"图片描边结果已保存：{publishedPath}";
+            _workbenchLogSink?.Write(
+                WorkbenchLogLevel.Success,
+                LogSource,
+                $"图片描边预览已原样发布：{publishedPath}");
+        }
+        catch (Exception exception) when (IsExpectedOperationException(exception))
+        {
+            StatusText = $"无法保存图片描边结果：{GetOperationErrorMessage(exception)}";
+            _workbenchLogSink?.Write(
+                WorkbenchLogLevel.Error,
+                LogSource,
+                $"图片描边保存失败：{outputPath} · {GetOperationErrorMessage(exception)}",
                 exception: exception);
         }
         finally
@@ -783,6 +976,7 @@ public sealed class ImageOutlineViewModel : ObservableObject
         var items = BatchItems.ToArray();
         var outputDirectory = Path.GetFullPath(BatchOutputDirectory);
         var reservedPaths = new HashSet<string>(PathComparer);
+        ClearPreview();
         ResetBatchProgress();
         foreach (var item in items)
         {
@@ -828,6 +1022,9 @@ public sealed class ImageOutlineViewModel : ObservableObject
                     item.Message = $"{result.OutputWidth}×{result.OutputHeight} · {result.OutlinedPixelCount:N0} 描边像素";
                     BatchCompletedCount++;
                     OutputPreviewPath = result.OutputPath;
+                    LastSavedOutputPath = result.OutputPath;
+                    IsPreviewCurrent = false;
+                    PreviewStatusText = "批量模式显示最新完成的正式输出";
                     ResultSummary = $"最新完成：{item.FileName} → {Path.GetFileName(result.OutputPath)}";
                 }
                 catch (Exception exception) when (IsExpectedOperationException(exception))
@@ -905,6 +1102,8 @@ public sealed class ImageOutlineViewModel : ObservableObject
         OnPropertyChanged(nameof(IsConfigurationValid));
         OnPropertyChanged(nameof(ConfigurationValidationText));
         OnPropertyChanged(nameof(CanProcess));
+        OnPropertyChanged(nameof(CanRefreshPreview));
+        OnPropertyChanged(nameof(CanSaveResult));
         OnPropertyChanged(nameof(CanProcessBatch));
         RaiseCommandStates();
     }
@@ -918,8 +1117,11 @@ public sealed class ImageOutlineViewModel : ObservableObject
         _removeSelectedBatchItemCommand.RaiseCanExecuteChanged();
         _clearBatchItemsCommand.RaiseCanExecuteChanged();
         _processCommand.RaiseCanExecuteChanged();
+        _refreshPreviewCommand.RaiseCanExecuteChanged();
+        _saveResultCommand.RaiseCanExecuteChanged();
         _processBatchCommand.RaiseCanExecuteChanged();
         _openOutputDirectoryCommand.RaiseCanExecuteChanged();
+        _chooseOutlineColorCommand.RaiseCanExecuteChanged();
     }
 
     private void NotifySettingsChanged()
@@ -934,7 +1136,7 @@ public sealed class ImageOutlineViewModel : ObservableObject
     {
         try
         {
-            var directory = Path.GetDirectoryName(OutputPreviewPath);
+            var directory = Path.GetDirectoryName(LastSavedOutputPath);
             if (!Directory.Exists(directory))
             {
                 StatusText = "输出目录当前不可用。";
@@ -946,6 +1148,72 @@ public sealed class ImageOutlineViewModel : ObservableObject
         catch (Exception exception) when (IsExpectedOperationException(exception))
         {
             StatusText = $"无法打开输出目录：{exception.Message}";
+        }
+    }
+
+    private void ChooseOutlineColor()
+    {
+        var selected = _colorPickerService.PickColor(OutlineColorHex, "选择描边颜色");
+        if (selected is null)
+        {
+            return;
+        }
+
+        OutlineColorHex = selected.Hex;
+        StatusText = $"描边颜色已设置为 {selected.Hex}；请刷新预览。";
+    }
+
+    private void MarkPreviewStale()
+    {
+        _previewSettingsRevision++;
+        var previewPath = OutputPreviewPath;
+        if (string.IsNullOrWhiteSpace(previewPath))
+        {
+            return;
+        }
+
+        if (!File.Exists(previewPath))
+        {
+            ReleaseSupersededPreview(previewPath, keepPath: null);
+            OutputPreviewPath = string.Empty;
+            IsPreviewCurrent = false;
+            PreviewStatusText = "预览缓存已不存在，请重新刷新";
+            return;
+        }
+
+        IsPreviewCurrent = false;
+        PreviewStatusText = "参数已变化；保留上一次预览用于对比，刷新后才能保存";
+    }
+
+    private void ClearPreview()
+    {
+        _previewSettingsRevision++;
+        var previousPreviewPath = OutputPreviewPath;
+        OutputPreviewPath = string.Empty;
+        IsPreviewCurrent = false;
+        PreviewStatusText = "尚未刷新预览";
+        ReleaseSupersededPreview(previousPreviewPath, keepPath: null);
+    }
+
+    private void ReleaseSupersededPreview(string? candidatePath, string? keepPath)
+    {
+        if (string.IsNullOrWhiteSpace(candidatePath) ||
+            PathsEqual(candidatePath, keepPath ?? string.Empty) ||
+            !_previewCache.IsManagedPreviewPath(candidatePath))
+        {
+            return;
+        }
+
+        try
+        {
+            _previewCache.ReleasePreview(candidatePath);
+        }
+        catch (Exception exception) when (IsExpectedOperationException(exception))
+        {
+            _workbenchLogSink?.Write(
+                WorkbenchLogLevel.Warning,
+                LogSource,
+                $"无法清理过期的图片描边预览缓存：{exception.Message}");
         }
     }
 
@@ -1019,6 +1287,14 @@ public sealed class ImageOutlineViewModel : ObservableObject
             return "#000000";
         }
     }
+
+    private static IImageProcessingPreviewCache CreateFallbackPreviewCache() =>
+        new ImageProcessingPreviewCache(
+            Path.Combine(
+                Path.GetTempPath(),
+                "GAssetForge",
+                "Workspace",
+                ImageProcessingPreviewCache.DefaultDirectoryName));
 
     private static string? NormalizeExistingDirectory(string? directory)
     {

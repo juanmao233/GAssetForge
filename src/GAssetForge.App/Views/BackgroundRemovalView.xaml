@@ -72,8 +72,8 @@
                     <Button x:Name="ProcessBackgroundRemovalButton"
                             MinWidth="118"
                             Margin="0,0,0,7"
-                            Command="{Binding ProcessCommand}"
-                            Content="执行背景剔除" />
+                            Command="{Binding RefreshPreviewCommand}"
+                            Content="刷新剔除预览" />
                 </WrapPanel>
                 <StackPanel Grid.Row="0">
                     <TextBlock FontSize="18" FontWeight="SemiBold" Text="背景剔除工具" />
@@ -143,9 +143,25 @@
                                     <TextBlock Margin="0,0,0,5"
                                                Foreground="{DynamicResource App.TextSecondaryBrush}"
                                                Text="自定义颜色（#RRGGBB）" />
-                                    <TextBox x:Name="BackgroundRemovalCustomColorTextBox"
-                                             FontFamily="Consolas"
-                                             Text="{Binding CustomColorHex, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="8" />
+                                            <ColumnDefinition Width="34" />
+                                        </Grid.ColumnDefinitions>
+                                        <TextBox x:Name="BackgroundRemovalCustomColorTextBox"
+                                                 FontFamily="Consolas"
+                                                 Text="{Binding CustomColorHex, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                                        <Button Grid.Column="2"
+                                                Width="34"
+                                                Height="30"
+                                                Padding="0"
+                                                Background="{Binding EffectiveColorHex, Converter={StaticResource StringToBrushConverter}}"
+                                                BorderBrush="{DynamicResource App.BorderStrongBrush}"
+                                                BorderThickness="1"
+                                                Command="{Binding ChooseCustomColorCommand}"
+                                                ToolTip="打开 HSV / RGB 取色器" />
+                                    </Grid>
                                 </StackPanel>
                             </StackPanel>
 
@@ -163,25 +179,29 @@
                                         <ColumnDefinition Width="7" />
                                         <ColumnDefinition Width="*" />
                                     </Grid.ColumnDefinitions>
-                                    <Border Width="30"
+                                    <Button Width="30"
                                             Height="30"
+                                            Padding="0"
                                             Background="{Binding EffectiveCheckerColorAHex, Converter={StaticResource StringToBrushConverter}}"
                                             BorderBrush="{DynamicResource App.BorderStrongBrush}"
                                             BorderThickness="1"
-                                            CornerRadius="3" />
+                                            Command="{Binding ChooseCheckerColorACommand}"
+                                            ToolTip="选择网格颜色 A" />
                                     <TextBox x:Name="BackgroundRemovalCheckerColorATextBox"
                                              Grid.Column="2"
                                              VerticalContentAlignment="Center"
                                              FontFamily="Consolas"
                                              Text="{Binding CheckerColorAHex, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                                              ToolTip="网格颜色 A" />
-                                    <Border Grid.Column="4"
+                                    <Button Grid.Column="4"
                                             Width="30"
                                             Height="30"
+                                            Padding="0"
                                             Background="{Binding EffectiveCheckerColorBHex, Converter={StaticResource StringToBrushConverter}}"
                                             BorderBrush="{DynamicResource App.BorderStrongBrush}"
                                             BorderThickness="1"
-                                            CornerRadius="3" />
+                                            Command="{Binding ChooseCheckerColorBCommand}"
+                                            ToolTip="选择网格颜色 B" />
                                     <TextBox x:Name="BackgroundRemovalCheckerColorBTextBox"
                                              Grid.Column="6"
                                              VerticalContentAlignment="Center"
@@ -401,7 +421,23 @@
                             <RowDefinition Height="*" />
                             <RowDefinition Height="Auto" />
                         </Grid.RowDefinitions>
-                        <TextBlock FontSize="14" FontWeight="SemiBold" Text="透明结果" />
+                        <WrapPanel VerticalAlignment="Center">
+                            <TextBlock Margin="0,0,10,6"
+                                       VerticalAlignment="Center"
+                                       FontSize="14"
+                                       FontWeight="SemiBold"
+                                       Text="透明结果" />
+                            <Button x:Name="RefreshBackgroundRemovalResultPreviewButton"
+                                    MinWidth="88"
+                                    Margin="0,0,7,6"
+                                    Command="{Binding RefreshPreviewCommand}"
+                                    Content="刷新预览" />
+                            <Button x:Name="SaveBackgroundRemovalResultButton"
+                                    MinWidth="88"
+                                    Margin="0,0,0,6"
+                                    Command="{Binding SaveResultCommand}"
+                                    Content="保存结果" />
+                        </WrapPanel>
                         <Border Grid.Row="1"
                                 Margin="0,10,0,8"
                                 Background="{StaticResource TransparencyCheckerBrush}"
@@ -413,18 +449,35 @@
                                 <TextBlock HorizontalAlignment="Center"
                                            VerticalAlignment="Center"
                                            Foreground="#FF525966"
-                                           Text="处理完成后在此预览 Alpha" />
+                                           Text="处理完成后在此预览 Alpha">
+                                    <TextBlock.Style>
+                                        <Style TargetType="{x:Type TextBlock}">
+                                            <Setter Property="Visibility" Value="Visible" />
+                                            <Style.Triggers>
+                                                <DataTrigger Binding="{Binding HasOutputPreview}" Value="True">
+                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                </DataTrigger>
+                                            </Style.Triggers>
+                                        </Style>
+                                    </TextBlock.Style>
+                                </TextBlock>
                                 <Image x:Name="BackgroundRemovalOutputPreview"
                                        Margin="8"
                                        Source="{Binding OutputPreviewPath, Converter={StaticResource FilePathToImageSourceConverter}, ConverterParameter=1000}"
                                        Stretch="Uniform" />
                             </Grid>
                         </Border>
-                        <TextBlock Grid.Row="2"
-                                   Foreground="{DynamicResource App.TextMutedBrush}"
-                                   FontSize="10"
-                                   Text="{Binding ResultSummary}"
-                                   TextWrapping="Wrap" />
+                        <StackPanel Grid.Row="2">
+                            <TextBlock Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                       FontSize="10"
+                                       Text="{Binding PreviewStatusText}"
+                                       TextWrapping="Wrap" />
+                            <TextBlock Margin="0,3,0,0"
+                                       Foreground="{DynamicResource App.TextMutedBrush}"
+                                       FontSize="10"
+                                       Text="{Binding ResultSummary}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
                     </Grid>
                 </Border>
             </Grid>
