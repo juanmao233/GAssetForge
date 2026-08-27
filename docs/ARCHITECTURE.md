@@ -39,6 +39,7 @@ AvalonDock 的模块接口只承担面板拓扑、大小、停靠位置、隐藏
 | --- | --- | --- |
 | `ui-tools` | 工具栏 | 左侧 |
 | `ui-canvas` | 设计画布 / 工作流文档 | 中央 |
+| `art-workspace` | 美术工作区制作 | 中央 `LayoutDocument`；跨工作流、可关闭并从视图菜单恢复 |
 | `ui-properties` | 属性 | 右上 |
 | `ui-layers` | 图层 | 右下 |
 | `ui-project` | Project / Prefab | 画布下方 |
@@ -51,7 +52,7 @@ AvalonDock 的模块接口只承担面板拓扑、大小、停靠位置、隐藏
 | `workflow-blueprint` | Agent 与工具工作流蓝图 | 与 Project 共用画布下方标签停靠区 |
 | `mcp-agent-connection` | MCP Agent 连接管理 | 默认隐藏；拉起后位于宽底部区域 |
 
-`MainWindow` 维护面板注册表。布局恢复时，`AvalonDockLayoutService` 仅根据 `ContentId` 把真实 WPF View 重新挂接到布局模型；恢复失败则重建默认布局。工具栏上下文和属性栏上下文相互独立：稳定的 `ui-properties` host 根据当前活动 dock 页装载单实例属性模块。UI、Tilemap、Icon、背景剔除、图片描边和像素对齐分别使用自己的 Properties View；无专用属性的页面显示稳定空状态。因此属性切换不需要创建第二个属性 ContentId，也不会改变已保存布局结构。
+`MainWindow` 维护面板注册表。布局恢复时，`AvalonDockLayoutService` 仅根据 `ContentId` 把真实 WPF View 重新挂接到布局模型；恢复失败则重建默认布局。工具栏上下文和属性栏上下文相互独立：稳定的 `ui-properties` host 根据当前活动 dock 页装载单实例属性模块。UI、Tilemap、美术工作区、Icon、背景剔除、图片描边和像素对齐分别使用自己的 Properties View；无专用属性的页面显示稳定空状态。因此属性切换不需要创建第二个属性 ContentId，也不会改变已保存布局结构。`art-workspace` 是独立中央文档而不是 `WorkflowKind`，激活它不会改写项目 manifest 中的初始业务模板。
 
 ### 独立状态生命周期
 
@@ -59,6 +60,7 @@ AvalonDock 的模块接口只承担面板拓扑、大小、停靠位置、隐藏
 | --- | --- | --- |
 | 项目清单 | `ProjectWorkspaceService` | `<ProjectRoot>\ProjectSettings\gassetforge.project.json`；项目身份、工作流与 Tilemap 参数 |
 | UI 编辑数据 | `JsonProjectRepository` | `<ProjectRoot>\ProjectSettings\ui-project.pfui.json`；自动保存、备份、导入、导出、Undo / Redo |
+| 美术工作区 | `JsonArtWorkspaceRepository` | `<ProjectRoot>\ProjectSettings\ArtWorkspace\art-workspace.v1.json`；画布、视口、输出框、受管图片摆放与创作意图；参考图复制到 `<ProjectRoot>\Assets\ArtWorkspace\References` |
 | 停靠布局 | `AvalonDockLayoutService` | 窗口关闭保存、启动恢复、可独立重置 |
 | 用户设置 | `UserSettingsService` | 主题、最近项目、Agent/MCP 配置、Codex thread ID + 工作目录、素材生成草稿、背景/棋盘格剔除、图片描边、Icon 相机参数与像素对齐偏好 |
 | 美术风格素材库 | `JsonArtStyleLibraryRepository` | 风格组、人工提示词、统一提示词样本与当前选择即时原子保存；参考图片复制到受管目录 |
@@ -72,6 +74,27 @@ Shell 会在一次项目激活中协调项目清单、UI repository、Project Br
 用户设置或 AvalonDock 布局。用户设置只保存最近项目指针，以及供无项目状态和 MCP 跨进程读取使用的状态
 镜像。删除布局数据不会影响项目文件；删除用户设置会丢失最近项目自动恢复、主题、MCP 和生成页偏好，
 但不会删除磁盘上的正式项目。
+
+### 美术工作区制作
+
+`ArtWorkspaceView` 是 ContentId 为 `art-workspace` 的中央 `LayoutDocument`，提供大尺寸二维画布、可摆放的
+受管参考图片和一个明确的输出框。`ArtWorkspacePropertiesView` 承载输出框参数与对话输入；两者绑定 Shell
+持有的同一个 `ArtWorkspaceViewModel`，因此关闭并从“视图”菜单恢复文档不会复制状态。活动文档上下文与
+`CurrentWorkflow` 分离：切到美术工作区会切换工具栏和属性栏，但不会把它注册成新建项目模板，也不会修改
+项目 manifest 的 workflow key。
+
+项目工作区 JSON 保存画布尺寸、视口、输出框、图片变换、选择状态和对话记录。导入图片先复制到
+`Assets\ArtWorkspace\References`，JSON 只记录位于受管项目根内的相对路径、哈希、媒体类型和像素尺寸；
+无项目状态使用应用 Workspace 下的 `ArtWorkspaceDrafts` 作为隔离草稿。主文件和 `.bak` 独立恢复，路径会
+拒绝绝对地址、目录逃逸和重解析点。导入采用可取消后台流水线，项目切换和保存不会与在途复制竞态；
+工作区最多承载 128 个活动图片对象，预览按 640 px 最大边解码并使用有界版本缓存，避免合法大型素材把
+WPF 进程推入不可控内存占用。属性页的画布图片列表是选择与可见性的权威入口，因此隐藏对象仍可恢复。
+
+当前“提交创作意图”只把用户文本记录为 `captured` 状态，并保存工作区；它不会启动 Agent、调用图像模型、
+写出输出框图片或伪装成已生成资产。`OutputRelativeDirectory` 目前只是未来交付目标，默认值为
+`Assets/Generated/ArtWorkspace`。后续接入 AI 时必须先把提示、参考图快照、输出框几何和项目 Assets 根冻结成
+可审计合同，再由 Agent/图像模型完成创作步骤；Harness 负责路径校验、中间物落盘、结果验证和原子提交。
+任何可见预览或创作意图都不能绕过现有生成任务所有权与受控 `Assets` 交付边界成为 Final asset。
 
 `ArtStyleLibraryView` 是 ContentId 为 `art-style-library` 的跨工作流共享面板。每个风格组保存稳定 ID、名称、
 描述、人工 AI 风格提示词、可选统一提示词样本和多张参考图片元数据；图片导入后以稳定文件名复制到
@@ -429,15 +452,15 @@ loopback 且不返回认证信息。该端口仍不得经代理或端口转发�
 正式项目激活后，`JsonProjectRepository` 切换到项目内 UI 文件，Project 面板固定以
 `<ProjectRoot>\Assets` 为根并默认选中 `Assets\Generated`，且禁止从 Project 面板跳出项目资产边界。
 `user-settings.json` 保存 `lastProjectPath`。启动时若项目目录、manifest、UI 数据和必要子目录通过验证，Shell
-会恢复业务主视图、项目级 Tilemap 参数、UI repository 与 Project 面板；路径失效或主文件和备份均无效时
+会恢复业务主视图、项目级 Tilemap 参数、UI repository、美术工作区 repository 与 Project 面板；路径失效或主文件和备份均无效时
 不会激活该项目，也不会删除原目录。更完整的目录与恢复契约见 [项目工作区说明](PROJECTS.md)。
 
 ### 业务工作流
 
-`WorkflowCatalog` 是模板注册模块。五类工作流在新建项目页中选择；创建前不改变当前工作区，创建成功后把
+`WorkflowCatalog` 是模板注册模块。业务工作流在新建项目页中选择；创建前不改变当前工作区，创建成功后把
 模板 key 写入项目 manifest，并由 `ShellViewModel` 将中央文档切换为 `EditorWorkspaceViewModel`、
 `TilemapWorkspaceViewModel` 或 `WorkflowPlaceholderViewModel`。未实现的业务仍使用相同基础业务面板位置；
-美术风格素材库、蓝图窗口和 MCP 连接面板作为跨工作流共享模块独立复用。蓝图窗口提供系统起始、说明、
+美术工作区制作不属于 `WorkflowKind`，与美术风格素材库、蓝图窗口和 MCP 连接面板一样作为跨工作流共享模块独立复用。蓝图窗口提供系统起始、说明、
 Harness 工具、功能集合与 If 逻辑节点，支持端点和有向无环连线、画布平移缩放、节点整理及项目级 JSON
 持久化。图文件显式版本化、限制为 8 MiB，并拒绝越界路径与重解析点。开始执行时先冻结带类型化路由的版本化计划并独立复验，
 再把计划和审计时间线落入项目 `Assets/Generated/GAssetForge/BlueprintRuns`；`run-state.v1.json` 最后写入并作为 planned 提交标记，
@@ -470,13 +493,14 @@ Shell 的 UI 编辑命令通过 `GatedCommand` 接到稳定 seam：非 UI 工作
 `GAssetForge.SmokeTests` 是无第三方测试框架的 STA WPF 验证程序，使用隔离临时目录。发布前的覆盖
 清单包括：
 
-- 五个业务面板加默认隐藏 MCP 面板的拓扑与稳定 ContentId
+- 正式业务文档、独立 `art-workspace` 文档及默认隐藏 MCP 面板的拓扑与稳定 ContentId
 - AvalonDock 保存、恢复、内容重绑和备份恢复
 - 暗亮主题与非法设置回退
 - 五业务入口、Tilemap 独立网格工作区及 UI 命令门控
 - 文件菜单的新建项目入口、旧业务模板入口移除及选择模板不提前切换工作区
 - Unity 式目录创建、非法名称、重复目录、staging 清理和 Project Browser Assets 边界锁定
 - 项目内 UI repository 与全局兼容工作区隔离，以及工作流、Tilemap 参数和最近项目的重启恢复
+- 美术工作区项目 JSON、参考图受管复制、主备恢复、路径边界、活动文档属性切换与创作意图持久化
 - 图层、文件夹、归组、排序、锁定、透明度、文字与 Prefab
 - Undo / Redo、项目保存重载和轻量会话退出保存
 - MCP 菜单与单实例停靠面板、隐藏/浮动/恢复、Codex profile，以及 OpenCode 不可用状态不被伪装
@@ -499,12 +523,13 @@ Shell 的 UI 编辑命令通过 `GatedCommand` 接到稳定 seam：非 UI 工作
 
 ## 项目 Schema
 
-正式项目包含两个独立的版本化契约：
+正式项目包含彼此独立的版本化契约：
 
 - Project manifest Schema v1：项目 ID、名称、工作流、创建/更新时间及项目级 Tilemap 参数。
 - UI Project Schema v2：documents、layers、Prefab library、editor session 和预留 `workflowGraphs`。
+- Art Workspace Schema v1：画布与视口、输出框、受管图片素材及其摆放、选择状态和创作意图对话。
 
-manifest 与 UI 文件分别回退读取自己的 `.bak`，不能用其中一个文件代替另一个。UI Project Schema v2
+manifest、UI 与 Art Workspace 文件分别回退读取自己的 `.bak`，不能用其中一个文件代替另一个。UI Project Schema v2
 当前包含：
 
 - `documentsById` / `activeDocumentId`

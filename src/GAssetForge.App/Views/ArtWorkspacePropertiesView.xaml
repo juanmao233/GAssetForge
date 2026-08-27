@@ -1,0 +1,387 @@
+<UserControl x:Class="GAssetForge.App.Views.ArtWorkspacePropertiesView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             MinWidth="280"
+             MinHeight="320">
+    <UserControl.Resources>
+        <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
+        <Style x:Key="ArtWorkspacePropertyLabelStyle" TargetType="{x:Type TextBlock}">
+            <Setter Property="Margin" Value="0,0,8,0" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+            <Setter Property="Foreground" Value="{DynamicResource App.TextSecondaryBrush}" />
+            <Setter Property="FontSize" Value="10" />
+        </Style>
+        <Style x:Key="ArtWorkspaceSectionBorderStyle" TargetType="{x:Type Border}">
+            <Setter Property="Margin" Value="0,0,0,10" />
+            <Setter Property="Padding" Value="12" />
+            <Setter Property="Background" Value="{DynamicResource App.SurfaceRaisedBrush}" />
+            <Setter Property="BorderBrush" Value="{DynamicResource App.BorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="6" />
+        </Style>
+    </UserControl.Resources>
+
+    <Grid Background="{DynamicResource App.SurfaceBrush}">
+        <ScrollViewer VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled"
+                      PanningMode="VerticalOnly">
+            <StackPanel Margin="12">
+                <TextBlock Foreground="{DynamicResource App.TextPrimaryBrush}"
+                           FontSize="15"
+                           FontWeight="SemiBold"
+                           Text="美术工作区制作" />
+                <TextBlock Margin="0,4,0,12"
+                           Foreground="{DynamicResource App.TextMutedBrush}"
+                           FontSize="10"
+                           Text="{Binding ProjectContextText}"
+                           TextWrapping="Wrap" />
+
+                <Border Style="{StaticResource ArtWorkspaceSectionBorderStyle}">
+                    <StackPanel>
+                        <DockPanel LastChildFill="True">
+                            <TextBlock DockPanel.Dock="Right"
+                                       Foreground="{DynamicResource App.TextMutedBrush}"
+                                       FontSize="9"
+                                       Text="创作意图 v1" />
+                            <TextBlock Foreground="{DynamicResource App.TextPrimaryBrush}"
+                                       FontSize="12"
+                                       FontWeight="SemiBold"
+                                       Text="对话指令" />
+                        </DockPanel>
+                        <TextBlock Margin="0,5,0,8"
+                                   Foreground="{DynamicResource App.TextMutedBrush}"
+                                   FontSize="9"
+                                   Text="说明希望创建的对象、画面关系、风格、修改范围或输出要求。"
+                                   TextWrapping="Wrap" />
+
+                        <Border MaxHeight="250"
+                                Margin="0,0,0,8"
+                                Padding="7"
+                                Background="{DynamicResource App.InputBackgroundBrush}"
+                                BorderBrush="{DynamicResource App.BorderBrush}"
+                                BorderThickness="1"
+                                CornerRadius="4">
+                            <ScrollViewer x:Name="ArtWorkspaceConversationScrollViewer"
+                                          VerticalScrollBarVisibility="Auto">
+                                <ItemsControl x:Name="ArtWorkspaceConversationList"
+                                              ItemsSource="{Binding Conversation}">
+                                    <ItemsControl.ItemTemplate>
+                                        <DataTemplate>
+                                            <Border x:Name="ConversationBubble"
+                                                    MaxWidth="270"
+                                                    Margin="0,3"
+                                                    Padding="8,6"
+                                                    BorderThickness="1"
+                                                    CornerRadius="5">
+                                                <StackPanel>
+                                                    <DockPanel LastChildFill="True">
+                                                        <TextBlock DockPanel.Dock="Right"
+                                                                   Margin="8,0,0,0"
+                                                                   Foreground="{DynamicResource App.TextMutedBrush}"
+                                                                   FontSize="8"
+                                                                   Text="{Binding TimeText}" />
+                                                        <TextBlock Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                                                   FontSize="9"
+                                                                   FontWeight="SemiBold"
+                                                                   Text="{Binding RoleLabel}" />
+                                                    </DockPanel>
+                                                    <TextBlock Margin="0,4,0,0"
+                                                               Foreground="{DynamicResource App.TextPrimaryBrush}"
+                                                               FontSize="10"
+                                                               Text="{Binding Text}"
+                                                               TextWrapping="Wrap" />
+                                                </StackPanel>
+                                                <Border.Style>
+                                                    <Style TargetType="{x:Type Border}">
+                                                        <Setter Property="HorizontalAlignment" Value="Left" />
+                                                        <Setter Property="Background" Value="{DynamicResource App.SurfaceBrush}" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsUser}" Value="True">
+                                                                <Setter Property="HorizontalAlignment" Value="Right" />
+                                                                <Setter Property="Background" Value="{DynamicResource App.SelectionBrush}" />
+                                                                <Setter Property="BorderBrush" Value="{DynamicResource App.AccentBrush}" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </Border.Style>
+                                            </Border>
+                                        </DataTemplate>
+                                    </ItemsControl.ItemTemplate>
+                                </ItemsControl>
+                            </ScrollViewer>
+                        </Border>
+
+                        <TextBox x:Name="ArtWorkspaceInstructionTextBox"
+                                 MinHeight="92"
+                                 MaxLength="16000"
+                                 AcceptsReturn="True"
+                                 Text="{Binding InstructionDraft, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                 TextWrapping="Wrap"
+                                 VerticalScrollBarVisibility="Auto"
+                                 PreviewKeyDown="ArtWorkspaceInstructionTextBox_OnPreviewKeyDown" />
+                        <DockPanel Margin="0,8,0,0" LastChildFill="True">
+                            <Button x:Name="ArtWorkspaceSubmitInstructionButton"
+                                    DockPanel.Dock="Right"
+                                    MinWidth="96"
+                                    Padding="10,6"
+                                    Command="{Binding SubmitInstructionCommand}"
+                                    Content="加入创作指令"
+                                    Style="{DynamicResource App.PrimaryButtonStyle}" />
+                            <TextBlock Margin="0,0,8,0"
+                                       VerticalAlignment="Center"
+                                       Foreground="{DynamicResource App.TextMutedBrush}"
+                                       FontSize="9"
+                                       Text="Ctrl+Enter 提交"
+                                       TextWrapping="Wrap" />
+                        </DockPanel>
+                        <TextBlock Margin="0,7,0,0"
+                                   Foreground="{DynamicResource App.WarningBrush}"
+                                   FontSize="9"
+                                   Text="{Binding CanSubmitInstructionText}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource ArtWorkspaceSectionBorderStyle}">
+                    <StackPanel>
+                        <TextBlock Foreground="{DynamicResource App.TextPrimaryBrush}"
+                                   FontSize="12"
+                                   FontWeight="SemiBold"
+                                   Text="输出框" />
+                        <TextBlock Margin="0,4,0,9"
+                                   Foreground="{DynamicResource App.TextMutedBrush}"
+                                   FontSize="9"
+                                   Text="该区域用于冻结后续新美术资源的构图位置与画幅。"
+                                   TextWrapping="Wrap" />
+
+                        <TextBlock Style="{StaticResource ArtWorkspacePropertyLabelStyle}" Text="名称" />
+                        <TextBox Margin="0,3,0,8"
+                                 Text="{Binding OutputFrameName, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="8" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <StackPanel Grid.Row="0" Grid.Column="0">
+                                <TextBlock Style="{StaticResource ArtWorkspacePropertyLabelStyle}" Text="X" />
+                                <TextBox Margin="0,3,0,8"
+                                         Text="{Binding OutputFrameX, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.##}}" />
+                            </StackPanel>
+                            <StackPanel Grid.Row="0" Grid.Column="2">
+                                <TextBlock Style="{StaticResource ArtWorkspacePropertyLabelStyle}" Text="Y" />
+                                <TextBox Margin="0,3,0,8"
+                                         Text="{Binding OutputFrameY, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.##}}" />
+                            </StackPanel>
+                            <StackPanel Grid.Row="1" Grid.Column="0">
+                                <TextBlock Style="{StaticResource ArtWorkspacePropertyLabelStyle}" Text="宽度" />
+                                <TextBox Margin="0,3,0,8"
+                                         Text="{Binding OutputFrameWidth, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.##}}" />
+                            </StackPanel>
+                            <StackPanel Grid.Row="1" Grid.Column="2">
+                                <TextBlock Style="{StaticResource ArtWorkspacePropertyLabelStyle}" Text="高度" />
+                                <TextBox Margin="0,3,0,8"
+                                         Text="{Binding OutputFrameHeight, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.##}}" />
+                            </StackPanel>
+                        </Grid>
+
+                        <TextBlock Style="{StaticResource ArtWorkspacePropertyLabelStyle}" Text="输出目录（项目相对路径）" />
+                        <TextBox Margin="0,3,0,8"
+                                 Text="{Binding OutputRelativeDirectory, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                        <StackPanel Orientation="Horizontal">
+                            <Button Padding="9,5"
+                                    Command="{Binding FocusOutputFrameCommand}"
+                                    Content="聚焦输出框"
+                                    Style="{DynamicResource App.ButtonStyle}" />
+                            <Button Margin="8,0,0,0"
+                                    Padding="9,5"
+                                    Command="{Binding SaveCommand}"
+                                    Content="保存"
+                                    Style="{DynamicResource App.ButtonStyle}" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource ArtWorkspaceSectionBorderStyle}">
+                    <StackPanel>
+                        <DockPanel LastChildFill="True">
+                            <TextBlock DockPanel.Dock="Right"
+                                       Foreground="{DynamicResource App.TextMutedBrush}"
+                                       FontSize="9"
+                                       Text="{Binding ImageCountText}" />
+                            <TextBlock Foreground="{DynamicResource App.TextPrimaryBrush}"
+                                       FontSize="12"
+                                       FontWeight="SemiBold"
+                                       Text="画布图片" />
+                        </DockPanel>
+                        <TextBlock Margin="0,4,0,8"
+                                   Foreground="{DynamicResource App.TextMutedBrush}"
+                                   FontSize="9"
+                                   Text="隐藏对象仍保留在这里，可重新选择、显示或使用键盘方向键定位。"
+                                   TextWrapping="Wrap" />
+                        <ListBox x:Name="ArtWorkspaceImageLayerList"
+                                 MaxHeight="190"
+                                 ItemsSource="{Binding Images}"
+                                 SelectedItem="{Binding SelectedImage, Mode=OneWay}"
+                                 SelectionChanged="ArtWorkspaceImageLayerList_OnSelectionChanged"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+                                 ScrollViewer.VerticalScrollBarVisibility="Auto">
+                            <ListBox.ItemContainerStyle>
+                                <Style TargetType="{x:Type ListBoxItem}">
+                                    <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                                    <Setter Property="Padding" Value="6,5" />
+                                </Style>
+                            </ListBox.ItemContainerStyle>
+                            <ListBox.ItemTemplate>
+                                <DataTemplate>
+                                    <Grid>
+                                        <Grid.ColumnDefinitions>
+                                            <ColumnDefinition Width="Auto" />
+                                            <ColumnDefinition Width="*" />
+                                            <ColumnDefinition Width="Auto" />
+                                        </Grid.ColumnDefinitions>
+                                        <CheckBox Grid.Column="0"
+                                                  Margin="0,0,7,0"
+                                                  VerticalAlignment="Center"
+                                                  IsChecked="{Binding IsVisible, Mode=TwoWay}"
+                                                  ToolTip="显示或隐藏此图片" />
+                                        <StackPanel Grid.Column="1" MinWidth="0">
+                                            <TextBlock Foreground="{DynamicResource App.TextPrimaryBrush}"
+                                                       FontSize="10"
+                                                       Text="{Binding Name}"
+                                                       TextTrimming="CharacterEllipsis" />
+                                            <TextBlock Margin="0,2,0,0"
+                                                       Foreground="{DynamicResource App.TextMutedBrush}"
+                                                       FontSize="8"
+                                                       Text="{Binding PixelSizeText}" />
+                                        </StackPanel>
+                                        <TextBlock Grid.Column="2"
+                                                   Margin="8,0,0,0"
+                                                   VerticalAlignment="Center"
+                                                   Foreground="{DynamicResource App.TextMutedBrush}"
+                                                   FontSize="8"
+                                                   Text="{Binding ZIndex, StringFormat=层 {0}}" />
+                                    </Grid>
+                                </DataTemplate>
+                            </ListBox.ItemTemplate>
+                        </ListBox>
+                    </StackPanel>
+                </Border>
+
+                <Border Visibility="{Binding HasSelectedImage, Converter={StaticResource BooleanToVisibilityConverter}}"
+                        Style="{StaticResource ArtWorkspaceSectionBorderStyle}">
+                    <StackPanel DataContext="{Binding SelectedImage}">
+                        <TextBlock Foreground="{DynamicResource App.TextPrimaryBrush}"
+                                   FontSize="12"
+                                   FontWeight="SemiBold"
+                                   Text="所选图片" />
+                        <TextBlock Margin="0,4,0,8"
+                                   Foreground="{DynamicResource App.TextMutedBrush}"
+                                   FontSize="9"
+                                   Text="{Binding AbsolutePath}"
+                                   TextTrimming="CharacterEllipsis"
+                                   ToolTip="{Binding AbsolutePath}" />
+                        <TextBlock Style="{StaticResource ArtWorkspacePropertyLabelStyle}" Text="名称" />
+                        <TextBox Margin="0,3,0,8"
+                                 Text="{Binding Name, Mode=TwoWay, UpdateSourceTrigger=LostFocus}" />
+                        <Grid>
+                            <Grid.ColumnDefinitions>
+                                <ColumnDefinition Width="*" />
+                                <ColumnDefinition Width="8" />
+                                <ColumnDefinition Width="*" />
+                            </Grid.ColumnDefinitions>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto" />
+                                <RowDefinition Height="Auto" />
+                            </Grid.RowDefinitions>
+                            <StackPanel Grid.Row="0" Grid.Column="0">
+                                <TextBlock Style="{StaticResource ArtWorkspacePropertyLabelStyle}" Text="X" />
+                                <TextBox Margin="0,3,0,8"
+                                         Text="{Binding X, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.##}}" />
+                            </StackPanel>
+                            <StackPanel Grid.Row="0" Grid.Column="2">
+                                <TextBlock Style="{StaticResource ArtWorkspacePropertyLabelStyle}" Text="Y" />
+                                <TextBox Margin="0,3,0,8"
+                                         Text="{Binding Y, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.##}}" />
+                            </StackPanel>
+                            <StackPanel Grid.Row="1" Grid.Column="0">
+                                <TextBlock Style="{StaticResource ArtWorkspacePropertyLabelStyle}" Text="宽度" />
+                                <TextBox Margin="0,3,0,8"
+                                         Text="{Binding Width, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.##}}" />
+                            </StackPanel>
+                            <StackPanel Grid.Row="1" Grid.Column="2">
+                                <TextBlock Style="{StaticResource ArtWorkspacePropertyLabelStyle}" Text="高度" />
+                                <TextBox Margin="0,3,0,8"
+                                         Text="{Binding Height, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.##}}" />
+                            </StackPanel>
+                        </Grid>
+                        <TextBlock Style="{StaticResource ArtWorkspacePropertyLabelStyle}" Text="旋转角度" />
+                        <TextBox Margin="0,3,0,8"
+                                 Text="{Binding RotationDegrees, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.##}}" />
+                        <TextBlock Style="{StaticResource ArtWorkspacePropertyLabelStyle}" Text="透明度" />
+                        <Slider Margin="0,4,0,8"
+                                Minimum="0"
+                                Maximum="1"
+                                SmallChange="0.01"
+                                Value="{Binding Opacity, Mode=TwoWay}" />
+                        <StackPanel Orientation="Horizontal">
+                            <CheckBox Margin="0,0,10,0"
+                                      Content="锁定"
+                                      IsChecked="{Binding IsLocked, Mode=TwoWay}" />
+                            <CheckBox Content="显示"
+                                      IsChecked="{Binding IsVisible, Mode=TwoWay}" />
+                        </StackPanel>
+                        <StackPanel Margin="0,10,0,0" Orientation="Horizontal" DataContext="{Binding DataContext, RelativeSource={RelativeSource AncestorType={x:Type UserControl}}}">
+                            <Button Padding="9,5"
+                                    Command="{Binding BringSelectedToFrontCommand}"
+                                    Content="移到最上层"
+                                    Style="{DynamicResource App.ButtonStyle}" />
+                            <Button Margin="8,0,0,0"
+                                    Padding="9,5"
+                                    Command="{Binding RemoveSelectedImageCommand}"
+                                    Content="移除引用"
+                                    Style="{DynamicResource App.ButtonStyle}" />
+                        </StackPanel>
+                    </StackPanel>
+                </Border>
+
+                <Border Style="{StaticResource ArtWorkspaceSectionBorderStyle}">
+                    <StackPanel>
+                        <TextBlock Foreground="{DynamicResource App.TextPrimaryBrush}"
+                                   FontSize="12"
+                                   FontWeight="SemiBold"
+                                   Text="工作区操作" />
+                        <StackPanel Margin="0,8,0,0" Orientation="Horizontal">
+                            <Button x:Name="ArtWorkspacePropertiesImportButton"
+                                    Padding="9,5"
+                                    Command="{Binding ImportImagesCommand}"
+                                    Content="导入图片"
+                                    Style="{DynamicResource App.ButtonStyle}" />
+                            <Button Margin="8,0,0,0"
+                                    Padding="9,5"
+                                    Command="{Binding CancelImportCommand}"
+                                    Content="取消导入"
+                                    Style="{DynamicResource App.ButtonStyle}"
+                                    Visibility="{Binding IsImporting, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                            <Button Margin="8,0,0,0"
+                                    Padding="9,5"
+                                    Command="{Binding ResetViewportCommand}"
+                                    Content="重置视口"
+                                    Style="{DynamicResource App.ButtonStyle}" />
+                        </StackPanel>
+                        <TextBlock Margin="0,8,0,0"
+                                   Foreground="{DynamicResource App.TextMutedBrush}"
+                                   FontSize="9"
+                                   Text="{Binding StatusText}"
+                                   TextWrapping="Wrap" />
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+    </Grid>
+</UserControl>

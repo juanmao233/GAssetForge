@@ -253,7 +253,7 @@
     </Window.Resources>
     <Window.InputBindings>
         <KeyBinding Key="N" Modifiers="Control" Command="{Binding OpenNewProjectCommand}" />
-        <KeyBinding Key="S" Modifiers="Control" Command="{Binding UiSaveCommand}" />
+        <KeyBinding Key="S" Modifiers="Control" Command="{Binding ActiveDocumentSaveCommand}" />
         <KeyBinding Key="Z" Modifiers="Control" Command="{Binding UiUndoCommand}" />
         <KeyBinding Key="Y" Modifiers="Control" Command="{Binding UiRedoCommand}" />
         <KeyBinding Key="F12"
@@ -280,7 +280,7 @@
                           InputGestureText="Ctrl+N"
                           Command="{Binding OpenNewProjectCommand}" />
                 <Separator />
-                <MenuItem Header="保存" InputGestureText="Ctrl+S" Command="{Binding UiSaveCommand}" />
+                <MenuItem Header="保存" InputGestureText="Ctrl+S" Command="{Binding ActiveDocumentSaveCommand}" />
                 <Separator />
                 <MenuItem Header="导入项目…" Command="{Binding UiImportCommand}" />
                 <MenuItem Header="导出项目…" Command="{Binding UiExportCommand}" />
@@ -312,6 +312,11 @@
                           IsCheckable="True"
                           Command="{Binding TogglePanelCommand}"
                           CommandParameter="workspace-parallel-perspective" />
+                <MenuItem x:Name="ShowArtWorkspaceMenuItem"
+                          Header="美术工作区制作"
+                          IsCheckable="True"
+                          Command="{Binding TogglePanelCommand}"
+                          CommandParameter="art-workspace" />
                 <Separator />
                 <MenuItem x:Name="ShowToolsMenuItem" Header="工具面板" Command="{Binding ShowPanelCommand}" CommandParameter="ui-tools" />
                 <MenuItem x:Name="ShowPropertiesMenuItem" Header="属性面板" Command="{Binding ShowPanelCommand}" CommandParameter="ui-properties" />
@@ -396,7 +401,7 @@
                             CommandParameter="asset-generation"
                             Content="✦  素材生成" />
                     <Separator Margin="10,1" />
-                    <Button Width="34" Height="34" ToolTip="保存" Command="{Binding UiSaveCommand}" Content="💾" />
+                    <Button Width="34" Height="34" ToolTip="保存" Command="{Binding ActiveDocumentSaveCommand}" Content="💾" />
                     <Button Width="34" Height="34" Margin="6,0,0,0" ToolTip="撤销" Command="{Binding UiUndoCommand}" Content="↶" />
                     <Button Width="34" Height="34" Margin="6,0,0,0" ToolTip="重做" Command="{Binding UiRedoCommand}" Content="↷" />
                 </StackPanel>
@@ -413,7 +418,7 @@
                             <Style TargetType="StackPanel">
                                 <Setter Property="Visibility" Value="Visible" />
                                 <Style.Triggers>
-                                    <DataTrigger Binding="{Binding IsUiWorkspace}" Value="False">
+                                    <DataTrigger Binding="{Binding IsUiDocumentActive}" Value="False">
                                         <Setter Property="Visibility" Value="Collapsed" />
                                     </DataTrigger>
                                 </Style.Triggers>
@@ -457,7 +462,7 @@
                         <Style TargetType="StackPanel">
                             <Setter Property="Visibility" Value="Visible" />
                             <Style.Triggers>
-                                <DataTrigger Binding="{Binding IsUiWorkspace}" Value="False">
+                                <DataTrigger Binding="{Binding IsUiDocumentActive}" Value="False">
                                     <Setter Property="Visibility" Value="Collapsed" />
                                 </DataTrigger>
                             </Style.Triggers>

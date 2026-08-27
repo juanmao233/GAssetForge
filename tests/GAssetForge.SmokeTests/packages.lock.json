@@ -31,7 +31,7 @@
           "Dirkster.AvalonDock": "[4.74.1, )",
           "Dirkster.AvalonDock.Themes.VS2013": "[4.74.1, )",
           "ExcelDataReader": "[3.9.0, )",
-          "GAssetForge.Core": "[1.0.17, )"
+          "GAssetForge.Core": "[1.0.20, )"
         }
       },
       "gassetforge.core": {
@@ -43,7 +43,7 @@
       "gassetforge.mcpserver": {
         "type": "Project",
         "dependencies": {
-          "GAssetForge.Core": "[1.0.17, )"
+          "GAssetForge.Core": "[1.0.20, )"
         }
       }
     }

@@ -72,6 +72,10 @@ internal static class Program
             Console.WriteLine("PASS  server_info、MCP initialize 与 EXE ProductVersion 使用同一正式程序集版本");
             DefaultDockLayoutHasStableTopology();
             Console.WriteLine("PASS  默认停靠布局包含可中央标签化的工具页、可关闭主视图及顶部标签拓扑");
+            ArtWorkspaceSmokeTests.Run(_temporaryRoot);
+            Console.WriteLine("PASS  美术工作区双图导入、受管持久化、项目隔离、恢复安全与停靠属性上下文可用");
+            FilePathToImageSourceConverterSmokeTests.Run(_temporaryRoot);
+            Console.WriteLine("PASS  图片预览解码同时限制宽高与总像素，并按文件版本安全复用缓存");
             IconDesignSettingsLoadAndPersistImmediately();
             Console.WriteLine("PASS  Icon 图标制作相机与画幅参数可从用户设置加载并即时持久化");
             DockPanelsFloatHideAndRestoreFromViewMenu();
@@ -758,7 +762,8 @@ internal static class Program
                 (Name: "ShowUiWorkspaceMenuItem", ContentId: MainWindow.CanvasContentId),
                 (Name: "ShowTilemapWorkspaceMenuItem", ContentId: MainWindow.TilemapWorkspaceContentId),
                 (Name: "ShowCardDesignWorkspaceMenuItem", ContentId: MainWindow.CardDesignWorkspaceContentId),
-                (Name: "ShowParallelPerspectiveWorkspaceMenuItem", ContentId: MainWindow.ParallelPerspectiveWorkspaceContentId)
+                (Name: "ShowParallelPerspectiveWorkspaceMenuItem", ContentId: MainWindow.ParallelPerspectiveWorkspaceContentId),
+                (Name: "ShowArtWorkspaceMenuItem", ContentId: MainWindow.ArtWorkspaceContentId)
             };
             foreach (var entry in workflowMenuEntries)
             {
@@ -1456,8 +1461,8 @@ internal static class Program
                 .FirstOrDefault(pane => !pane.IsHostedInFloatingWindow);
             True(documentPane is not null,
                 "关闭页面 UI 文档后中央仍应保留可接收任意标签页的 LayoutDocumentPane");
-            Equal(3, documentPane!.ChildrenCount,
-                "关闭一个业务窗口不应销毁其它 Tilemap、卡牌和平行透视文档");
+            Equal(4, documentPane!.ChildrenCount,
+                "关闭一个业务窗口不应销毁其它 Tilemap、卡牌、平行透视与美术工作区文档");
 
             shell.ShowPanelCommand.Execute(MainWindow.CanvasContentId);
             var restoredCanvas = FindDockContent(manager, MainWindow.CanvasContentId) as LayoutDocument
@@ -1832,6 +1837,7 @@ internal static class Program
                 [MainWindow.TilemapWorkspaceContentId] = NewPanelHost(),
                 [MainWindow.CardDesignWorkspaceContentId] = NewPanelHost(),
                 [MainWindow.ParallelPerspectiveWorkspaceContentId] = NewPanelHost(),
+                [MainWindow.ArtWorkspaceContentId] = NewPanelHost(),
                 [MainWindow.PropertiesContentId] = NewPanelHost(),
                 [MainWindow.LayersContentId] = NewPanelHost(),
                 [MainWindow.ProjectContentId] = NewPanelHost(),
@@ -5302,6 +5308,7 @@ internal static class Program
                 [MainWindow.TilemapWorkspaceContentId] = NewPanelHost(),
                 [MainWindow.CardDesignWorkspaceContentId] = NewPanelHost(),
                 [MainWindow.ParallelPerspectiveWorkspaceContentId] = NewPanelHost(),
+                [MainWindow.ArtWorkspaceContentId] = NewPanelHost(),
                 [MainWindow.PropertiesContentId] = NewPanelHost(),
                 [MainWindow.LayersContentId] = NewPanelHost(),
                 [MainWindow.ProjectContentId] = NewPanelHost(),
@@ -5350,20 +5357,20 @@ internal static class Program
                  FindDockContent(optionalManager, MainWindow.ParallelPerspectiveWorkspaceContentId) is LayoutDocument,
                 "关闭一个业务文档不得影响其它业务文档的布局恢复");
 
-            var revisionTwelveLayout = File.ReadAllText(paths.LayoutPath);
-            var revisionElevenLayout = revisionTwelveLayout.Replace(
+            var revisionThirteenLayout = File.ReadAllText(paths.LayoutPath);
+            var revisionTwelveLayout = revisionThirteenLayout.Replace(
+                "\"presetRevision\": 13",
                 "\"presetRevision\": 12",
-                "\"presetRevision\": 11",
                 StringComparison.Ordinal);
-            False(string.Equals(revisionTwelveLayout, revisionElevenLayout, StringComparison.Ordinal),
+            False(string.Equals(revisionThirteenLayout, revisionTwelveLayout, StringComparison.Ordinal),
                 "布局迁移测试必须真实降级 presetRevision");
-            File.WriteAllText(paths.LayoutPath, revisionElevenLayout);
-            var revisionElevenManager = new DockingManager();
-            False(layoutService.TryRestore(revisionElevenManager, restoredContent),
-                "缺少 Icon 图标制作的 rev11 布局应回退到 rev12 默认布局");
+            File.WriteAllText(paths.LayoutPath, revisionTwelveLayout);
+            var revisionTwelveManager = new DockingManager();
+            False(layoutService.TryRestore(revisionTwelveManager, restoredContent),
+                "缺少美术工作区制作的 rev12 布局应回退到 rev13 默认布局");
             Equal("default", layoutService.LastRecoverySource,
                 "旧布局版本应明确标记为默认布局回退");
-            File.WriteAllText(paths.LayoutPath, revisionTwelveLayout);
+            File.WriteAllText(paths.LayoutPath, revisionThirteenLayout);
             layoutService = new AvalonDockLayoutService(paths);
 
             layoutService.Save(sourceManager);
@@ -6112,6 +6119,8 @@ internal static class Program
             ?? throw new SmokeTestException("卡牌设计业务文档缺少稳定 host。");
         var parallelHost = FindDockContent(manager, MainWindow.ParallelPerspectiveWorkspaceContentId)?.Content as ContentControl
             ?? throw new SmokeTestException("平行透视业务文档缺少稳定 host。");
+        var artWorkspaceHost = FindDockContent(manager, MainWindow.ArtWorkspaceContentId)?.Content as ContentControl
+            ?? throw new SmokeTestException("美术工作区文档缺少稳定 host。");
         True(uiHost.Content is CanvasDocumentView,
             "页面 UI 业务文档应承载独立 CanvasDocumentView");
         True(tilemapHost.Content is TilemapWorkspaceView,
@@ -6132,6 +6141,8 @@ internal static class Program
                  }
              },
             "平行透视角物体制作应拥有稳定的正常业务文档页");
+        True(artWorkspaceHost.Content is ArtWorkspaceView,
+            "美术工作区制作应承载独立 ArtWorkspaceView");
     }
 
     private static void AssertDefaultTopology(DockingManager manager)
@@ -6146,6 +6157,7 @@ internal static class Program
             MainWindow.TilemapWorkspaceContentId,
             MainWindow.CardDesignWorkspaceContentId,
             MainWindow.ParallelPerspectiveWorkspaceContentId,
+            MainWindow.ArtWorkspaceContentId,
             MainWindow.PropertiesContentId,
             MainWindow.LayersContentId,
             MainWindow.ProjectContentId,
@@ -6171,7 +6183,8 @@ internal static class Program
             MainWindow.CanvasContentId,
             MainWindow.TilemapWorkspaceContentId,
             MainWindow.CardDesignWorkspaceContentId,
-            MainWindow.ParallelPerspectiveWorkspaceContentId
+            MainWindow.ParallelPerspectiveWorkspaceContentId,
+            MainWindow.ArtWorkspaceContentId
         };
         foreach (var contentId in documentIds)
         {

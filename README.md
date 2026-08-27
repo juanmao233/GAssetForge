@@ -44,13 +44,17 @@ dotnet run --project .\tests\GAssetForge.SmokeTests\GAssetForge.SmokeTests.cspro
 
 Smoke test 使用独立临时数据根，不会改写 `%LocalAppData%` 中的真实项目。
 
-## 正式 Windows 发行
+## Windows 构建与正式发行
 
-同时发布桌面端与 Agent MCP Server：
+本地开发验证可同时构建桌面端与 Agent MCP Server：
 
 ```powershell
 .\scripts\publish-distribution-windows-x64.ps1
 ```
+
+该脚本只用于开发机便携构建，不是正式发布入口。维护者发布 TEST/BETA/STABLE 包时必须使用
+Release Center 的隔离构建流程：从已提交且测试通过的源码快照构建，生成 `release-info.json`、
+`SHA256SUMS.txt` 与来源证明，并以完整 payload 替换发行目录，禁止把旧目录与新文件合并覆盖。
 
 默认产物目录为 `dist\GAssetForge-win-x64`，包含：
 
@@ -77,7 +81,7 @@ mcp-config.example.json          外部 MCP 客户端的手动配置示例
 - 页面 UI 设计工具：创建项目后进入原生编辑器
 - 测试模板：创建项目后显示 HTML 原型迁移说明
 
-页面 UI 设计工具当前提供：
+桌面工作台当前提供：
 
 - 移动工具、文字工具
 - 原生 WPF 设计画布、选择与拖动
@@ -90,6 +94,7 @@ mcp-config.example.json          外部 MCP 客户端的手动配置示例
 - Undo / Redo、自动保存、导入与导出
 - 暗色 / 亮色主题
 - AvalonDock 布局保存、恢复与重置
+- 可停靠的美术工作区制作：作为独立中央文档提供大型网格画布，可导入或拖放多张参考图片、选择与移动对象、滚轮缩放、中/右键平移，并通过唯一输出框约束未来新美术资源的构图位置与画幅；属性栏提供对话式创作指令、输出框参数、所选图片属性和可恢复隐藏对象的图片列表，`Ctrl+S` 会保存当前工作区。工作区数据按项目保存到 `ProjectSettings/ArtWorkspace/art-workspace.v1.json`，参考图受管复制到 `Assets/ArtWorkspace/References`；当前版本只记录创作意图，不会虚报 AI 已完成生成
 - 可停靠的美术风格素材库：可从“视图”菜单勾选开启/隐藏，并支持风格分组、多图参考、描述、人工 AI 风格提示词与当前选择持久化；“分析生成统一提示词”会让已连接 Agent 一次检查当前组全部参考图，并把可复用提示词、摘要、素材指纹、分析器版本和生成时间保存为独立样本，不覆盖人工提示词
 - 可停靠的素材生成页：生成设置、任务表格、发布控制、当前批次、Agent 反馈、人工接力和生成产物按顺序纵向排列，紧凑窗口以上下滚动为主；生成步骤现支持 Tilemap 制作与 Icon 图标制作，可手工填写描述、数量与输出目录，也可导入 `.xlsx/.xls/.csv/.tsv`，先在 Excel 风格预览中选择工作表、描述列和有效行，再追加或原子替换任务表；Icon 步骤发布时冻结当前制作模式、画幅、相机投影、生成角度描述和背景合同，Assets 根下的默认最终目录为 `Generated/Icon/<batchId>/Final`；默认开启“统一提示词优先”，新鲜样本会直接冻结进任务并跳过重复参考图分析，样本缺失或过期则明确回退到描述、人工提示词与参考图；可把指定纯色底作为第一道生成工序，由 Agent 写入 staging、GAssetForge 本地逐张剔色后再交付透明 PNG；大批次按最多五项拆成串行 Agent Turn，并在 Responses 流中断时保留原 Pending 任务、停止后续分块，不会把基础设施故障扩增成美术自动重做任务
 - 可停靠的背景剔除工具：支持洋红、绿、蓝、黑、白和自定义 `#RRGGBB`，也可使用两种自定义颜色剔除 AI 输出的假透明棋盘格；默认同时识别画布外侧与物体镂空区域内部的背景色，可关闭后恢复“仅处理与画布边缘连通底色”的保护模式；自定义色与棋盘格 A/B 色可调用共享 HSV/RGB 取色器；可选网格对齐会按格子尺寸、X/Y 偏移和边界容差限制预期底色，并在原图预览上显示对齐网格，降低误删主体颜色的风险
@@ -102,7 +107,7 @@ mcp-config.example.json          外部 MCP 客户端的手动配置示例
 
 ## Agent Runtime 与 MCP 接入
 
-在桌面端选择 `MCP 接入 → 打开 Agent 连接面板`，会拉起 ContentId 为 `mcp-agent-connection` 的单实例
+在桌面端选择 `视图 → MCP Agent 接入`，会拉起 ContentId 为 `mcp-agent-connection` 的单实例
 AvalonDock 面板。它可像属性、图层和项目面板一样停靠、浮动或隐藏，停靠位置和隐藏状态随工作区布局
 持久化。选择 Codex 并启动 Agent 会话后，桌面端先启动并健康检查
 `GAssetForge.McpServer.exe`，再以当前项目根目录（无正式项目时使用 Project 面板根目录）启动受管

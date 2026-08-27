@@ -1,0 +1,45 @@
+<UserControl x:Class="GAssetForge.App.Views.ArtWorkspaceToolPaletteView"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             MinWidth="78">
+    <Grid Background="{DynamicResource App.SurfaceBrush}">
+        <StackPanel Margin="8">
+            <TextBlock Margin="0,2,0,8"
+                       HorizontalAlignment="Center"
+                       Foreground="{DynamicResource App.TextMutedBrush}"
+                       FontSize="9"
+                       Text="美术画布" />
+            <Button x:Name="ArtWorkspaceToolSelectButton"
+                    MinHeight="54"
+                    Padding="4"
+                    ToolTip="单击选择并拖动图片对象">
+                <StackPanel>
+                    <TextBlock HorizontalAlignment="Center" FontSize="18" Text="↖" />
+                    <TextBlock Margin="0,3,0,0" HorizontalAlignment="Center" FontSize="9" Text="选择移动" />
+                </StackPanel>
+            </Button>
+            <Button x:Name="ArtWorkspaceToolImportButton"
+                    MinHeight="54"
+                    Margin="0,7,0,0"
+                    Padding="4"
+                    Command="{Binding ImportImagesCommand}"
+                    ToolTip="导入一张或多张参考图片">
+                <StackPanel>
+                    <TextBlock HorizontalAlignment="Center" FontSize="18" Text="＋" />
+                    <TextBlock Margin="0,3,0,0" HorizontalAlignment="Center" FontSize="9" Text="导入图片" />
+                </StackPanel>
+            </Button>
+            <Button x:Name="ArtWorkspaceToolOutputButton"
+                    MinHeight="54"
+                    Margin="0,7,0,0"
+                    Padding="4"
+                    Command="{Binding FocusOutputFrameCommand}"
+                    ToolTip="聚焦新美术资源输出框">
+                <StackPanel>
+                    <TextBlock HorizontalAlignment="Center" FontSize="17" Text="▣" />
+                    <TextBlock Margin="0,3,0,0" HorizontalAlignment="Center" FontSize="9" Text="输出框" />
+                </StackPanel>
+            </Button>
+        </StackPanel>
+    </Grid>
+</UserControl>

@@ -22,6 +22,10 @@ public sealed class ProjectPaths
         PackagesDirectory = Path.Combine(RootDirectory, "Packages");
         ProjectSettingsDirectory = Path.Combine(RootDirectory, "ProjectSettings");
         BlueprintDirectory = Path.Combine(ProjectSettingsDirectory, "Blueprints");
+        ArtWorkspaceDirectory = Path.Combine(ProjectSettingsDirectory, "ArtWorkspace");
+        ArtWorkspacePath = Path.Combine(ArtWorkspaceDirectory, "art-workspace.v1.json");
+        ArtWorkspaceBackupPath = $"{ArtWorkspacePath}.bak";
+        ArtWorkspaceReferenceDirectory = Path.Combine(AssetDirectory, "ArtWorkspace", "References");
         BlueprintRunDirectory = Path.Combine(GeneratedAssetDirectory, "GAssetForge", "BlueprintRuns");
         var canonicalManifestPath = Path.Combine(ProjectSettingsDirectory, ManifestFileName);
         var legacyManifestPath = Path.Combine(ProjectSettingsDirectory, LegacyManifestFileName);
@@ -46,6 +50,14 @@ public sealed class ProjectPaths
     public string ProjectSettingsDirectory { get; }
 
     public string BlueprintDirectory { get; }
+
+    public string ArtWorkspaceDirectory { get; }
+
+    public string ArtWorkspacePath { get; }
+
+    public string ArtWorkspaceBackupPath { get; }
+
+    public string ArtWorkspaceReferenceDirectory { get; }
 
     public string BlueprintRunDirectory { get; }
 

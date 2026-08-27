@@ -5,6 +5,49 @@ development track; versioning policy will be finalized before the first public r
 
 ## Unreleased
 
+## 1.0.20t1 - 2026-08-27
+
+### Added
+
+- Added the central `art-workspace` document for Lovart-style visual composition: users can import or
+  drag multiple managed reference images onto a large grid canvas, select and move them, and position
+  or resize one explicit output frame for a future generated art asset.
+- Added a context-sensitive Art Workspace Properties view with conversation history, a `Ctrl+Enter`
+  creation-intent input, output-frame controls, and selected-image transforms, visibility, locking,
+  opacity, and layer ordering.
+- Added project-scoped Art Workspace persistence under
+  `ProjectSettings/ArtWorkspace/art-workspace.v1.json`, managed reference copies under
+  `Assets/ArtWorkspace/References`, backup recovery, draft fallback, hash reuse, and path-boundary
+  validation. A workspace accepts up to 128 active reference objects and a 16 MiB serialized document,
+  while individual imports are constrained by file size, dimensions, and total source pixels.
+
+### Changed
+
+- Registered Art Workspace as an independent AvalonDock document instead of a business template, so
+  opening it changes the tool and property context without replacing the current project workflow.
+- Made canvas navigation available over both images and the output frame: pointer-anchored wheel zoom,
+  middle/right-button panning, right-button double-click reset, and focus-all/output-frame actions.
+- Moved managed image import to a cancellable background pipeline with progress feedback, while
+  preventing project switches and persistence snapshots from racing an in-flight import.
+- Bounded workspace preview decoding by both dimensions and total pixels, with file-version-aware
+  cache invalidation and a small shared LRU to keep large or repeated references memory-safe.
+- Added a keyboard-accessible image list in Properties so hidden references remain selectable and can
+  be shown again; standard `Ctrl+S`, File Save, and the toolbar Save button now target Art Workspace
+  when that document is active.
+- Bumped the docking preset revision to 13 while keeping the Art Workspace document optional, so users
+  can close it and restore it later from the View menu without losing project data.
+
+### Fixed
+
+- Synchronized active business-document identity with workflow activation so Tilemap, card, and
+  perspective documents cannot accidentally execute hidden Page UI editor save/import/zoom commands.
+- Preserved Blueprint and Art Workspace tool contexts when shared auxiliary panels receive focus, and
+  moved the shell to a neutral document state when every central document is closed.
+- Recovered from semantically invalid Art Workspace JSON through the valid backup instead of allowing
+  null fields, malformed paths, or corrupt image metadata to abort application startup.
+- Preserved pending auto-saves across cancelled or failed imports, avoided rewriting corrupt files
+  merely by opening a safe-default recovery view, and included rotated image corners in Focus All.
+
 ## 1.0.19t1 - 2026-08-26
 
 ### Added
@@ -25,6 +68,13 @@ development track; versioning policy will be finalized before the first public r
 - Removed rounding drift when matching scaled screenshots or other checkerboards with fractional cell
   geometry, and applied boundary tolerance symmetrically on both sides of every cell edge.
 - Prevented cancelled or invalid ruler gestures from overwriting the last committed grid alignment.
+
+## 1.0.18t1 - 2026-08-26
+
+### Changed
+
+- Published a packaging-only TEST revision of the fractional checker-grid ruler build. It was
+  superseded by `1.0.19t1` without an additional source feature delta.
 
 ## 1.0.17t1 - 2026-08-26
 

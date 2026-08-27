@@ -9,7 +9,8 @@ namespace GAssetForge.SmokeTests;
 
 internal static class ReleaseVersionConsistencySmokeTests
 {
-    private const string ExpectedReleaseVersion = "1.0.19t1";
+    private const string ExpectedReleaseVersion = "1.0.20t1";
+    private const string ExpectedFileVersion = "1.0.20.0";
 
     public static async Task RunAsync(string temporaryRoot)
     {
@@ -57,9 +58,14 @@ internal static class ReleaseVersionConsistencySmokeTests
             throw new InvalidOperationException($"版本一致性测试缺少桌面 EXE：{desktopExecutablePath}");
         }
 
-        var executableProductVersion = FileVersionInfo
-            .GetVersionInfo(desktopExecutablePath)
-            .ProductVersion;
+        var desktopVersionInfo = FileVersionInfo.GetVersionInfo(desktopExecutablePath);
+        var mcpExecutablePath = Path.Combine(AppContext.BaseDirectory, "GAssetForge.McpServer.exe");
+        if (!File.Exists(mcpExecutablePath))
+        {
+            throw new InvalidOperationException($"版本一致性测试缺少 MCP EXE：{mcpExecutablePath}");
+        }
+
+        var mcpVersionInfo = FileVersionInfo.GetVersionInfo(mcpExecutablePath);
 
         Equal(ExpectedReleaseVersion, assemblyInformationalVersion,
             "程序集正式 InformationalVersion");
@@ -67,8 +73,14 @@ internal static class ReleaseVersionConsistencySmokeTests
             "server_info.version 必须读取程序集 InformationalVersion");
         Equal(assemblyInformationalVersion, initializeVersion,
             "MCP initialize.serverInfo.version 必须读取程序集 InformationalVersion");
-        Equal(assemblyInformationalVersion, executableProductVersion,
+        Equal(assemblyInformationalVersion, desktopVersionInfo.ProductVersion,
             "GAssetForge.exe ProductVersion 必须与程序集 InformationalVersion 完全一致");
+        Equal(assemblyInformationalVersion, mcpVersionInfo.ProductVersion,
+            "GAssetForge.McpServer.exe ProductVersion 必须与程序集 InformationalVersion 完全一致");
+        Equal(ExpectedFileVersion, desktopVersionInfo.FileVersion,
+            "GAssetForge.exe FileVersion 必须与正式文件版本完全一致");
+        Equal(ExpectedFileVersion, mcpVersionInfo.FileVersion,
+            "GAssetForge.McpServer.exe FileVersion 必须与正式文件版本完全一致");
     }
 
     private static void Equal(string expected, string? actual, string message)

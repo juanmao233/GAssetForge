@@ -8,9 +8,13 @@ perspective, geometry, style, size, and delivery constraints.
 ## Domain language
 
 - **Project** — an isolated Unity-style directory containing `Assets`, `Packages`, and
-  `ProjectSettings`; it is the authority for workflow and Tilemap parameters.
+  `ProjectSettings`; it is the authority for workflow, Tilemap parameters, and art-workspace
+  composition state.
 - **Workflow** — a business template such as Tilemap, card, parallel-perspective object, UI design,
   or test. A workflow selects the main dock document and its constraint module.
+- **Art creation workspace** — the cross-workflow central `LayoutDocument` identified by
+  `art-workspace`. It is not a `WorkflowKind`: its large canvas composes managed reference images
+  around an output frame, while its Properties module captures the user's creation intent.
 - **Blueprint workspace** — the dockable, project-persisted graph editor for describing Agent,
   Harness tool, condition, and function-collection execution trajectories. Editing graphs are
   validated and frozen into versioned execution plans before a run is published.
@@ -44,6 +48,14 @@ perspective, geometry, style, size, and delivery constraints.
 - `90°` control angle plus `0°` rotation means an axis-aligned square, not a 45° diamond.
 - Activating an image-processing dock page must switch the shared Properties panel to the matching
   operation module without duplicating those controls in the document header.
+- `ArtWorkspaceView` and `ArtWorkspacePropertiesView` must share one project-bound ViewModel; dock
+  layout XML stores only shell placement, never canvas images, output geometry, or conversation.
+- Art Workspace imports are managed, cancellable copies; active references are capped and every
+  hidden image must remain recoverable from the Properties image list.
+- Capturing an art-workspace instruction currently persists creation intent only. It must not be
+  reported as AI generation or as a final asset until a future Agent/Harness path freezes the intent,
+  produces a real image, validates it, and atomically delivers it below the active project's
+  `Assets` root.
 - Product renames must preserve readable legacy state until an explicit migration removes support.
 
 ## Architecture sources

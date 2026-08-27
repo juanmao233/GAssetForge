@@ -14,6 +14,7 @@ namespace GAssetForge.App.ViewModels;
 
 public sealed class ShellViewModel : ObservableObject
 {
+    private const string ArtWorkspaceDocumentContentId = "art-workspace";
     private readonly ThemeService _themeService;
     private readonly UserSettingsService _settingsService;
     private readonly UserSettingsModel _settings;
@@ -28,9 +29,11 @@ public sealed class ShellViewModel : ObservableObject
     private readonly SemaphoreSlim _dispatchRecoveryGate = new(1, 1);
     private readonly AsyncRelayCommand _createNewProjectCommand;
     private readonly RelayCommand _closeNewProjectCommand;
+    private readonly RelayCommand _activeDocumentSaveCommand;
     private GenerationBatchDispatchCoordinator _agentDispatchCoordinator = null!;
     private WorkflowDefinition _currentWorkflow;
     private object _currentWorkspace;
+    private string _activeDocumentContentId = "ui-canvas";
     private WorkflowPlaceholderViewModel? _placeholderWorkspace;
     private ProjectWorkspace? _currentProject;
     private WorkflowDefinition _selectedNewProjectWorkflow;
@@ -127,6 +130,16 @@ public sealed class ShellViewModel : ObservableObject
         }
 
         _currentProject = initialProject;
+        ArtWorkspace = new ArtWorkspaceViewModel(
+            new JsonArtWorkspaceRepository(settingsService.Paths),
+            new DesktopArtWorkspaceImagePicker(),
+            _workbenchConsoleService);
+        if (!ArtWorkspace.Activate(initialProject?.Paths.RootDirectory))
+        {
+            throw new InvalidOperationException("无法激活启动项目或本地美术工作区。");
+        }
+
+        ArtWorkspace.CreationRequested += OnArtWorkspaceCreationRequested;
 
         var projectTilemap = _currentProject?.Manifest.Tilemap;
         TilemapWorkspace = new TilemapWorkspaceViewModel
@@ -288,6 +301,7 @@ public sealed class ShellViewModel : ObservableObject
         AssetGeneration.BatchPublished += OnGenerationBatchPublished;
         _agentDispatchCoordinator = CreateAgentDispatchCoordinator();
         _currentWorkflow = initialWorkflow;
+        _activeDocumentContentId = ResolveWorkflowDocumentContentId(initialWorkflow.Kind);
         ProjectBrowser.SetPrefabLibraryAvailability(_currentWorkflow.Kind == WorkflowKind.UiDesign);
         (_currentWorkspace, _placeholderWorkspace) = CreateWorkspaceState(_currentWorkflow);
         _selectedNewProjectWorkflow = _currentWorkflow;
@@ -330,6 +344,10 @@ public sealed class ShellViewModel : ObservableObject
             }
         });
         UiSaveCommand = Gate(EditorWorkspace.SaveCommand);
+        _activeDocumentSaveCommand = new RelayCommand(
+            SaveActiveDocument,
+            CanSaveActiveDocument);
+        ActiveDocumentSaveCommand = _activeDocumentSaveCommand;
         UiImportCommand = Gate(EditorWorkspace.ImportCommand);
         UiExportCommand = Gate(EditorWorkspace.ExportCommand);
         UiUndoCommand = Gate(EditorWorkspace.UndoCommand);
@@ -387,9 +405,16 @@ public sealed class ShellViewModel : ObservableObject
 
     public BlueprintViewModel Blueprint { get; }
 
+    public ArtWorkspaceViewModel ArtWorkspace { get; }
+
     public WorkflowDefinition CurrentWorkflow => _currentWorkflow;
 
     public object CurrentWorkspace => _currentWorkspace;
+
+    public string ActiveDocumentContentId => _activeDocumentContentId;
+
+    public bool IsUiDocumentActive =>
+        string.Equals(ActiveDocumentContentId, "ui-canvas", StringComparison.Ordinal);
 
     public WorkflowPlaceholderViewModel? PlaceholderWorkspace => _placeholderWorkspace;
 
@@ -516,6 +541,7 @@ public sealed class ShellViewModel : ObservableObject
     public ICommand ShowPanelCommand { get; }
     public ICommand TogglePanelCommand { get; }
     public ICommand UiSaveCommand { get; }
+    public ICommand ActiveDocumentSaveCommand { get; }
     public ICommand UiImportCommand { get; }
     public ICommand UiExportCommand { get; }
     public ICommand UiUndoCommand { get; }
@@ -541,7 +567,20 @@ public sealed class ShellViewModel : ObservableObject
             throw new ArgumentException("测试模板不注册为正式业务窗口。", nameof(workflow));
         }
 
+        SetActiveDocumentContentId(ResolveWorkflowDocumentContentId(workflow.Kind));
         CommitWorkspaceDocumentContext(workflow);
+    }
+
+    public void SetActiveDocumentContentId(string contentId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(contentId);
+        if (!SetProperty(ref _activeDocumentContentId, contentId, nameof(ActiveDocumentContentId)))
+        {
+            return;
+        }
+
+        OnPropertyChanged(nameof(IsUiDocumentActive));
+        RaiseUiCommandState();
     }
 
     private void CommitWorkspaceDocumentContext(WorkflowDefinition workflow)
@@ -595,6 +634,8 @@ public sealed class ShellViewModel : ObservableObject
         var previousBrowserPath = ProjectBrowser.CurrentPath;
         var previousBrowserLock = ProjectBrowser.IsRootSelectionLocked;
         var blueprintSwitched = false;
+        var artWorkspaceSwitched = false;
+        ProjectWorkspace? createdWorkspace = null;
         var projectCommitted = false;
         var rollbackIncomplete = false;
         try
@@ -605,12 +646,18 @@ public sealed class ShellViewModel : ObservableObject
                 throw new InvalidOperationException("当前蓝图未能安全保存，尚未创建候选项目目录。 ");
             }
 
+            if (!ArtWorkspace.SavePendingChanges())
+            {
+                throw new InvalidOperationException("当前美术工作区未能安全保存，尚未创建候选项目目录。 ");
+            }
+
             NewProjectValidationMessage = "正在创建项目目录与初始数据…";
             EditorWorkspace.PrepareForProjectSwitch();
             var workspace = _projectWorkspaceService.Create(
                 NewProjectParentPath,
                 NewProjectName,
                 SelectedNewProjectWorkflow.Key);
+            createdWorkspace = workspace;
 
             if (!Blueprint.Activate(workspace.Paths.RootDirectory, SelectedNewProjectWorkflow.Key))
             {
@@ -618,6 +665,13 @@ public sealed class ShellViewModel : ObservableObject
             }
 
             blueprintSwitched = true;
+
+            if (!ArtWorkspace.Activate(workspace.Paths.RootDirectory))
+            {
+                throw new InvalidOperationException("新项目美术工作区未能安全激活，项目切换已取消。");
+            }
+
+            artWorkspaceSwitched = true;
 
             ProjectBrowser.SetRootSelectionLock(false);
             if (!ProjectBrowser.TrySetRootPath(workspace.Paths.AssetDirectory) ||
@@ -670,14 +724,26 @@ public sealed class ShellViewModel : ObservableObject
                             "Blueprint",
                             "新项目激活失败后，旧蓝图上下文也未能重新激活。请立即停止编辑并重启 GAssetForge。 ");
                     }
+
+                    if (artWorkspaceSwitched &&
+                        !ArtWorkspace.Activate(previousProject?.Paths.RootDirectory))
+                    {
+                        rollbackIncomplete = true;
+                        _workbenchConsoleService.WriteError(
+                            "ArtWorkspace",
+                            "新项目激活失败后，旧美术工作区上下文也未能重新激活。请立即停止编辑并重启 GAssetForge。 ");
+                    }
                 }
 
                 ProjectBrowser.SetRootSelectionLock(_currentProject is not null);
                 NewProjectValidationMessage = projectCommitted
                     ? $"项目已创建，但后续初始化失败：{exception.Message}"
                     : rollbackIncomplete
-                        ? $"创建项目失败，且旧蓝图上下文回滚不完整：{exception.Message}。请立即停止编辑并重启 GAssetForge。"
-                    : $"创建项目失败：已保留原项目；{exception.Message}";
+                        ? $"创建项目失败，且旧项目上下文回滚不完整：{exception.Message}。请立即停止编辑并重启 GAssetForge。"
+                        : createdWorkspace is not null
+                            ? $"项目目录已创建但未能激活：{createdWorkspace.Paths.RootDirectory}；" +
+                              $"原项目仍保持活动。请检查该目录后改名重试或手动打开。原因：{exception.Message}"
+                            : $"创建项目失败：已保留原项目；{exception.Message}";
             }).ConfigureAwait(false);
         }
         finally
@@ -1010,6 +1076,7 @@ public sealed class ShellViewModel : ObservableObject
             AssetGeneration.StyleLibraryRequested -= OnAssetGenerationStyleLibraryRequested;
             AssetGeneration.AgentConnectionRequested -= OnAssetGenerationAgentConnectionRequested;
             AssetGeneration.BackgroundRemovalRequested -= OnAssetGenerationBackgroundRemovalRequested;
+            ArtWorkspace.CreationRequested -= OnArtWorkspaceCreationRequested;
             foreach (var command in _uiCommands)
             {
                 command.Dispose();
@@ -1052,6 +1119,7 @@ public sealed class ShellViewModel : ObservableObject
             ProjectBrowser.Shutdown();
             ArtStyleLibrary.Shutdown();
             Blueprint.Dispose();
+            ArtWorkspace.Dispose();
             SaveSettings();
             CommandConsole.Dispose();
             _workbenchConsoleService.Dispose();
@@ -1118,7 +1186,7 @@ public sealed class ShellViewModel : ObservableObject
 
     private GatedCommand Gate(ICommand command)
     {
-        var gated = new GatedCommand(command, () => IsUiWorkspace && IsWorkspaceInteractionEnabled);
+        var gated = new GatedCommand(command, () => IsUiDocumentActive && IsWorkspaceInteractionEnabled);
         _uiCommands.Add(gated);
         return gated;
     }
@@ -1128,6 +1196,27 @@ public sealed class ShellViewModel : ObservableObject
         foreach (var command in _uiCommands)
         {
             command.RaiseCanExecuteChanged();
+        }
+
+        _activeDocumentSaveCommand.RaiseCanExecuteChanged();
+    }
+
+    private bool CanSaveActiveDocument() =>
+        IsWorkspaceInteractionEnabled &&
+        (IsUiDocumentActive ||
+         string.Equals(ActiveDocumentContentId, ArtWorkspaceDocumentContentId, StringComparison.Ordinal));
+
+    private void SaveActiveDocument()
+    {
+        if (string.Equals(ActiveDocumentContentId, ArtWorkspaceDocumentContentId, StringComparison.Ordinal))
+        {
+            _ = ArtWorkspace.SaveNow();
+            return;
+        }
+
+        if (IsUiDocumentActive && EditorWorkspace.SaveCommand.CanExecute(null))
+        {
+            EditorWorkspace.SaveCommand.Execute(null);
         }
     }
 
@@ -1928,6 +2017,15 @@ public sealed class ShellViewModel : ObservableObject
     private void OnAssetGenerationBackgroundRemovalRequested(object? sender, EventArgs e) =>
         PanelShowRequested?.Invoke(this, "background-removal");
 
+    private void OnArtWorkspaceCreationRequested(
+        object? sender,
+        ArtWorkspaceCreationRequestedEventArgs e) =>
+        _workbenchConsoleService.Write(
+            WorkbenchLogLevel.Information,
+            "ArtWorkspace",
+            $"已记录美术工作区创作意图 · 输出 {e.OutputWidth:0.#}×{e.OutputHeight:0.#} · " +
+            $"参考图 {e.VisibleImageIds.Count} 张；当前尚未启动 AI 生成适配器。");
+
     private static string? CompactIdentifier(string? identifier)
     {
         if (string.IsNullOrWhiteSpace(identifier))
@@ -1949,7 +2047,7 @@ public sealed class ShellViewModel : ObservableObject
             "state");
         CommandConsole.RegisterCommand(
             "show",
-            "show <console|project|generation|background|outline|icon|pixel|blueprint|agent|style|tools|canvas|properties|layers>",
+            "show <console|project|generation|background|outline|icon|pixel|blueprint|art|agent|style|tools|canvas|properties|layers>",
             "拉起并聚焦指定的 AvalonDock 停靠页。",
             HandleConsoleShowAsync,
             "panel.show");
@@ -2000,7 +2098,7 @@ public sealed class ShellViewModel : ObservableObject
             !TryResolveConsolePanel(invocation.Arguments[0], out var contentId, out var title))
         {
             return ConsoleResult(CommandConsoleResult.Failure(
-                "用法：show <console|project|generation|background|outline|icon|pixel|blueprint|agent|style|tools|canvas|properties|layers>"));
+                "用法：show <console|project|generation|background|outline|icon|pixel|blueprint|art|agent|style|tools|canvas|properties|layers>"));
         }
 
         PanelShowRequested?.Invoke(this, contentId);
@@ -2157,6 +2255,8 @@ public sealed class ShellViewModel : ObservableObject
             "pixel" or "pixel-grid" or "像素对齐" or "像素点对齐" =>
                 ("pixel-grid-alignment", "像素点对齐工具"),
             "blueprint" or "graph" or "蓝图" => ("workflow-blueprint", "蓝图窗口"),
+            "art" or "art-workspace" or "workspace" or "美术工作区" or "美术工作区制作" =>
+                ("art-workspace", "美术工作区制作"),
             "agent" or "mcp" => ("mcp-agent-connection", "MCP Agent 接入"),
             "style" or "风格" => ("art-style-library", "美术风格素材库"),
             "tools" or "工具" => ("ui-tools", "工具"),
@@ -2167,6 +2267,15 @@ public sealed class ShellViewModel : ObservableObject
         };
         return contentId.Length > 0;
     }
+
+    private static string ResolveWorkflowDocumentContentId(WorkflowKind kind) => kind switch
+    {
+        WorkflowKind.UiDesign => "ui-canvas",
+        WorkflowKind.Tilemap => "workspace-tilemap",
+        WorkflowKind.CardDesign => "workspace-card-design",
+        WorkflowKind.ParallelPerspective => "workspace-parallel-perspective",
+        _ => "ui-canvas"
+    };
 
     private IImageProcessingPreviewCache CreateImageProcessingPreviewCache(WorkspacePaths paths)
     {
