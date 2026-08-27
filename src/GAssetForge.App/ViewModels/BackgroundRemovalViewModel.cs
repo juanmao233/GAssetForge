@@ -37,6 +37,10 @@ public sealed record BackgroundRemovalToolSettingsSnapshot(
     double CheckerOffsetX,
     double CheckerOffsetY,
     double CheckerBoundaryTolerance,
+    bool EnableSmartCheckerDetection,
+    double CheckerDetectionMinimumCellSize,
+    double CheckerDetectionMaximumCellSize,
+    double CheckerDetectionSearchRangePercent,
     string? LastInputDirectory,
     string? LastOutputDirectory);
 
@@ -59,6 +63,7 @@ public sealed class BackgroundRemovalBatchItemViewModel : ObservableObject
     private string _outputPath = string.Empty;
     private BackgroundRemovalBatchItemStatus _status = BackgroundRemovalBatchItemStatus.Pending;
     private string _message = "等待处理";
+    private string _checkerDetectionText = "—";
     private double _progressPercent;
 
     public BackgroundRemovalBatchItemViewModel(string sourcePath)
@@ -121,6 +126,12 @@ public sealed class BackgroundRemovalBatchItemViewModel : ObservableObject
         private set => SetProperty(ref _message, value);
     }
 
+    public string CheckerDetectionText
+    {
+        get => _checkerDetectionText;
+        private set => SetProperty(ref _checkerDetectionText, value);
+    }
+
     public double ProgressPercent
     {
         get => _progressPercent;
@@ -136,7 +147,24 @@ public sealed class BackgroundRemovalBatchItemViewModel : ObservableObject
         OutputPath = outputPath;
         Status = BackgroundRemovalBatchItemStatus.Pending;
         Message = "等待处理";
+        CheckerDetectionText = "—";
         ProgressPercent = 0d;
+    }
+
+    internal void MarkDetecting()
+    {
+        Status = BackgroundRemovalBatchItemStatus.Processing;
+        Message = "正在从四角识别棋盘格…";
+        ProgressPercent = 5d;
+    }
+
+    internal void SetCheckerDetection(CheckerGridDetectionResult result, bool usedFallback)
+    {
+        CheckerDetectionText = result.IsDetected
+            ? $"{result.CellSize:0.###}px · {result.Confidence:P0} · {result.DetectedCornerCount}/4 角"
+            : usedFallback
+                ? $"回退手动参数 · {result.Confidence:P0} · {result.FailureReason}"
+                : $"{result.Confidence:P0} · {result.FailureReason}";
     }
 
     internal void MarkProcessing()
@@ -188,6 +216,10 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
     private const double MinimumCheckerCellSize = 0.25d;
     private const double MaximumCheckerCellSize = 4096d;
     private const double MaximumCheckerBoundaryTolerance = 8d;
+    private const double MinimumCheckerDetectionCellSize = 0.25d;
+    private const double MaximumCheckerDetectionCellSize = 4096d;
+    private const double MinimumCheckerDetectionSearchRangePercent = 5d;
+    private const double MaximumCheckerDetectionSearchRangePercent = 50d;
     public const int MaximumBatchItemCount = 256;
 
     private static readonly IReadOnlyList<BackgroundRemovalPresetOption> SupportedPresets =
@@ -210,6 +242,7 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
     private readonly IBackgroundRemovalOutputPicker _outputPicker;
     private readonly IImageProcessingPreviewCache _previewCache;
     private readonly IColorPickerService _colorPickerService;
+    private readonly ICheckerGridDetectionService _checkerGridDetectionService;
     private readonly IWorkbenchLogSink? _workbenchLogSink;
     private readonly RelayCommand _chooseInputCommand;
     private readonly RelayCommand _chooseOutputCommand;
@@ -221,6 +254,7 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
     private readonly RelayCommand _chooseCustomColorCommand;
     private readonly RelayCommand _chooseCheckerColorACommand;
     private readonly RelayCommand _chooseCheckerColorBCommand;
+    private readonly AsyncRelayCommand _detectCheckerGridCommand;
     private readonly RelayCommand _chooseBatchInputsCommand;
     private readonly RelayCommand _chooseBatchOutputDirectoryCommand;
     private readonly AsyncRelayCommand _processBatchCommand;
@@ -242,6 +276,12 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
     private double _checkerOffsetX;
     private double _checkerOffsetY;
     private double _checkerBoundaryTolerance;
+    private bool _enableSmartCheckerDetection;
+    private double _checkerDetectionMinimumCellSize;
+    private double _checkerDetectionMaximumCellSize;
+    private double _checkerDetectionSearchRangePercent;
+    private string _checkerDetectionStatusText = "尚未执行智能网格识别";
+    private bool _isCheckerGridDetecting;
     private bool _isCheckerAlignmentEditActive;
     private double _checkerAlignmentEditStartCellSize;
     private double _checkerAlignmentEditStartOffsetX;
@@ -296,13 +336,19 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         string? lastOutputDirectory = null,
         IWorkbenchLogSink? workbenchLogSink = null,
         IImageProcessingPreviewCache? previewCache = null,
-        IColorPickerService? colorPickerService = null)
+        IColorPickerService? colorPickerService = null,
+        ICheckerGridDetectionService? checkerGridDetectionService = null,
+        bool enableSmartCheckerDetection = false,
+        double checkerDetectionMinimumCellSize = 2d,
+        double checkerDetectionMaximumCellSize = 256d,
+        double checkerDetectionSearchRangePercent = 25d)
     {
         _backgroundRemovalService = backgroundRemovalService ?? throw new ArgumentNullException(nameof(backgroundRemovalService));
         _inputPicker = inputPicker ?? throw new ArgumentNullException(nameof(inputPicker));
         _outputPicker = outputPicker ?? throw new ArgumentNullException(nameof(outputPicker));
         _previewCache = previewCache ?? CreateFallbackPreviewCache();
         _colorPickerService = colorPickerService ?? new DesktopColorPickerService();
+        _checkerGridDetectionService = checkerGridDetectionService ?? new ImageSharpCheckerGridDetectionService();
         _workbenchLogSink = workbenchLogSink;
         _selectedPreset = ResolvePresetOption(presetKey);
         _customColorHex = NormalizeInitialCustomColor(customColorHex);
@@ -329,6 +375,22 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             1d,
             0d,
             MaximumCheckerBoundaryTolerance);
+        _enableSmartCheckerDetection = enableSmartCheckerDetection;
+        _checkerDetectionMinimumCellSize = NormalizeFinite(
+            checkerDetectionMinimumCellSize,
+            2d,
+            MinimumCheckerDetectionCellSize,
+            MaximumCheckerDetectionCellSize);
+        _checkerDetectionMaximumCellSize = NormalizeFinite(
+            checkerDetectionMaximumCellSize,
+            256d,
+            _checkerDetectionMinimumCellSize,
+            MaximumCheckerDetectionCellSize);
+        _checkerDetectionSearchRangePercent = NormalizeFinite(
+            checkerDetectionSearchRangePercent,
+            25d,
+            MinimumCheckerDetectionSearchRangePercent,
+            MaximumCheckerDetectionSearchRangePercent);
         _lastInputDirectory = NormalizeExistingDirectory(lastInputDirectory);
         _lastOutputDirectory = NormalizeExistingDirectory(lastOutputDirectory);
 
@@ -342,6 +404,9 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         _chooseCustomColorCommand = new RelayCommand(ChooseCustomColor, () => !IsBusy);
         _chooseCheckerColorACommand = new RelayCommand(ChooseCheckerColorA, () => !IsBusy);
         _chooseCheckerColorBCommand = new RelayCommand(ChooseCheckerColorB, () => !IsBusy);
+        _detectCheckerGridCommand = new AsyncRelayCommand(
+            DetectCheckerGridAsync,
+            () => CanDetectCheckerGrid);
         _chooseBatchInputsCommand = new RelayCommand(
             ChooseBatchInputs,
             () => !IsBusy && !IsBatchRunning && BatchItems.Count < MaximumBatchItemCount);
@@ -363,6 +428,7 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         ChooseCustomColorCommand = _chooseCustomColorCommand;
         ChooseCheckerColorACommand = _chooseCheckerColorACommand;
         ChooseCheckerColorBCommand = _chooseCheckerColorBCommand;
+        DetectCheckerGridCommand = _detectCheckerGridCommand;
         ChooseBatchInputsCommand = _chooseBatchInputsCommand;
         ChooseBatchOutputDirectoryCommand = _chooseBatchOutputDirectoryCommand;
         ProcessBatchCommand = _processBatchCommand;
@@ -561,6 +627,10 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             OnPropertyChanged(nameof(BackgroundModeText));
             OnPropertyChanged(nameof(CheckerAlignmentSummary));
             OnPropertyChanged(nameof(ShowCheckerGridOverlay));
+            OnPropertyChanged(nameof(CanDetectCheckerGrid));
+            CheckerDetectionStatusText = value
+                ? "已启用假透明模式，等待智能识别"
+                : "智能网格识别仅用于假透明棋盘格模式";
             MarkPreviewStale();
             RefreshValidationAndCommands();
             NotifySettingsChanged();
@@ -710,6 +780,155 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
 
     public bool ShowCheckerGridOverlay => UseFakeTransparencyGrid && EnableCheckerGridAlignment;
 
+    public bool EnableSmartCheckerDetection
+    {
+        get => _enableSmartCheckerDetection;
+        set
+        {
+            if (!SetProperty(ref _enableSmartCheckerDetection, value))
+            {
+                return;
+            }
+
+            if (value && !EnableCheckerGridAlignment)
+            {
+                var previousSuppression = _suppressSettingsChanged;
+                _suppressSettingsChanged = true;
+                try
+                {
+                    EnableCheckerGridAlignment = true;
+                }
+                finally
+                {
+                    _suppressSettingsChanged = previousSuppression;
+                }
+            }
+
+            CheckerDetectionStatusText = value
+                ? "智能识别已开启；刷新和批处理会逐图检测"
+                : "智能识别已关闭；将使用手动网格参数";
+            OnPropertyChanged(nameof(CanDetectCheckerGrid));
+            MarkPreviewStale();
+            RefreshValidationAndCommands();
+            NotifySettingsChanged();
+        }
+    }
+
+    public double CheckerDetectionMinimumCellSize
+    {
+        get => _checkerDetectionMinimumCellSize;
+        set
+        {
+            var normalized = NormalizeFinite(
+                value,
+                double.IsFinite(_checkerDetectionMinimumCellSize)
+                    ? _checkerDetectionMinimumCellSize
+                    : 2d,
+                MinimumCheckerDetectionCellSize,
+                MaximumCheckerDetectionCellSize);
+            if (!SetProperty(ref _checkerDetectionMinimumCellSize, normalized))
+            {
+                return;
+            }
+
+            if (CheckerDetectionMaximumCellSize < normalized)
+            {
+                var previousSuppression = _suppressSettingsChanged;
+                _suppressSettingsChanged = true;
+                try
+                {
+                    CheckerDetectionMaximumCellSize = normalized;
+                }
+                finally
+                {
+                    _suppressSettingsChanged = previousSuppression;
+                }
+            }
+
+            CheckerDetectionStatusText = "格宽搜索范围已变化，等待重新识别";
+            MarkPreviewStale();
+            RefreshValidationAndCommands();
+            NotifySettingsChanged();
+        }
+    }
+
+    public double CheckerDetectionMaximumCellSize
+    {
+        get => _checkerDetectionMaximumCellSize;
+        set
+        {
+            var normalized = NormalizeFinite(
+                value,
+                double.IsFinite(_checkerDetectionMaximumCellSize)
+                    ? _checkerDetectionMaximumCellSize
+                    : 256d,
+                MinimumCheckerDetectionCellSize,
+                MaximumCheckerDetectionCellSize);
+            if (!SetProperty(ref _checkerDetectionMaximumCellSize, normalized))
+            {
+                return;
+            }
+
+            if (CheckerDetectionMinimumCellSize > normalized)
+            {
+                var previousSuppression = _suppressSettingsChanged;
+                _suppressSettingsChanged = true;
+                try
+                {
+                    CheckerDetectionMinimumCellSize = normalized;
+                }
+                finally
+                {
+                    _suppressSettingsChanged = previousSuppression;
+                }
+            }
+
+            CheckerDetectionStatusText = "格宽搜索范围已变化，等待重新识别";
+            MarkPreviewStale();
+            RefreshValidationAndCommands();
+            NotifySettingsChanged();
+        }
+    }
+
+    public double CheckerDetectionSearchRangePercent
+    {
+        get => _checkerDetectionSearchRangePercent;
+        set
+        {
+            var normalized = NormalizeFinite(
+                value,
+                double.IsFinite(_checkerDetectionSearchRangePercent)
+                    ? _checkerDetectionSearchRangePercent
+                    : 25d,
+                MinimumCheckerDetectionSearchRangePercent,
+                MaximumCheckerDetectionSearchRangePercent);
+            if (!SetProperty(ref _checkerDetectionSearchRangePercent, normalized))
+            {
+                return;
+            }
+
+            CheckerDetectionStatusText = "四角扫描范围已变化，等待重新识别";
+            MarkPreviewStale();
+            RefreshValidationAndCommands();
+            NotifySettingsChanged();
+        }
+    }
+
+    public string CheckerDetectionStatusText
+    {
+        get => _checkerDetectionStatusText;
+        private set => SetProperty(ref _checkerDetectionStatusText, value);
+    }
+
+    public bool IsCheckerGridDetecting
+    {
+        get => _isCheckerGridDetecting;
+        private set => SetProperty(ref _isCheckerGridDetecting, value);
+    }
+
+    public bool CanDetectCheckerGrid =>
+        !IsBusy && HasInput && UseFakeTransparencyGrid;
+
     public void BeginCheckerAlignmentEdit()
     {
         if (_isCheckerAlignmentEditActive)
@@ -772,6 +991,10 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
 
             OnPropertyChanged(nameof(HasInput));
             OnPropertyChanged(nameof(InputFileName));
+            OnPropertyChanged(nameof(CanDetectCheckerGrid));
+            CheckerDetectionStatusText = string.IsNullOrWhiteSpace(value)
+                ? "尚未执行智能网格识别"
+                : "输入图片已变化，等待重新识别";
             RefreshValidationAndCommands();
         }
     }
@@ -1014,6 +1237,7 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             OnPropertyChanged(nameof(CanRefreshPreview));
             OnPropertyChanged(nameof(CanSaveResult));
             OnPropertyChanged(nameof(CanProcessBatch));
+            OnPropertyChanged(nameof(CanDetectCheckerGrid));
             RaiseCommandStates();
         }
     }
@@ -1037,7 +1261,9 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
 
     public string ConfigurationValidationText => TryBuildSettings(out _, out var reason)
         ? UseFakeTransparencyGrid
-            ? "参数有效；将按双颜色棋盘格恢复 Alpha。单幅合成图无法精确还原原始半透明前景，边缘为近似恢复。"
+            ? EnableSmartCheckerDetection
+                ? "参数有效；预览和批处理会从每张图片四角独立数格子，再按识别出的颜色、格宽和相位恢复 Alpha。"
+                : "参数有效；将按手动双颜色棋盘格恢复 Alpha。单幅合成图无法精确还原原始半透明前景，边缘为近似恢复。"
             : "参数有效；最终输出保持原图尺寸并写入真实 Alpha。"
         : reason;
 
@@ -1065,6 +1291,8 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
 
     public ICommand ChooseCheckerColorBCommand { get; }
 
+    public ICommand DetectCheckerGridCommand { get; }
+
     public ICommand ChooseBatchInputsCommand { get; }
 
     public ICommand ChooseBatchOutputDirectoryCommand { get; }
@@ -1076,6 +1304,157 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
     public ICommand ClearBatchItemsCommand => ClearBatchCommand;
 
     public ICommand RemoveSelectedBatchItemCommand { get; }
+
+    private async Task DetectCheckerGridAsync()
+    {
+        if (!CanDetectCheckerGrid)
+        {
+            CheckerDetectionStatusText = "请先启用假透明棋盘格并选择输入图片。";
+            return;
+        }
+
+        var inputPath = InputPath;
+        var detectionSnapshot = CaptureCheckerDetectionSnapshot();
+        var detectionRevision = _previewSettingsRevision;
+        IsBusy = true;
+        IsCheckerGridDetecting = true;
+        CheckerDetectionStatusText = "正在从四角扫描灰白周期并统计格子…";
+        StatusText = $"正在智能识别 {Path.GetFileName(inputPath)} 的假透明棋盘格…";
+        try
+        {
+            var result = await DetectCheckerGridForPathAsync(inputPath, detectionSnapshot)
+                .ConfigureAwait(true);
+            if (!PathsEqual(inputPath, InputPath) || detectionRevision != _previewSettingsRevision)
+            {
+                CheckerDetectionStatusText = "识别期间输入图片或检测范围已变化；旧结果已丢弃。";
+                return;
+            }
+
+            if (!result.IsDetected)
+            {
+                CheckerDetectionStatusText =
+                    $"未能可靠识别（置信度 {result.Confidence:P0}）：{result.FailureReason}";
+                StatusText = "智能识别未覆盖现有手动参数，可调整搜索范围后重试。";
+                _workbenchLogSink?.Write(
+                    WorkbenchLogLevel.Warning,
+                    LogSource,
+                    $"假透明棋盘格智能识别失败：{Path.GetFileName(inputPath)} · {result.FailureReason}");
+                return;
+            }
+
+            ApplyCheckerDetectionResult(result);
+            StatusText = "智能网格参数已填入；可继续拖动标尺微调或刷新透明结果。";
+            _workbenchLogSink?.Write(
+                WorkbenchLogLevel.Success,
+                LogSource,
+                $"假透明棋盘格智能识别完成：{Path.GetFileName(inputPath)} · {BuildCheckerDetectionSummary(result)}");
+        }
+        finally
+        {
+            IsCheckerGridDetecting = false;
+            IsBusy = false;
+        }
+    }
+
+    private async Task<CheckerGridDetectionResult> DetectCheckerGridForPathAsync(
+        string inputPath,
+        CheckerDetectionSnapshot detectionSnapshot)
+    {
+        try
+        {
+            var detectionSettings = CreateCheckerGridDetectionSettings(inputPath, detectionSnapshot);
+            return await Task.Run(() =>
+                    _checkerGridDetectionService.Detect(inputPath, detectionSettings))
+                .ConfigureAwait(true);
+        }
+        catch (Exception exception) when (IsExpectedOperationException(exception))
+        {
+            return new CheckerGridDetectionResult
+            {
+                IsDetected = false,
+                FailureReason = GetOperationErrorMessage(exception)
+            };
+        }
+    }
+
+    private static CheckerGridDetectionSettings CreateCheckerGridDetectionSettings(
+        string inputPath,
+        CheckerDetectionSnapshot detectionSnapshot)
+    {
+        using var stream = new FileStream(
+            inputPath,
+            FileMode.Open,
+            FileAccess.Read,
+            FileShare.ReadWrite | FileShare.Delete);
+        var imageInfo = Image.Identify(stream)
+            ?? throw new InvalidDataException("无法读取待识别图片的像素尺寸。");
+        var shorterSide = Math.Max(1, Math.Min(imageInfo.Width, imageInfo.Height));
+        var maximumRange = Math.Max(
+            1,
+            Math.Min((int)CheckerGridDetectionSettings.MaximumSearchRange, shorterSide / 2));
+        var minimumRange = Math.Min(8, maximumRange);
+        var requestedRange = (int)Math.Round(
+            shorterSide * detectionSnapshot.SearchRangePercent / 100d,
+            MidpointRounding.AwayFromZero);
+        var searchRange = Math.Clamp(requestedRange, minimumRange, maximumRange);
+        return new CheckerGridDetectionSettings
+        {
+            MinimumCellSize = detectionSnapshot.MinimumCellSize,
+            MaximumCellSize = detectionSnapshot.MaximumCellSize,
+            SearchRange = searchRange,
+            MinimumConfidence = 0.55d
+        };
+    }
+
+    private CheckerDetectionSnapshot CaptureCheckerDetectionSnapshot() => new(
+        EnableSmartCheckerDetection,
+        CheckerDetectionMinimumCellSize,
+        CheckerDetectionMaximumCellSize,
+        CheckerDetectionSearchRangePercent);
+
+    private void ApplyCheckerDetectionResult(CheckerGridDetectionResult result)
+    {
+        var previousSuppression = _suppressSettingsChanged;
+        _suppressSettingsChanged = true;
+        try
+        {
+            CheckerColorAHex = result.ColorAHex;
+            CheckerColorBHex = result.ColorBHex;
+            EnableCheckerGridAlignment = true;
+            CheckerCellSize = result.CellSize;
+            CheckerOffsetX = result.OffsetX;
+            CheckerOffsetY = result.OffsetY;
+        }
+        finally
+        {
+            _suppressSettingsChanged = previousSuppression;
+        }
+
+        CheckerDetectionStatusText = BuildCheckerDetectionSummary(result);
+        if (!previousSuppression)
+        {
+            NotifySettingsChanged();
+        }
+    }
+
+    private static BackgroundRemovalSettings ApplyCheckerDetection(
+        BackgroundRemovalSettings settings,
+        CheckerGridDetectionResult result) => settings with
+    {
+        UseFakeTransparencyGrid = true,
+        CheckerColorAHex = result.ColorAHex,
+        CheckerColorBHex = result.ColorBHex,
+        EnableCheckerGridAlignment = true,
+        CheckerCellSize = result.CellSize,
+        CheckerOffsetX = result.OffsetX,
+        CheckerOffsetY = result.OffsetY
+    };
+
+    private static string BuildCheckerDetectionSummary(CheckerGridDetectionResult result) =>
+        $"识别成功：{result.CellSize:0.###}px（可信范围 {result.CellSizeMinimum:0.###}–{result.CellSizeMaximum:0.###}px），" +
+        $"偏移 ({result.OffsetX:0.###},{result.OffsetY:0.###})，" +
+        $"约 {result.HorizontalCellCount}×{result.VerticalCellCount} 格，" +
+        $"四角 {result.DetectedCornerCount}/4，置信度 {result.Confidence:P0}。";
 
     private void ChooseInput()
     {
@@ -1352,6 +1731,8 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             return;
         }
 
+        var detectionSnapshot = CaptureCheckerDetectionSnapshot();
+
         var outputDirectory = Path.GetFullPath(BatchOutputDirectory);
         try
         {
@@ -1399,12 +1780,37 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
                         outputDirectory,
                         item.SourcePath,
                         reservedOutputPaths));
+                    var itemSettings = settings;
+                    if (settings.UseFakeTransparencyGrid && detectionSnapshot.Enabled)
+                    {
+                        item.MarkDetecting();
+                        BatchStatusText =
+                            $"正在识别 {BatchCompletedCount + 1} / {BatchTotalCount}：{item.FileName}";
+                        var detectionResult = await DetectCheckerGridForPathAsync(
+                                item.SourcePath,
+                                detectionSnapshot)
+                            .ConfigureAwait(true);
+                        item.SetCheckerDetection(detectionResult, usedFallback: false);
+                        if (!detectionResult.IsDetected)
+                        {
+                            throw new InvalidOperationException(
+                                $"智能棋盘格识别失败（置信度 {detectionResult.Confidence:P0}）：" +
+                                $"{detectionResult.FailureReason}；该项未套用其他图片的网格参数。");
+                        }
+
+                        itemSettings = ApplyCheckerDetection(settings, detectionResult);
+                        _workbenchLogSink?.Write(
+                            WorkbenchLogLevel.Information,
+                            LogSource,
+                            $"批量图片网格识别完成：{item.FileName} · {BuildCheckerDetectionSummary(detectionResult)}");
+                    }
+
                     item.MarkProcessing();
                     var result = await Task.Run(() =>
                             _backgroundRemovalService.RemoveToPng(
                                 item.SourcePath,
                                 item.OutputPath,
-                                settings,
+                                itemSettings,
                                 overwrite: false))
                         .ConfigureAwait(true);
                     var renderedOutputPath = Path.GetFullPath(result.OutputPath);
@@ -1522,22 +1928,55 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         }
 
         var inputPath = InputPath;
-        var settingsRevision = _previewSettingsRevision;
+        var detectionSnapshot = CaptureCheckerDetectionSnapshot();
+        var detectionRevision = _previewSettingsRevision;
         var previousPreviewPath = OutputPreviewPath;
         string? reservedPreviewPath = null;
         IsBusy = true;
         IsPreviewCurrent = false;
-        var modeText = settings.UseFakeTransparencyGrid
-            ? $"假透明棋盘格 {settings.CheckerColorAHex} / {settings.CheckerColorBHex}"
-            : $"纯色 {settings.KeyColorHex}";
         PreviewStatusText = "正在刷新缓存预览…";
-        StatusText = $"正在使用{modeText}剔除背景并刷新预览…";
-        _workbenchLogSink?.Write(
-            WorkbenchLogLevel.Information,
-            LogSource,
-            $"开始刷新背景剔除预览：{Path.GetFileName(inputPath)} · {modeText}");
         try
         {
+            if (settings.UseFakeTransparencyGrid && detectionSnapshot.Enabled)
+            {
+                IsCheckerGridDetecting = true;
+                CheckerDetectionStatusText = "刷新前正在逐图识别棋盘格…";
+                var detectionResult = await DetectCheckerGridForPathAsync(inputPath, detectionSnapshot)
+                    .ConfigureAwait(true);
+                IsCheckerGridDetecting = false;
+                if (!PathsEqual(inputPath, InputPath) || detectionRevision != _previewSettingsRevision)
+                {
+                    PreviewStatusText = "识别期间输入图片或检测范围已变化；旧结果已丢弃";
+                    StatusText = "请针对当前输入和参数重新刷新预览。";
+                    return;
+                }
+
+                if (!detectionResult.IsDetected)
+                {
+                    CheckerDetectionStatusText =
+                        $"未能可靠识别（置信度 {detectionResult.Confidence:P0}）：{detectionResult.FailureReason}";
+                    PreviewStatusText = "智能网格识别失败，未执行背景剔除";
+                    StatusText = "可扩大角部识别范围、调整格宽搜索范围，或关闭智能识别后使用手动标尺。";
+                    _workbenchLogSink?.Write(
+                        WorkbenchLogLevel.Warning,
+                        LogSource,
+                        $"刷新预览前的棋盘格识别失败：{Path.GetFileName(inputPath)} · {detectionResult.FailureReason}");
+                    return;
+                }
+
+                ApplyCheckerDetectionResult(detectionResult);
+                settings = ApplyCheckerDetection(settings, detectionResult);
+            }
+
+            var settingsRevision = _previewSettingsRevision;
+            var modeText = settings.UseFakeTransparencyGrid
+                ? $"假透明棋盘格 {settings.CheckerColorAHex} / {settings.CheckerColorBHex}"
+                : $"纯色 {settings.KeyColorHex}";
+            StatusText = $"正在使用{modeText}剔除背景并刷新预览…";
+            _workbenchLogSink?.Write(
+                WorkbenchLogLevel.Information,
+                LogSource,
+                $"开始刷新背景剔除预览：{Path.GetFileName(inputPath)} · {modeText}");
             reservedPreviewPath = _previewCache.ReservePreviewPath("background-removal");
             _previewCache.PinPreview(reservedPreviewPath);
             var result = await Task.Run(() =>
@@ -1604,6 +2043,7 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         }
         finally
         {
+            IsCheckerGridDetecting = false;
             IsBusy = false;
         }
     }
@@ -1786,13 +2226,48 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
 
     private bool TryBuildSettings(out BackgroundRemovalSettings settings, out string reason)
     {
-        if (!TryBuildSolidColorSettings(out settings, out reason))
+        if (!UseFakeTransparencyGrid)
+        {
+            return TryBuildSolidColorSettings(out settings, out reason);
+        }
+
+        if (!TryBuildMatteSettings(out settings, out reason))
         {
             return false;
         }
 
-        if (!UseFakeTransparencyGrid)
+        if (!double.IsFinite(CheckerBoundaryTolerance) ||
+            CheckerBoundaryTolerance is < 0d or > MaximumCheckerBoundaryTolerance)
         {
+            reason = "网格边界容差必须是 0 到 8 之间的有限像素值。";
+            return false;
+        }
+
+        if (EnableSmartCheckerDetection)
+        {
+            if (!double.IsFinite(CheckerDetectionMinimumCellSize) ||
+                !double.IsFinite(CheckerDetectionMaximumCellSize) ||
+                CheckerDetectionMinimumCellSize is < MinimumCheckerDetectionCellSize or > MaximumCheckerDetectionCellSize ||
+                CheckerDetectionMaximumCellSize is < MinimumCheckerDetectionCellSize or > MaximumCheckerDetectionCellSize ||
+                CheckerDetectionMaximumCellSize < CheckerDetectionMinimumCellSize)
+            {
+                reason = "智能识别格宽范围无效；最小值必须小于等于最大值。";
+                return false;
+            }
+
+            if (!double.IsFinite(CheckerDetectionSearchRangePercent) ||
+                CheckerDetectionSearchRangePercent is < MinimumCheckerDetectionSearchRangePercent or > MaximumCheckerDetectionSearchRangePercent)
+            {
+                reason = "四角扫描范围必须是图片短边的 5% 到 50%。";
+                return false;
+            }
+
+            settings = settings with
+            {
+                UseFakeTransparencyGrid = true,
+                EnableCheckerGridAlignment = true,
+                CheckerBoundaryTolerance = CheckerBoundaryTolerance
+            };
             return true;
         }
 
@@ -1828,13 +2303,6 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             return false;
         }
 
-        if (!double.IsFinite(CheckerBoundaryTolerance) ||
-            CheckerBoundaryTolerance is < 0d or > MaximumCheckerBoundaryTolerance)
-        {
-            reason = "网格边界容差必须是 0 到 8 之间的有限像素值。";
-            return false;
-        }
-
         settings = settings with
         {
             UseFakeTransparencyGrid = true,
@@ -1851,8 +2319,11 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
 
     private bool TryBuildSolidColorSettings(out BackgroundRemovalSettings settings, out string reason)
     {
-        settings = new BackgroundRemovalSettings();
-        reason = string.Empty;
+        if (!TryBuildMatteSettings(out settings, out reason))
+        {
+            return false;
+        }
+
         string keyColor;
         try
         {
@@ -1864,6 +2335,17 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
             return false;
         }
 
+        settings = settings with
+        {
+            KeyColorHex = keyColor
+        };
+        return true;
+    }
+
+    private bool TryBuildMatteSettings(out BackgroundRemovalSettings settings, out string reason)
+    {
+        settings = new BackgroundRemovalSettings();
+        reason = string.Empty;
         if (!double.IsFinite(TransparentThreshold) ||
             !double.IsFinite(OpaqueThreshold) ||
             TransparentThreshold is < 0d or > 441.7d ||
@@ -1876,7 +2358,6 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
 
         settings = new BackgroundRemovalSettings
         {
-            KeyColorHex = keyColor,
             TransparentThreshold = TransparentThreshold,
             OpaqueThreshold = OpaqueThreshold,
             EdgeContract = EdgeContract,
@@ -1912,6 +2393,7 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         _chooseCustomColorCommand.RaiseCanExecuteChanged();
         _chooseCheckerColorACommand.RaiseCanExecuteChanged();
         _chooseCheckerColorBCommand.RaiseCanExecuteChanged();
+        _detectCheckerGridCommand.RaiseCanExecuteChanged();
         _chooseBatchInputsCommand.RaiseCanExecuteChanged();
         _chooseBatchOutputDirectoryCommand.RaiseCanExecuteChanged();
         _processBatchCommand.RaiseCanExecuteChanged();
@@ -1956,6 +2438,10 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
         CheckerOffsetX,
         CheckerOffsetY,
         CheckerBoundaryTolerance,
+        EnableSmartCheckerDetection,
+        CheckerDetectionMinimumCellSize,
+        CheckerDetectionMaximumCellSize,
+        CheckerDetectionSearchRangePercent,
         _lastInputDirectory,
         _lastOutputDirectory);
 
@@ -2105,4 +2591,10 @@ public sealed class BackgroundRemovalViewModel : ObservableObject
     private static string GetOperationErrorMessage(Exception exception) => exception is ImageFormatException
         ? $"图片文件已损坏或格式无法识别：{exception.Message}"
         : exception.Message;
+
+    private readonly record struct CheckerDetectionSnapshot(
+        bool Enabled,
+        double MinimumCellSize,
+        double MaximumCellSize,
+        double SearchRangePercent);
 }

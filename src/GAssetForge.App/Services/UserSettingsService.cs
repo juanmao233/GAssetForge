@@ -69,6 +69,10 @@ public sealed class UserSettingsModel
     public double BackgroundRemovalCheckerOffsetX { get; set; }
     public double BackgroundRemovalCheckerOffsetY { get; set; }
     public double BackgroundRemovalCheckerBoundaryTolerance { get; set; } = 1d;
+    public bool BackgroundRemovalEnableSmartCheckerDetection { get; set; } = true;
+    public double BackgroundRemovalCheckerDetectionMinimumCellSize { get; set; } = 2d;
+    public double BackgroundRemovalCheckerDetectionMaximumCellSize { get; set; } = 256d;
+    public double BackgroundRemovalCheckerDetectionSearchRangePercent { get; set; } = 25d;
     public string? BackgroundRemovalLastInputDirectory { get; set; }
     public string? BackgroundRemovalLastOutputDirectory { get; set; }
     public string ImageOutlinePlacement { get; set; } = "Outside";
@@ -158,6 +162,21 @@ public sealed class UserSettingsService
                 1d,
                 0d,
                 8d);
+            settings.BackgroundRemovalCheckerDetectionMinimumCellSize = NormalizeFinite(
+                settings.BackgroundRemovalCheckerDetectionMinimumCellSize,
+                2d,
+                0.25d,
+                4096d);
+            settings.BackgroundRemovalCheckerDetectionMaximumCellSize = NormalizeFinite(
+                settings.BackgroundRemovalCheckerDetectionMaximumCellSize,
+                256d,
+                settings.BackgroundRemovalCheckerDetectionMinimumCellSize,
+                4096d);
+            settings.BackgroundRemovalCheckerDetectionSearchRangePercent = NormalizeFinite(
+                settings.BackgroundRemovalCheckerDetectionSearchRangePercent,
+                25d,
+                5d,
+                50d);
             settings.ImageOutlineWidth = Math.Clamp(
                 settings.ImageOutlineWidth,
                 ImageOutlineLimits.MinimumWidth,

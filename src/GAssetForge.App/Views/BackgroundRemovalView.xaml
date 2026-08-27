@@ -191,6 +191,7 @@
                         <DataGrid.Columns>
                             <DataGridTextColumn Width="2*" Header="文件" Binding="{Binding FileName}" />
                             <DataGridTextColumn Width="100" Header="源尺寸" Binding="{Binding SourceSizeText}" />
+                            <DataGridTextColumn Width="1.6*" Header="网格识别" Binding="{Binding CheckerDetectionText}" />
                             <DataGridTextColumn Width="72" Header="状态" Binding="{Binding StatusText}" />
                             <DataGridTextColumn Width="2*" Header="输出" Binding="{Binding OutputFileName}" />
                             <DataGridTextColumn Width="2*" Header="信息" Binding="{Binding Message}" />

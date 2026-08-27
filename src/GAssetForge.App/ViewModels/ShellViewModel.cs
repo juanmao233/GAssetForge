@@ -175,7 +175,12 @@ public sealed class ShellViewModel : ObservableObject
             _settings.BackgroundRemovalLastOutputDirectory,
             _workbenchConsoleService,
             previewCache: _imageProcessingPreviewCache,
-            colorPickerService: colorPickerService);
+            colorPickerService: colorPickerService,
+            checkerGridDetectionService: new ImageSharpCheckerGridDetectionService(),
+            enableSmartCheckerDetection: _settings.BackgroundRemovalEnableSmartCheckerDetection,
+            checkerDetectionMinimumCellSize: _settings.BackgroundRemovalCheckerDetectionMinimumCellSize,
+            checkerDetectionMaximumCellSize: _settings.BackgroundRemovalCheckerDetectionMaximumCellSize,
+            checkerDetectionSearchRangePercent: _settings.BackgroundRemovalCheckerDetectionSearchRangePercent);
         BackgroundRemoval.SettingsChanged += OnBackgroundRemovalSettingsChanged;
         PixelAlignment = new PixelAlignmentViewModel(
             new ImageSharpPixelAlignmentService(),
@@ -1937,6 +1942,10 @@ public sealed class ShellViewModel : ObservableObject
         _settings.BackgroundRemovalCheckerOffsetX = settings.CheckerOffsetX;
         _settings.BackgroundRemovalCheckerOffsetY = settings.CheckerOffsetY;
         _settings.BackgroundRemovalCheckerBoundaryTolerance = settings.CheckerBoundaryTolerance;
+        _settings.BackgroundRemovalEnableSmartCheckerDetection = settings.EnableSmartCheckerDetection;
+        _settings.BackgroundRemovalCheckerDetectionMinimumCellSize = settings.CheckerDetectionMinimumCellSize;
+        _settings.BackgroundRemovalCheckerDetectionMaximumCellSize = settings.CheckerDetectionMaximumCellSize;
+        _settings.BackgroundRemovalCheckerDetectionSearchRangePercent = settings.CheckerDetectionSearchRangePercent;
         _settings.BackgroundRemovalLastInputDirectory = settings.LastInputDirectory;
         _settings.BackgroundRemovalLastOutputDirectory = settings.LastOutputDirectory;
     }

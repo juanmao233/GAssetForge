@@ -5,6 +5,32 @@ development track; versioning policy will be finalized before the first public r
 
 ## Unreleased
 
+## 1.0.21t1 - 2026-08-27
+
+### Added
+
+- Added intelligent fake-transparency checker detection. The local detector samples all four corners,
+  finds the two repeated background colors, counts horizontal and vertical transitions, fits a shared
+  floating-point square-cell period and phase, and reports confidence, cell-size range, grid counts,
+  contributing corners, and a precise failure reason.
+- Added Background Removal Properties controls for per-image smart detection, minimum/maximum cell
+  width, corner scan range as a percentage of the source image short side, an explicit "detect current
+  image" action, and live detection diagnostics.
+
+### Changed
+
+- Fake-transparency batch removal now detects every image independently and builds an item-local
+  checker configuration. Different source scales no longer reuse the first image's cell width, colors,
+  or phase, and the detected values never overwrite the user's global manual grid settings.
+- A low-confidence or failed detection stops only that batch item and continues later items instead of
+  silently applying another image's grid. Manual ruler values remain available when smart detection is
+  disabled or after the user adjusts the search range.
+
+### Fixed
+
+- Preserved checker A/B parity when normalizing an inferred offset into one cell period, preventing a
+  correctly aligned grid from selecting the opposite background color after an odd-cell phase shift.
+
 ## 1.0.20t1 - 2026-08-27
 
 ### Added

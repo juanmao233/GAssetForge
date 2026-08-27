@@ -171,6 +171,70 @@
                                       IsChecked="{Binding EnableCheckerGridAlignment, Mode=TwoWay}"
                                       Content="启用网格对齐"
                                       Style="{DynamicResource App.CheckBoxStyle}" />
+                            <CheckBox x:Name="BackgroundRemovalPropertiesSmartCheckerDetectionCheckBox"
+                                      Margin="0,8,0,0"
+                                      IsChecked="{Binding EnableSmartCheckerDetection, Mode=TwoWay}"
+                                      Content="处理时逐图智能识别棋盘格"
+                                      Style="{DynamicResource App.CheckBoxStyle}" />
+                            <Grid Margin="0,8,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="7" />
+                                    <ColumnDefinition Width="*" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock Margin="0,0,0,4"
+                                               Text="最小格宽（px）"
+                                               Style="{StaticResource BackgroundRemovalPropertyLabelStyle}" />
+                                    <TextBox x:Name="BackgroundRemovalPropertiesCheckerDetectionMinimumCellSizeTextBox"
+                                             Text="{Binding CheckerDetectionMinimumCellSize, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.###}}"
+                                             Style="{DynamicResource App.TextBoxStyle}" />
+                                </StackPanel>
+                                <StackPanel Grid.Column="2">
+                                    <TextBlock Margin="0,0,0,4"
+                                               Text="最大格宽（px）"
+                                               Style="{StaticResource BackgroundRemovalPropertyLabelStyle}" />
+                                    <TextBox x:Name="BackgroundRemovalPropertiesCheckerDetectionMaximumCellSizeTextBox"
+                                             Text="{Binding CheckerDetectionMaximumCellSize, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.###}}"
+                                             Style="{DynamicResource App.TextBoxStyle}" />
+                                </StackPanel>
+                            </Grid>
+                            <Grid Margin="0,8,0,0">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="7" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <StackPanel>
+                                    <TextBlock Margin="0,0,0,4"
+                                               Text="四角扫描范围（短边 %）"
+                                               Style="{StaticResource BackgroundRemovalPropertyLabelStyle}" />
+                                    <TextBox x:Name="BackgroundRemovalPropertiesCheckerDetectionSearchRangeTextBox"
+                                             Text="{Binding CheckerDetectionSearchRangePercent, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.#}}"
+                                             Style="{DynamicResource App.TextBoxStyle}" />
+                                </StackPanel>
+                                <Button x:Name="BackgroundRemovalPropertiesDetectCheckerGridButton"
+                                        Grid.Column="2"
+                                        MinWidth="84"
+                                        VerticalAlignment="Bottom"
+                                        Command="{Binding DetectCheckerGridCommand}"
+                                        Content="识别当前图片"
+                                        Style="{StaticResource BackgroundRemovalCompactButtonStyle}" />
+                            </Grid>
+                            <ProgressBar Height="4"
+                                         Margin="0,7,0,0"
+                                         IsIndeterminate="True"
+                                         Visibility="{Binding IsCheckerGridDetecting, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                            <TextBlock Margin="0,7,0,0"
+                                       Foreground="{DynamicResource App.AccentBrush}"
+                                       FontSize="10"
+                                       Text="{Binding CheckerDetectionStatusText}"
+                                       TextWrapping="Wrap" />
+                            <TextBlock Margin="0,5,0,0"
+                                       Foreground="{DynamicResource App.TextMutedBrush}"
+                                       FontSize="10"
+                                       Text="智能模式会从四个角分别识别两种主色、格子周期与相位；每张批处理图片都会独立检测，不复用上一张图片的格宽。"
+                                       TextWrapping="Wrap" />
                             <Grid Margin="0,8,0,0"
                                   IsEnabled="{Binding EnableCheckerGridAlignment}">
                                 <Grid.ColumnDefinitions>
@@ -385,6 +449,8 @@
                                  Margin="0,3,0,0"
                                  ItemsSource="{Binding BatchItems}"
                                  SelectedItem="{Binding SelectedBatchItem, Mode=TwoWay}"
+                                 HorizontalContentAlignment="Stretch"
+                                 ScrollViewer.HorizontalScrollBarVisibility="Disabled"
                                  ScrollViewer.VerticalScrollBarVisibility="Auto">
                             <ListBox.ItemTemplate>
                                 <DataTemplate>
@@ -393,6 +459,11 @@
                                         <TextBlock Foreground="{DynamicResource App.TextMutedBrush}"
                                                    FontSize="9"
                                                    Text="{Binding StatusText}" />
+                                        <TextBlock Foreground="{DynamicResource App.TextMutedBrush}"
+                                                   FontSize="9"
+                                                   Text="{Binding CheckerDetectionText}"
+                                                   TextWrapping="Wrap"
+                                                   ToolTip="{Binding CheckerDetectionText}" />
                                     </StackPanel>
                                 </DataTemplate>
                             </ListBox.ItemTemplate>

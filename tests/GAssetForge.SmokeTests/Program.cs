@@ -126,6 +126,8 @@ internal static class Program
             Console.WriteLine("PASS  MCP Harness 使用官方 image_gen.py 将模型原图确定性写入项目路径");
             BackgroundRemovalSmokeTests.Run();
             Console.WriteLine("PASS  背景剔除纯色与假透明棋盘格、连通/全局模式、原有 Alpha 与原子 PNG 输出可用");
+            CheckerGridDetectionSmokeTests.Run();
+            Console.WriteLine("PASS  假透明棋盘智能识别支持浮点格宽、模糊边界、四角遮挡与批量逐图参数");
             ImageOutlineSmokeTests.Run();
             Console.WriteLine("PASS  图片描边外/内/中心模式、Alpha 轮廓、扩展画布与原子 PNG 输出可用");
             ImageProcessingUiSmokeTests.Run(_temporaryRoot);
@@ -1235,6 +1237,26 @@ internal static class Program
                 backgroundRemovalPropertiesView,
                 "BackgroundRemovalPropertiesCheckerOffsetYTextBox",
                 "背景剔除属性页缺少浮点 Y 偏移输入。");
+            var smartCheckerDetectionCheckBox = RequireNamedElement<CheckBox>(
+                backgroundRemovalPropertiesView,
+                "BackgroundRemovalPropertiesSmartCheckerDetectionCheckBox",
+                "背景剔除属性页缺少逐图智能棋盘识别开关。");
+            var checkerDetectionMinimumInput = RequireNamedElement<TextBox>(
+                backgroundRemovalPropertiesView,
+                "BackgroundRemovalPropertiesCheckerDetectionMinimumCellSizeTextBox",
+                "背景剔除属性页缺少智能识别最小格宽输入。");
+            var checkerDetectionMaximumInput = RequireNamedElement<TextBox>(
+                backgroundRemovalPropertiesView,
+                "BackgroundRemovalPropertiesCheckerDetectionMaximumCellSizeTextBox",
+                "背景剔除属性页缺少智能识别最大格宽输入。");
+            var checkerDetectionRangeInput = RequireNamedElement<TextBox>(
+                backgroundRemovalPropertiesView,
+                "BackgroundRemovalPropertiesCheckerDetectionSearchRangeTextBox",
+                "背景剔除属性页缺少四角扫描范围输入。");
+            var detectCheckerGridButton = RequireNamedElement<Button>(
+                backgroundRemovalPropertiesView,
+                "BackgroundRemovalPropertiesDetectCheckerGridButton",
+                "背景剔除属性页缺少识别当前图片按钮。");
             var checkerPreview = RequireNamedElement<CheckerGridImagePreviewControl>(
                 backgroundRemovalView,
                 "BackgroundRemovalInputPreview",
@@ -1288,6 +1310,28 @@ internal static class Program
             Equal(nameof(BackgroundRemovalViewModel.CheckerOffsetY),
                 BindingOperations.GetBindingExpression(checkerOffsetYInput, TextBox.TextProperty)?.ParentBinding.Path.Path,
                 "属性页浮点 Y 偏移绑定");
+            Equal(nameof(BackgroundRemovalViewModel.EnableSmartCheckerDetection),
+                BindingOperations.GetBindingExpression(
+                    smartCheckerDetectionCheckBox,
+                    ToggleButton.IsCheckedProperty)?.ParentBinding.Path.Path,
+                "逐图智能棋盘识别开关绑定");
+            Equal(nameof(BackgroundRemovalViewModel.CheckerDetectionMinimumCellSize),
+                BindingOperations.GetBindingExpression(
+                    checkerDetectionMinimumInput,
+                    TextBox.TextProperty)?.ParentBinding.Path.Path,
+                "智能识别最小格宽绑定");
+            Equal(nameof(BackgroundRemovalViewModel.CheckerDetectionMaximumCellSize),
+                BindingOperations.GetBindingExpression(
+                    checkerDetectionMaximumInput,
+                    TextBox.TextProperty)?.ParentBinding.Path.Path,
+                "智能识别最大格宽绑定");
+            Equal(nameof(BackgroundRemovalViewModel.CheckerDetectionSearchRangePercent),
+                BindingOperations.GetBindingExpression(
+                    checkerDetectionRangeInput,
+                    TextBox.TextProperty)?.ParentBinding.Path.Path,
+                "四角扫描范围绑定");
+            True(ReferenceEquals(shell.BackgroundRemoval.DetectCheckerGridCommand, detectCheckerGridButton.Command),
+                "识别当前图片按钮应绑定智能网格检测命令");
             var checkerCellBinding = BindingOperations.GetBindingExpression(
                 checkerPreview,
                 CheckerGridImagePreviewControl.CellSizeProperty)?.ParentBinding;

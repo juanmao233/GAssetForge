@@ -106,7 +106,11 @@ internal static class ImageToolIntegrationSmokeTests
             BackgroundRemovalCheckerCellSize = 20.5d,
             BackgroundRemovalCheckerOffsetX = 3.25d,
             BackgroundRemovalCheckerOffsetY = 5.75d,
-            BackgroundRemovalCheckerBoundaryTolerance = 1.5d
+            BackgroundRemovalCheckerBoundaryTolerance = 1.5d,
+            BackgroundRemovalEnableSmartCheckerDetection = true,
+            BackgroundRemovalCheckerDetectionMinimumCellSize = 4.5d,
+            BackgroundRemovalCheckerDetectionMaximumCellSize = 96.5d,
+            BackgroundRemovalCheckerDetectionSearchRangePercent = 30d
         });
         var editor = new EditorWorkspaceViewModel(
             new JsonProjectRepository(paths),
@@ -133,6 +137,13 @@ internal static class ImageToolIntegrationSmokeTests
             Near(3.25d, checker.CheckerOffsetX, 0.000001d, "Shell 加载小数棋盘 X 偏移");
             Near(5.75d, checker.CheckerOffsetY, 0.000001d, "Shell 加载小数棋盘 Y 偏移");
             Near(1.5d, checker.CheckerBoundaryTolerance, 0.000001d, "Shell 加载小数棋盘边界容差");
+            True(checker.EnableSmartCheckerDetection, "Shell 加载逐图智能棋盘识别开关");
+            Near(4.5d, checker.CheckerDetectionMinimumCellSize, 0.000001d,
+                "Shell 加载智能识别最小格宽");
+            Near(96.5d, checker.CheckerDetectionMaximumCellSize, 0.000001d,
+                "Shell 加载智能识别最大格宽");
+            Near(30d, checker.CheckerDetectionSearchRangePercent, 0.000001d,
+                "Shell 加载四角扫描范围");
             True(shell.BackgroundRemoval.RemoveEnclosedBackground,
                 "新设置应默认识别并剔除镂空内部底色");
             False(checker.EdgeConnectedOnly,
@@ -151,6 +162,10 @@ internal static class ImageToolIntegrationSmokeTests
             shell.BackgroundRemoval.CheckerOffsetX = 6.125d;
             shell.BackgroundRemoval.CheckerOffsetY = 8.875d;
             shell.BackgroundRemoval.CheckerBoundaryTolerance = 2.25d;
+            shell.BackgroundRemoval.EnableSmartCheckerDetection = false;
+            shell.BackgroundRemoval.CheckerDetectionMinimumCellSize = 6.25d;
+            shell.BackgroundRemoval.CheckerDetectionMaximumCellSize = 128.75d;
+            shell.BackgroundRemoval.CheckerDetectionSearchRangePercent = 35d;
 
             var persisted = settingsService.Load();
             Equal(ImageOutlinePlacement.Inside.ToString(), persisted.ImageOutlinePlacement,
@@ -173,6 +188,14 @@ internal static class ImageToolIntegrationSmokeTests
                 "小数棋盘 Y 偏移变化应即时持久化");
             Near(2.25d, persisted.BackgroundRemovalCheckerBoundaryTolerance, 0.000001d,
                 "小数棋盘边界容差变化应即时持久化");
+            False(persisted.BackgroundRemovalEnableSmartCheckerDetection,
+                "逐图智能棋盘识别开关变化应即时持久化");
+            Near(6.25d, persisted.BackgroundRemovalCheckerDetectionMinimumCellSize, 0.000001d,
+                "智能识别最小格宽变化应即时持久化");
+            Near(128.75d, persisted.BackgroundRemovalCheckerDetectionMaximumCellSize, 0.000001d,
+                "智能识别最大格宽变化应即时持久化");
+            Near(35d, persisted.BackgroundRemovalCheckerDetectionSearchRangePercent, 0.000001d,
+                "四角扫描范围变化应即时持久化");
 
             var generationSpec = shell.BackgroundRemoval.CreateGenerationSpec();
             False(generationSpec.ColorHex is "#EEEEEE" or "#999999",
