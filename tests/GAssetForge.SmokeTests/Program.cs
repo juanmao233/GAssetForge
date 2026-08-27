@@ -66,6 +66,8 @@ internal static class Program
             Console.WriteLine("PASS  Icon 指定角度投影遵循稳定世界坐标、镜头滚转与构图缩放规则");
             IconDesignGenerationConstraintSmokeTests.Run();
             Console.WriteLine("PASS  Icon 生成步骤冻结画幅、相机、镜头、投影与背景处理合同");
+            ArtWorkspaceGenerationConstraintSmokeTests.Run();
+            Console.WriteLine("PASS  美术工作区生成合同冻结指令、输出框和有序画布参考");
             ProductIdentityCompatibilitySmokeTests.Run();
             Console.WriteLine("PASS  GAssetForge 新标识与旧数据、项目、MCP 和调度身份兼容");
             ReleaseVersionConsistencySmokeTests.RunAsync(_temporaryRoot).GetAwaiter().GetResult();
@@ -74,6 +76,8 @@ internal static class Program
             Console.WriteLine("PASS  默认停靠布局包含可中央标签化的工具页、可关闭主视图及顶部标签拓扑");
             ArtWorkspaceSmokeTests.Run(_temporaryRoot);
             Console.WriteLine("PASS  美术工作区双图导入、受管持久化、项目隔离、恢复安全与停靠属性上下文可用");
+            ProductionArtWorkspaceGenerationGatewaySmokeTests.RunAll(_temporaryRoot);
+            Console.WriteLine("PASS  美术工作区生产网关在 Manifest、队列停止与传输中断时保留原任务 owner 并可续派完成");
             FilePathToImageSourceConverterSmokeTests.Run(_temporaryRoot);
             Console.WriteLine("PASS  图片预览解码同时限制宽高与总像素，并按文件版本安全复用缓存");
             IconDesignSettingsLoadAndPersistImmediately();

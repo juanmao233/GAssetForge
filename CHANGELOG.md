@@ -5,6 +5,40 @@ development track; versioning policy will be finalized before the first public r
 
 ## Unreleased
 
+## 1.0.23t1 - 2026-08-27
+
+### Added
+
+- Connected Art Workspace conversation instructions to the managed Agent/MCP generation harness.
+  The Properties panel now reports whether the selected Agent is unavailable, busy, or ready, and
+  accepts a single in-flight `发送并生成` request only when a formal project and executable Agent
+  session are active.
+- Added an `art-workspace` generation contract that freezes the user instruction, output-frame
+  geometry and pixel size, project `Assets` root, and every visible canvas reference including its
+  SHA-256, position, size, rotation, opacity, and layer order.
+- Added live Art Workspace Agent replies and generation progress. A successful final PNG remains in
+  the project `Assets/Generated/ArtWorkspace/<batchId>/Final` audit location and is copied into the
+  managed Art Workspace reference library for immediate display at the exact frozen output frame.
+
+### Changed
+
+- Art Workspace generation now shares the same durable task store, Run workspace, Codex Runtime,
+  MCP tools, and single Agent dispatch coordinator as the material-generation page instead of using
+  a presentation-only conversation placeholder.
+- Agent transport interruptions preserve the original Art Workspace task and frozen delivery path
+  for same-task continuation; they do not create a replacement art correction task.
+- Conversation persistence reserves the maximum Agent reply footprint before publication so live
+  status updates cannot push a valid workspace beyond its 16 MiB document limit.
+
+### Fixed
+
+- `submit_generation_output` now supports opaque full-frame workflows with no background-removal
+  contract and no staging paths. The harness archives the model PNG, creates a deterministic
+  normalized input, retains a processed audit copy, validates the frozen output, and atomically
+  commits the final image.
+- Prevented late generation results from a previous project or an escaped output path from being
+  imported into the active Art Workspace canvas.
+
 ## 1.0.22t1 - 2026-08-27
 
 ### Added

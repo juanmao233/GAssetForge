@@ -5,6 +5,7 @@ using GAssetForge.App.Services;
 using GAssetForge.App.ViewModels;
 using GAssetForge.App.Views;
 using GAssetForge.Core.ArtWorkspaces;
+using GAssetForge.Core.Generation;
 using System.Diagnostics;
 using System.IO;
 using System.Text.Json.Nodes;
@@ -67,11 +68,25 @@ internal static class ArtWorkspaceSmokeTests
             projectA,
             projectB,
             root);
+        AgentGatewayGenerationFlowStaysProjectSafe(
+            workspacePaths,
+            repository,
+            fixtureA);
+        FailedSaveKeepsActiveGenerationAlive(workspacePaths, repository);
         DockDocumentUsesArtWorkspaceContexts(Path.Combine(root, "dock-ui"));
     }
 
     private static void ValidatorAndConversationLimitsFailClosed(WorkspacePaths workspacePaths)
     {
+        var projectService = new ProjectWorkspaceService();
+        var capacityProject = projectService.Create(
+            workspacePaths.ProjectDirectory,
+            $"ArtWorkspaceCapacity-{Guid.NewGuid():N}",
+            "ui");
+        var sizeProject = projectService.Create(
+            workspacePaths.ProjectDirectory,
+            $"ArtWorkspaceSize-{Guid.NewGuid():N}",
+            "ui");
         var maximumPixelDocument = ArtWorkspaceDocumentFactory.Create();
         maximumPixelDocument.Assets.Add(CreateManagedAsset(
             "Assets/ArtWorkspace/References/maximum.png",
@@ -94,13 +109,44 @@ internal static class ArtWorkspaceSmokeTests
             () => ArtWorkspaceValidator.Validate(escapedOutputDocument),
             "输出目录不在 Assets 根目录时必须被拒绝");
 
+        var maximumOutputDocument = ArtWorkspaceDocumentFactory.Create();
+        maximumOutputDocument.OutputFrame.Width = 16384d;
+        maximumOutputDocument.OutputFrame.Height = 16384d;
+        ArtWorkspaceValidator.Validate(maximumOutputDocument);
+        var oversizedOutputDocument = ArtWorkspaceDocumentFactory.Create();
+        oversizedOutputDocument.OutputFrame.Width = 16385d;
+        Throws<InvalidDataException>(
+            () => ArtWorkspaceValidator.Validate(oversizedOutputDocument),
+            "美术工作区输出框任一边超过 16384 时必须被拒绝");
+
+        var maximumConstraintInput = new ArtWorkspaceGenerationConstraintInput
+        {
+            RequestId = Guid.NewGuid().ToString("N"),
+            Instruction = "验证美术工作区最大输出画幅。",
+            OutputFrameName = "最大输出框",
+            OutputFrameWidth = 16384d,
+            OutputFrameHeight = 16384d,
+            OutputPixelWidth = 16384,
+            OutputPixelHeight = 16384,
+            OutputBackgroundHex = "#20242C",
+            OutputRelativeDirectory = "Generated/ArtWorkspace"
+        };
+        _ = ArtWorkspaceGenerationConstraintPackageBuilder.Build(maximumConstraintInput);
+        Throws<ArgumentOutOfRangeException>(
+            () => ArtWorkspaceGenerationConstraintPackageBuilder.Build(
+                maximumConstraintInput with { OutputFrameWidth = 16385d }),
+            "美术工作区生成约束不得接受超过 16384 的显示画幅");
+
         using (var console = new WorkbenchConsoleService(workspacePaths))
         using (var capacityViewModel = new ArtWorkspaceViewModel(
                    new JsonArtWorkspaceRepository(workspacePaths),
                    new StubImagePicker(),
                    console))
         {
-            for (var index = 0; index < ArtWorkspaceValidator.MaximumMessages - 2; index++)
+            True(capacityViewModel.Activate(capacityProject.Paths.RootDirectory),
+                "对话容量测试应先激活正式项目");
+            capacityViewModel.ConfigureGenerationGateway(new StubGenerationGateway());
+            for (var index = 0; index < ArtWorkspaceValidator.MaximumMessages - 3; index++)
             {
                 capacityViewModel.Conversation.Add(CreateConversationMessage(index, "容量测试"));
             }
@@ -126,6 +172,9 @@ internal static class ArtWorkspaceSmokeTests
             new JsonArtWorkspaceRepository(workspacePaths),
             new StubImagePicker(),
             sizeConsole);
+        True(sizeViewModel.Activate(sizeProject.Paths.RootDirectory),
+            "序列化大小测试应先激活正式项目");
+        sizeViewModel.ConfigureGenerationGateway(new StubGenerationGateway());
         var largeMessage = new string('界', 16000);
         for (var index = 0; index < 350; index++)
         {
@@ -334,6 +383,7 @@ internal static class ArtWorkspaceSmokeTests
         using (var viewModel = new ArtWorkspaceViewModel(repository, new StubImagePicker(), console))
         {
             True(viewModel.Activate(projectA.Paths.RootDirectory), "项目 A 美术工作区应可激活");
+            viewModel.ConfigureGenerationGateway(new StubGenerationGateway());
             Equal(2, viewModel.AddImagesAt([fixtureA, fixtureB], 120d, 240d),
                 "两张有效参考图应同时加入画布");
             Equal(2, viewModel.Images.Count, "项目 A 画布图片数量");
@@ -396,8 +446,8 @@ internal static class ArtWorkspaceSmokeTests
                     message.IsUser && string.Equals(message.Text, projectAInstruction, StringComparison.Ordinal)),
                 "创作指令应先作为本地对话记录持久化");
             True(viewModel.Conversation.Any(message =>
-                    !message.IsUser && message.State == "awaiting-generation-adapter"),
-                "当前实现应明确停留在等待生成适配器状态而不启动真实 Agent");
+                    message.IsAgent && message.State == "failed"),
+                "测试网关失败时应把原因写入可见 Agent 对话，而不是停留在等待适配器状态");
             True(viewModel.SaveNow(), "修改画布、输出框与对话后应可立即保存");
 
             True(viewModel.Activate(projectB.Paths.RootDirectory), "从项目 A 切换到项目 B 应成功");
@@ -437,6 +487,232 @@ internal static class ArtWorkspaceSmokeTests
         Near(444.5d, reloadedFirst.X, "新建 ViewModel 应恢复图片位置");
         True(reloaded.Conversation.Any(message => message.Text == projectAInstruction),
             "新建 ViewModel 应恢复创作对话");
+    }
+
+    private static void AgentGatewayGenerationFlowStaysProjectSafe(
+        WorkspacePaths workspacePaths,
+        JsonArtWorkspaceRepository repository,
+        string referenceFixture)
+    {
+        var projectService = new ProjectWorkspaceService();
+        var projectA = projectService.Create(
+            workspacePaths.ProjectDirectory,
+            $"ArtWorkspaceAgentA-{Guid.NewGuid():N}",
+            "ui");
+        var projectB = projectService.Create(
+            workspacePaths.ProjectDirectory,
+            $"ArtWorkspaceAgentB-{Guid.NewGuid():N}",
+            "ui");
+        using var console = new WorkbenchConsoleService(workspacePaths);
+        using var viewModel = new ArtWorkspaceViewModel(repository, new StubImagePicker(), console);
+        True(viewModel.Activate(projectA.Paths.RootDirectory), "Agent 生成测试应激活项目 A");
+        viewModel.InstructionDraft = "创建一枚轴对齐的蓝色游戏徽章。";
+        False(viewModel.SubmitInstructionCommand.CanExecute(null),
+            "尚未配置生成网关时发送并生成必须禁用");
+
+        var gateway = new StubGenerationGateway(isConnected: false);
+        viewModel.ConfigureGenerationGateway(gateway);
+        False(viewModel.SubmitInstructionCommand.CanExecute(null),
+            "网关未连接时发送并生成必须禁用");
+        gateway.SetState(isConnected: true, isBusy: false, "Codex App Server 会话已就绪");
+        True(viewModel.AgentConnectionStatusText.Contains("Agent 已接入可用", StringComparison.Ordinal),
+            "网关 ready 后属性页应显示 Agent 已接入可用");
+        gateway.SetState(isConnected: true, isBusy: true, "Agent 正在执行其它任务");
+        False(viewModel.SubmitInstructionCommand.CanExecute(null),
+            "全局 Agent 忙碌时发送并生成必须禁用");
+        gateway.SetState(isConnected: true, isBusy: false, "Agent 可用");
+
+        Equal(1, viewModel.AddImagesAt([referenceFixture], 120d, 180d),
+            "Agent 生成测试应先加入一张可见参考图");
+        viewModel.SetOutputFrame(640d, 720d, 20000d, 30000d, commit: true);
+        Near(16384d, viewModel.OutputFrameWidth,
+            "属性输入超过生成合同上限时输出框宽度应收束到 16384");
+        Near(16384d, viewModel.OutputFrameHeight,
+            "属性输入超过生成合同上限时输出框高度应收束到 16384");
+        viewModel.SetOutputFrame(640d, 720d, 512d, 384d, commit: true);
+        viewModel.OutputFrameName = "徽章输出";
+        var finalDirectory = Path.Combine(
+            projectA.Paths.RootDirectory,
+            "Assets",
+            "Generated",
+            "ArtWorkspace");
+        Directory.CreateDirectory(finalDirectory);
+        var finalPath = Path.Combine(finalDirectory, "badge-final.png");
+        SavePngFixture(finalPath, 12, 9, 0x29, 0x78, 0xD1);
+
+        ArtWorkspaceGenerationRequest? capturedRequest = null;
+        gateway.GenerateHandler = (request, progress, _) =>
+        {
+            capturedRequest = request;
+            progress?.Report(new ArtWorkspaceGenerationProgress
+            {
+                State = "generating",
+                Message = "正在生成徽章",
+                AgentDescription = "正在根据冻结参考图生成徽章。",
+                Percentage = 55d
+            });
+            return Task.FromResult(new ArtWorkspaceGenerationResult
+            {
+                IsSuccess = true,
+                AgentDescription = "已生成轴对齐的蓝色游戏徽章。",
+                OutputPaths = [finalPath],
+                BatchId = Guid.NewGuid().ToString("N"),
+                TaskId = Guid.NewGuid().ToString("N")
+            });
+        };
+
+        viewModel.InstructionDraft = "创建一枚轴对齐的蓝色游戏徽章。";
+        True(viewModel.SubmitInstructionCommand.CanExecute(null),
+            "正式项目和可用 Agent 下发送并生成应可执行");
+        viewModel.SubmitInstructionCommand.Execute(null);
+        WaitUntilWithDispatcher(
+            () => !viewModel.IsGenerating &&
+                  viewModel.Conversation.Any(message => message.IsAgent && message.State == "completed"),
+            TimeSpan.FromSeconds(10),
+            "Agent 生成完成后应更新对话并退出忙碌状态");
+
+        True(capturedRequest is not null, "生成网关应收到冻结请求");
+        Equal(projectA.Paths.RootDirectory, capturedRequest!.ProjectRoot,
+            "冻结请求应绑定项目 A 根目录");
+        Equal(projectA.Paths.AssetDirectory, capturedRequest.AssetRoot,
+            "冻结请求应绑定项目 A Assets 根目录");
+        Equal(512, capturedRequest.OutputFrame.PixelWidth, "冻结请求输出像素宽度");
+        Equal(384, capturedRequest.OutputFrame.PixelHeight, "冻结请求输出像素高度");
+        Equal(1, capturedRequest.VisibleReferences.Length, "冻结请求应只包含当前可见参考图");
+        True(Path.IsPathRooted(capturedRequest.VisibleReferences[0].AbsolutePath),
+            "冻结参考图必须使用绝对受管路径");
+        True(File.Exists(finalPath), "导入画布后必须保留 Generated 正式原件");
+        Equal(2, viewModel.Images.Count, "生成成功后画布应增加一张受管预览副本");
+        var generated = viewModel.Images.Single(image => image.Name == "徽章输出");
+        False(string.Equals(generated.AbsolutePath, finalPath, StringComparison.OrdinalIgnoreCase),
+            "画布应引用受管预览副本而不是移动 Generated 原件");
+        True(File.Exists(generated.AbsolutePath), "画布受管预览副本应真实存在");
+        Near(640d, generated.X, "生成预览应精确放入输出框 X");
+        Near(720d, generated.Y, "生成预览应精确放入输出框 Y");
+        Near(512d, generated.Width, "生成预览应匹配输出框宽度");
+        Near(384d, generated.Height, "生成预览应匹配输出框高度");
+        True(viewModel.Conversation.Any(message =>
+                message.IsAgent && message.Text.Contains("蓝色游戏徽章", StringComparison.Ordinal)),
+            "Agent 最终描述应保存到工作区对话");
+
+        var outsidePath = Path.Combine(projectA.Paths.AssetDirectory, "Unrelated", "outside-final.png");
+        Directory.CreateDirectory(Path.GetDirectoryName(outsidePath)!);
+        SavePngFixture(outsidePath, 4, 4, 0xD8, 0x73, 0x2A);
+        gateway.GenerateHandler = (_, _, _) => Task.FromResult(new ArtWorkspaceGenerationResult
+        {
+            IsSuccess = true,
+            AgentDescription = "不应被接受的冻结输出目录外产物",
+            OutputPaths = [outsidePath]
+        });
+        var imageCountBeforeOutsideResult = viewModel.Images.Count;
+        viewModel.InstructionDraft = "尝试返回冻结输出目录外的图片。";
+        viewModel.SubmitInstructionCommand.Execute(null);
+        WaitUntilWithDispatcher(
+            () => !viewModel.IsGenerating &&
+                  viewModel.Conversation.Last().State == "failed",
+            TimeSpan.FromSeconds(10),
+            "冻结输出目录外产物应转换为可见失败消息");
+        Equal(imageCountBeforeOutsideResult, viewModel.Images.Count,
+            "同项目但不属于冻结输出目录的返回路径不得加入画布");
+
+        var delayedCompletion = new TaskCompletionSource<ArtWorkspaceGenerationResult>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        gateway.GenerateHandler = (_, _, _) => delayedCompletion.Task;
+        viewModel.InstructionDraft = "生成一个会在项目切换后返回的图片。";
+        viewModel.SubmitInstructionCommand.Execute(null);
+        WaitUntilWithDispatcher(
+            () => viewModel.IsGenerating,
+            TimeSpan.FromSeconds(2),
+            "迟到结果测试应进入生成状态");
+        True(viewModel.Activate(projectB.Paths.RootDirectory),
+            "生成期间应允许切换项目并取消当前请求");
+        delayedCompletion.SetResult(new ArtWorkspaceGenerationResult
+        {
+            IsSuccess = true,
+            AgentDescription = "项目 A 的迟到结果",
+            OutputPaths = [finalPath]
+        });
+        WaitUntilWithDispatcher(
+            () => !viewModel.IsGenerating,
+            TimeSpan.FromSeconds(10),
+            "迟到结果返回后应释放单飞状态");
+        Equal(0, viewModel.Images.Count,
+            "项目 A 的迟到结果不得污染已切换到项目 B 的画布");
+    }
+
+    private static void FailedSaveKeepsActiveGenerationAlive(
+        WorkspacePaths workspacePaths,
+        JsonArtWorkspaceRepository repository)
+    {
+        var projectService = new ProjectWorkspaceService();
+        var projectA = projectService.Create(
+            workspacePaths.ProjectDirectory,
+            $"ArtWorkspaceSaveFailureA-{Guid.NewGuid():N}",
+            "ui");
+        var projectB = projectService.Create(
+            workspacePaths.ProjectDirectory,
+            $"ArtWorkspaceSaveFailureB-{Guid.NewGuid():N}",
+            "ui");
+        using var console = new WorkbenchConsoleService(workspacePaths);
+        using var viewModel = new ArtWorkspaceViewModel(repository, new StubImagePicker(), console);
+        True(viewModel.Activate(projectA.Paths.RootDirectory),
+            "保存失败取消顺序测试应先激活项目 A");
+
+        var completion = new TaskCompletionSource<ArtWorkspaceGenerationResult>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var handlerStarted = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var cancellationObserved = 0;
+        var gateway = new StubGenerationGateway
+        {
+            GenerateHandler = (_, _, cancellationToken) =>
+            {
+                cancellationToken.Register(() => Interlocked.Exchange(ref cancellationObserved, 1));
+                handlerStarted.TrySetResult(true);
+                return completion.Task.WaitAsync(cancellationToken);
+            }
+        };
+        viewModel.ConfigureGenerationGateway(gateway);
+        viewModel.InstructionDraft = "生成期间测试未保存项目切换。";
+        viewModel.SubmitInstructionCommand.Execute(null);
+        WaitUntilWithDispatcher(
+            () => handlerStarted.Task.IsCompleted && viewModel.IsGenerating,
+            TimeSpan.FromSeconds(2),
+            "保存失败取消顺序测试应先进入 Agent 生成状态");
+
+        viewModel.OutputFrameName = "尚未安全保存的输出框";
+        var documentPath = repository.ResolveDocumentPath(projectA.Paths.RootDirectory);
+        var heldDocumentPath = documentPath + $".held-{Guid.NewGuid():N}";
+        File.Move(documentPath, heldDocumentPath);
+        Directory.CreateDirectory(documentPath);
+        try
+        {
+            False(viewModel.Activate(projectB.Paths.RootDirectory),
+                "当前工作区保存失败时必须拒绝项目切换");
+            Equal(0, Volatile.Read(ref cancellationObserved),
+                "保存失败不得提前取消仍属于当前项目的 Agent 生成");
+            True(viewModel.IsGenerating,
+                "保存失败后当前项目的 Agent 生成应继续等待原结果");
+            True(viewModel.ProjectContextText.Contains(projectA.Paths.RootDirectory, StringComparison.OrdinalIgnoreCase),
+                "保存失败后美术工作区必须仍绑定项目 A");
+        }
+        finally
+        {
+            Directory.Delete(documentPath);
+            File.Move(heldDocumentPath, documentPath);
+        }
+
+        completion.SetResult(new ArtWorkspaceGenerationResult
+        {
+            IsSuccess = false,
+            ErrorMessage = "测试结束"
+        });
+        WaitUntilWithDispatcher(
+            () => !viewModel.IsGenerating,
+            TimeSpan.FromSeconds(5),
+            "恢复保存路径并结束测试结果后应释放生成状态");
+        True(viewModel.SaveNow(),
+            "保存路径恢复后当前项目工作区应可继续正常保存");
     }
 
     private static void BackupRecoveryAndPathBoundariesFailClosed(
@@ -1065,6 +1341,48 @@ internal static class ArtWorkspaceSmokeTests
     private sealed class StubImagePicker(params string[] paths) : IArtWorkspaceImagePicker
     {
         public IReadOnlyList<string> SelectImages(string? initialDirectory) => paths;
+    }
+
+    private sealed class StubGenerationGateway(
+        bool isConnected = true,
+        bool isBusy = false) : IArtWorkspaceGenerationGateway
+    {
+        public bool IsConnected { get; private set; } = isConnected;
+
+        public bool IsBusy { get; private set; } = isBusy;
+
+        public string AgentDisplayName { get; private set; } = "Codex";
+
+        public string StatusText { get; private set; } = isConnected
+            ? "Codex App Server 会话已就绪"
+            : "Agent 会话未启动";
+
+        public Func<
+            ArtWorkspaceGenerationRequest,
+            IProgress<ArtWorkspaceGenerationProgress>?,
+            CancellationToken,
+            Task<ArtWorkspaceGenerationResult>>? GenerateHandler { get; set; }
+
+        public event EventHandler? StateChanged;
+
+        public Task<ArtWorkspaceGenerationResult> GenerateAsync(
+            ArtWorkspaceGenerationRequest frozenRequest,
+            IProgress<ArtWorkspaceGenerationProgress>? progress = null,
+            CancellationToken cancellationToken = default) =>
+            GenerateHandler?.Invoke(frozenRequest, progress, cancellationToken) ??
+            Task.FromResult(new ArtWorkspaceGenerationResult
+            {
+                IsSuccess = false,
+                ErrorMessage = "测试网关未配置生成产物。"
+            });
+
+        public void SetState(bool isConnected, bool isBusy, string statusText)
+        {
+            IsConnected = isConnected;
+            IsBusy = isBusy;
+            StatusText = statusText;
+            StateChanged?.Invoke(this, EventArgs.Empty);
+        }
     }
 
     private sealed class ArtWorkspaceSmokeTestException(string message) : Exception(message);

@@ -55,10 +55,15 @@ internal sealed class GeneratedOutputSubmissionService(
                 $"任务 {task.Id} 必须由当前 agentId 认领后才能提交模型产物。");
         }
 
-        if (outputIndex < 0 || outputIndex >= task.Constraints.Output.Count ||
-            workspace.ModelOutputPaths.Length != task.Constraints.Output.Count ||
-            delivery.StagingPaths.Length != task.Constraints.Output.Count ||
-            delivery.TargetPaths.Length != task.Constraints.Output.Count)
+        var output = task.Constraints.Output;
+        var hasBackgroundRemoval = output.BackgroundRemoval is not null;
+        if (outputIndex < 0 || outputIndex >= output.Count ||
+            workspace.ModelOutputPaths.Length != output.Count ||
+            workspace.ProcessedPaths.Length != output.Count ||
+            delivery.TargetPaths.Length != output.Count ||
+            (hasBackgroundRemoval
+                ? delivery.StagingPaths.Length != output.Count
+                : delivery.StagingPaths.Length != 0))
         {
             throw new InvalidDataException("运行工作区输出路径与 output.count 不一致。");
         }
@@ -69,16 +74,18 @@ internal sealed class GeneratedOutputSubmissionService(
             delivery.AssetRoot,
             requireExistingFile: false,
             "模型原图归档");
-        var normalized = contextResolver.ResolveDeliveryAssetPath(
-            delivery.StagingPaths[outputIndex],
-            delivery.AssetRoot,
-            requireExistingFile: false,
-            "软件归一化输入");
         var target = contextResolver.ResolveDeliveryAssetPath(
             delivery.TargetPaths[outputIndex],
             delivery.AssetRoot,
             requireExistingFile: false,
             "最终交付");
+        var normalized = contextResolver.ResolveDeliveryAssetPath(
+            hasBackgroundRemoval
+                ? delivery.StagingPaths[outputIndex]
+                : BuildDirectNormalizedPath(workspace, outputIndex),
+            delivery.AssetRoot,
+            requireExistingFile: false,
+            "软件归一化输入");
 
         string sourceSha256;
         using (var measurement = GenerationRunJournal.Measure(
@@ -123,7 +130,7 @@ internal sealed class GeneratedOutputSubmissionService(
                 resized = await NormalizeAsync(
                         modelOutput.FullPath,
                         normalized.FullPath,
-                        task.Constraints.Output,
+                        output,
                         cancellationToken)
                     .ConfigureAwait(false);
                 measurement.Complete(
@@ -151,13 +158,23 @@ internal sealed class GeneratedOutputSubmissionService(
         {
             try
             {
-                processing = await postProcessor.ProcessAsync(
-                        task,
-                        delivery,
-                        agentId,
-                        outputIndex,
-                        cancellationToken)
-                    .ConfigureAwait(false);
+                processing = hasBackgroundRemoval
+                    ? await postProcessor.ProcessAsync(
+                            task,
+                            delivery,
+                            agentId,
+                            outputIndex,
+                            cancellationToken)
+                        .ConfigureAwait(false)
+                    : await CommitDirectOutputAsync(
+                            task,
+                            delivery,
+                            workspace,
+                            normalized,
+                            target,
+                            outputIndex,
+                            cancellationToken)
+                        .ConfigureAwait(false);
                 measurement.Complete(processing.Message, processing.RelativeTargetPath);
             }
             catch (TilemapGeometryValidationException exception)
@@ -250,6 +267,147 @@ internal sealed class GeneratedOutputSubmissionService(
         return fullPath;
     }
 
+    private static string BuildDirectNormalizedPath(
+        GenerationRunWorkspacePlan workspace,
+        int outputIndex)
+    {
+        var rootPath = GenerationInputValidator.NormalizeRelativeAssetPath(workspace.RootPath);
+        var modelPath = GenerationInputValidator.NormalizeRelativeAssetPath(
+            workspace.ModelOutputPaths[outputIndex]);
+        var modelPrefix = $"{rootPath}/30-model-output/";
+        if (!modelPath.StartsWith(modelPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                "无背景剔除任务的模型原图必须位于 generation workspace 的 30-model-output 目录。");
+        }
+
+        var suffix = modelPath[modelPrefix.Length..];
+        var fileName = Path.GetFileName(suffix);
+        var directory = Path.GetDirectoryName(suffix)?.Replace('\\', '/');
+        var normalizedFileName = fileName.EndsWith(".model.png", StringComparison.OrdinalIgnoreCase)
+            ? $"{fileName[..^".model.png".Length]}.normalized.png"
+            : $"{Path.GetFileNameWithoutExtension(fileName)}.normalized.png";
+        var childPath = string.IsNullOrWhiteSpace(directory)
+            ? normalizedFileName
+            : $"{directory}/{normalizedFileName}";
+        return GenerationInputValidator.NormalizeRelativeAssetPath(
+            $"{rootPath}/35-normalized-input/{childPath}");
+    }
+
+    private async Task<GeneratedOutputProcessingResult> CommitDirectOutputAsync(
+        GenerationTask task,
+        GenerationDeliveryPlan delivery,
+        GenerationRunWorkspacePlan workspace,
+        ValidatedAssetPath normalized,
+        ValidatedAssetPath target,
+        int outputIndex,
+        CancellationToken cancellationToken)
+    {
+        var processed = contextResolver.ResolveDeliveryAssetPath(
+            workspace.ProcessedPaths[outputIndex],
+            delivery.AssetRoot,
+            requireExistingFile: false,
+            "软件处理后产物");
+
+        if (GeneratedAssetPostProcessor.IsValidFinalTarget(target.FullPath, task.Constraints))
+        {
+            return new GeneratedOutputProcessingResult(
+                outputIndex,
+                normalized.RelativePath,
+                File.Exists(processed.FullPath) ? processed.RelativePath : null,
+                target.RelativePath,
+                Processed: false,
+                AlreadyFinal: true,
+                Skipped: true,
+                ReplacedExistingTarget: false,
+                StagingDeleted: false,
+                "无背景剔除任务的最终目标已经存在并通过约束校验。",
+                null);
+        }
+
+        GeneratedAssetValidator.Validate(normalized.FullPath, task.Constraints);
+        await CopyArtifactIfAbsentOrEqualAsync(
+                normalized.FullPath,
+                processed.FullPath,
+                cancellationToken)
+            .ConfigureAwait(false);
+        GeneratedAssetValidator.Validate(processed.FullPath, task.Constraints);
+        await CopyArtifactIfAbsentOrEqualAsync(
+                processed.FullPath,
+                target.FullPath,
+                cancellationToken)
+            .ConfigureAwait(false);
+        GeneratedAssetValidator.Validate(target.FullPath, task.Constraints);
+        return new GeneratedOutputProcessingResult(
+            outputIndex,
+            normalized.RelativePath,
+            processed.RelativePath,
+            target.RelativePath,
+            Processed: true,
+            AlreadyFinal: false,
+            Skipped: false,
+            ReplacedExistingTarget: false,
+            StagingDeleted: false,
+            "软件已归一化无背景剔除产物、保留处理副本并提交最终目标。",
+            null);
+    }
+
+    private static async Task CopyArtifactIfAbsentOrEqualAsync(
+        string sourcePath,
+        string targetPath,
+        CancellationToken cancellationToken)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);
+        var sourceHash = await ComputeSha256Async(sourcePath, cancellationToken).ConfigureAwait(false);
+        if (File.Exists(targetPath))
+        {
+            var existingHash = await ComputeSha256Async(targetPath, cancellationToken).ConfigureAwait(false);
+            if (string.Equals(existingHash, sourceHash, StringComparison.OrdinalIgnoreCase))
+            {
+                return;
+            }
+
+            throw new IOException($"运行工作区已经存在不同内容的产物，拒绝覆盖：{targetPath}");
+        }
+
+        var temporaryPath = $"{targetPath}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            await using var source = new FileStream(
+                sourcePath,
+                FileMode.Open,
+                FileAccess.Read,
+                FileShare.Read,
+                128 * 1024,
+                FileOptions.Asynchronous | FileOptions.SequentialScan);
+            await using (var targetStream = new FileStream(
+                temporaryPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                128 * 1024,
+                FileOptions.Asynchronous | FileOptions.WriteThrough))
+            {
+                await source.CopyToAsync(targetStream, cancellationToken).ConfigureAwait(false);
+                await targetStream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            File.Move(temporaryPath, targetPath);
+        }
+        catch (IOException) when (File.Exists(targetPath))
+        {
+            var existingHash = await ComputeSha256Async(targetPath, cancellationToken).ConfigureAwait(false);
+            if (!string.Equals(existingHash, sourceHash, StringComparison.OrdinalIgnoreCase))
+            {
+                throw;
+            }
+        }
+        finally
+        {
+            TryDeleteFile(temporaryPath);
+        }
+    }
+
     private static async Task<string> ImportModelOutputAsync(
         string sourcePath,
         string targetPath,
@@ -307,7 +465,9 @@ internal sealed class GeneratedOutputSubmissionService(
     {
         var removal = output.BackgroundRemoval;
         var background = removal is null
-            ? new Rgba32(0, 0, 0, 0)
+            ? output.TransparentBackground
+                ? new Rgba32(0, 0, 0, 0)
+                : new Rgba32(0, 0, 0, byte.MaxValue)
             : ParseColor(removal.ColorHex);
         var temporaryPath = $"{targetPath}.{Guid.NewGuid():N}.tmp.png";
         Directory.CreateDirectory(Path.GetDirectoryName(targetPath)!);

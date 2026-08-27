@@ -3,7 +3,8 @@ namespace GAssetForge.Core.ArtWorkspaces;
 public enum ArtWorkspaceMessageRole
 {
     User,
-    Workbench
+    Workbench,
+    Agent
 }
 
 public sealed class ArtWorkspaceDocument

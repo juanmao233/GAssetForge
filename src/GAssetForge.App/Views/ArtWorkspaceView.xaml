@@ -236,8 +236,8 @@
                       Cursor="SizeAll"
                       PreviewMouseLeftButtonDown="OutputFrame_OnPreviewMouseLeftButtonDown">
                     <Border Background="{Binding OutputBackgroundHex, Converter={StaticResource StringToBrushConverter}, ConverterParameter=#20242C}"
-                            Opacity="0.38"
-                            BorderBrush="{DynamicResource App.AccentBrush}"
+                             Opacity="0.14"
+                             BorderBrush="{DynamicResource App.AccentBrush}"
                             BorderThickness="2" />
                     <Rectangle Margin="5"
                                Stroke="{DynamicResource App.AccentBrush}"

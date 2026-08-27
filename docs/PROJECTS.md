@@ -43,7 +43,7 @@ UI repository、锁定 Project 面板并进入所选业务主视图。
 - `Assets`：当前项目全部美术资产的边界。
 - `Assets\ArtWorkspace\References`：美术工作区导入参考图的受管副本；工作区 JSON 不引用项目外绝对路径。
 - `Assets\Generated`：AI 生成内容的默认交付目录。
-- `Assets\Generated\ArtWorkspace`：美术工作区声明的默认未来输出位置；当前版本记录意图但不在这里伪造产物。
+- `Assets\Generated\ArtWorkspace\<batchId>\Final`：美术工作区 Agent 生成的冻结最终交付目录；模型原图和确定性中间步骤仍保留在同项目的 GAssetForge Run 中。
 - `Packages`：为后续包与扩展依赖预留。
 - `gassetforge.project.json`：manifest Schema v1，保存项目身份、名称、工作流、时间戳和 Tilemap 参数。
 - `ui-project.pfui.json`：UI Project Schema v2，保存页面、图层、Prefab 与编辑器会话数据。
@@ -83,9 +83,10 @@ Project 面板在项目激活后固定以 `<ProjectRoot>\Assets` 为根，不能
 把旧任务改投到新项目。
 
 “美术工作区制作”是 ContentId 为 `art-workspace` 的独立中央文档，不属于 `WorkflowKind`，因此打开它不会
-改变项目创建时选择的业务模板。主画布和共享属性面板中的对话输入绑定同一个项目级 ViewModel。当前提交
-对话只把文字保存为创作意图，不会启动 Agent 或图像模型；输出相对目录也只是未来受控交付目标。后续接入
-生成链路后，产物仍必须在冻结项目 `Assets` 根、任务所有权、验证和原子提交约束下交付。
+改变项目创建时选择的业务模板。主画布和共享属性面板中的对话输入绑定同一个项目级 ViewModel。Agent/MCP
+达到可执行状态后，提交对话会冻结文字、输出框、可见参考图及其哈希/变换和项目 `Assets` 根，创建独立的
+`art-workspace` 单图持久任务，并通过共享 Agent 调度器执行。只有精确冻结目标中的 PNG 通过 Harness 校验并
+完成任务后，才保留 Generated 原件并复制为受管画布预览；项目切换后的迟到结果不会导入新项目。
 
 ## 重启恢复
 

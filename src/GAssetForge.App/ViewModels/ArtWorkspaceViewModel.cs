@@ -29,6 +29,10 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
     public const double MinimumZoom = 0.1d;
     public const double MaximumZoom = 4d;
     private static readonly TimeSpan AutoSaveDelay = TimeSpan.FromMilliseconds(650);
+    private static readonly string MaximumSerializedAgentReplyReservation =
+        new('\u4E00', ArtWorkspaceConversationMessageViewModel.MaximumTextLength);
+    private static readonly string MaximumSerializedAgentStateReservation =
+        new('\u4E00', ArtWorkspaceConversationMessageViewModel.MaximumStateLength);
     private const int MaximumAutoSaveRetries = 3;
 
     private readonly JsonArtWorkspaceRepository _repository;
@@ -36,11 +40,12 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
     private readonly WorkbenchConsoleService _console;
     private readonly DispatcherTimer _saveTimer;
     private readonly AsyncRelayCommand _importImagesCommand;
-    private readonly RelayCommand _submitInstructionCommand;
+    private readonly AsyncRelayCommand _submitInstructionCommand;
     private readonly RelayCommand _removeSelectedImageCommand;
     private readonly RelayCommand _bringSelectedToFrontCommand;
     private readonly RelayCommand _cancelImportCommand;
     private readonly RelayCommand<ArtWorkspaceImageItemViewModel> _selectImageCommand;
+    private readonly Dispatcher _dispatcher;
     private readonly List<ArtWorkspaceManagedAsset> _assets = [];
     private ArtWorkspaceDocument _document = ArtWorkspaceDocumentFactory.Create();
     private string? _projectRoot;
@@ -66,6 +71,12 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
     private bool _suppressAutoSave;
     private bool _isImporting;
     private CancellationTokenSource? _importCancellation;
+    private IArtWorkspaceGenerationGateway? _generationGateway;
+    private CancellationTokenSource? _generationCancellation;
+    private string? _activeGenerationRequestId;
+    private bool _isGenerating;
+    private string _generationProgressText = "尚未启动生成";
+    private double _generationProgressPercentage;
     private bool _disposed;
 
     public ArtWorkspaceViewModel(
@@ -76,11 +87,12 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         _repository = repository ?? throw new ArgumentNullException(nameof(repository));
         _imagePicker = imagePicker ?? throw new ArgumentNullException(nameof(imagePicker));
         _console = console ?? throw new ArgumentNullException(nameof(console));
+        _dispatcher = Dispatcher.CurrentDispatcher;
         _importImagesCommand = new AsyncRelayCommand(ImportImagesAsync, () => !IsImporting);
         ImportImagesCommand = _importImagesCommand;
         _cancelImportCommand = new RelayCommand(CancelImport, () => IsImporting);
         CancelImportCommand = _cancelImportCommand;
-        _submitInstructionCommand = new RelayCommand(SubmitInstruction, CanSubmitInstruction);
+        _submitInstructionCommand = new AsyncRelayCommand(SubmitInstructionAsync, CanSubmitInstruction);
         SubmitInstructionCommand = _submitInstructionCommand;
         SaveCommand = new RelayCommand(() => SaveNow());
         ResetViewportCommand = new RelayCommand(ResetViewportToOrigin);
@@ -155,6 +167,68 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         ? "本地草稿工作区"
         : $"项目工作区 · {_projectRoot}";
 
+    public bool IsAgentConnected => _generationGateway?.IsConnected == true;
+
+    public bool IsAgentBusy => _generationGateway?.IsBusy == true;
+
+    public bool IsGenerating
+    {
+        get => _isGenerating;
+        private set
+        {
+            if (!SetProperty(ref _isGenerating, value))
+            {
+                return;
+            }
+
+            OnPropertyChanged(nameof(SubmitInstructionButtonText));
+            OnPropertyChanged(nameof(AgentConnectionStatusText));
+            OnPropertyChanged(nameof(CanSubmitInstructionText));
+            _submitInstructionCommand.RaiseCanExecuteChanged();
+        }
+    }
+
+    public string AgentConnectionStatusText
+    {
+        get
+        {
+            if (_generationGateway is null)
+            {
+                return "Agent 未接入";
+            }
+
+            if (!IsAgentConnected)
+            {
+                return string.IsNullOrWhiteSpace(_generationGateway.StatusText)
+                    ? "Agent 尚未达到可执行状态"
+                    : _generationGateway.StatusText;
+            }
+
+            var displayName = string.IsNullOrWhiteSpace(_generationGateway.AgentDisplayName)
+                ? "Agent"
+                : _generationGateway.AgentDisplayName.Trim();
+            return IsGenerating || IsAgentBusy
+                ? $"Agent 已接入 · {displayName} 正在忙碌"
+                : $"Agent 已接入可用 · {displayName}";
+        }
+    }
+
+    public string SubmitInstructionButtonText => IsGenerating ? "正在生成…" : "发送并生成";
+
+    public string GenerationProgressText
+    {
+        get => _generationProgressText;
+        private set => SetProperty(ref _generationProgressText, value ?? string.Empty);
+    }
+
+    public double GenerationProgressPercentage
+    {
+        get => _generationProgressPercentage;
+        private set => SetProperty(
+            ref _generationProgressPercentage,
+            Math.Clamp(double.IsFinite(value) ? value : 0d, 0d, 100d));
+    }
+
     public string InstructionDraft
     {
         get => _instructionDraft;
@@ -169,12 +243,22 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
     }
 
     public string CanSubmitInstructionText => IsImporting
-        ? "参考图片正在导入；完成或取消后即可提交创作指令。"
-        : Conversation.Count > ArtWorkspaceValidator.MaximumMessages - 2
-            ? "对话记录已达到上限，请先归档或创建新的工作区会话。"
-            : string.IsNullOrWhiteSpace(InstructionDraft)
-                ? "输入希望创建的内容、构图、风格或修改要求。"
-                : "当前指令会保存为工作区创作意图；AI 执行链将在后续接入。";
+        ? "参考图片正在导入；完成或取消后即可发送生成指令。"
+        : IsGenerating
+            ? "当前指令正在由 Agent 执行，请等待本轮完成。"
+            : string.IsNullOrWhiteSpace(_projectRoot)
+                ? "请先创建或打开正式项目；本地草稿不会启动美术生成。"
+                : _generationGateway is null
+                    ? "请先在 MCP Agent 接入页配置可用的生成会话。"
+                    : !IsAgentConnected
+                        ? $"Agent 尚不可用：{_generationGateway.StatusText}"
+                        : IsAgentBusy
+                            ? "Agent 当前正在执行其它任务，完成后即可发送。"
+                            : Conversation.Count > ArtWorkspaceValidator.MaximumMessages - 2
+                                ? "对话记录已达到上限，请先归档或创建新的工作区会话。"
+                                : string.IsNullOrWhiteSpace(InstructionDraft)
+                                    ? "输入希望创建的内容、构图、风格或修改要求。"
+                                    : "发送后会冻结当前输出框与可见参考图，并通过已接入 Agent 生成图片。";
 
     public double OutputFrameX
     {
@@ -191,13 +275,13 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
     public double OutputFrameWidth
     {
         get => _outputFrameWidth;
-        set => SetOutputValue(ref _outputFrameWidth, value, 16d, 32768d, nameof(OutputFrameWidth));
+        set => SetOutputValue(ref _outputFrameWidth, value, 16d, 16384d, nameof(OutputFrameWidth));
     }
 
     public double OutputFrameHeight
     {
         get => _outputFrameHeight;
-        set => SetOutputValue(ref _outputFrameHeight, value, 16d, 32768d, nameof(OutputFrameHeight));
+        set => SetOutputValue(ref _outputFrameHeight, value, 16d, 16384d, nameof(OutputFrameHeight));
     }
 
     public string OutputFrameName
@@ -306,6 +390,34 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
 
     public ICommand SelectImageCommand { get; }
 
+    public void ConfigureGenerationGateway(IArtWorkspaceGenerationGateway? gateway)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        if (ReferenceEquals(_generationGateway, gateway))
+        {
+            RefreshGenerationGatewayState();
+            return;
+        }
+
+        if (IsGenerating)
+        {
+            throw new InvalidOperationException("美术生成正在执行，不能在途中替换 Agent 网关。");
+        }
+
+        if (_generationGateway is not null)
+        {
+            _generationGateway.StateChanged -= OnGenerationGatewayStateChanged;
+        }
+
+        _generationGateway = gateway;
+        if (_generationGateway is not null)
+        {
+            _generationGateway.StateChanged += OnGenerationGatewayStateChanged;
+        }
+
+        RefreshGenerationGatewayState();
+    }
+
     public bool Activate(string? projectRoot)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
@@ -330,6 +442,11 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
             _statusMessage = "当前美术工作区未能安全保存，已取消项目切换";
             NotifySummaryChanged();
             return false;
+        }
+
+        if (IsGenerating && !PathsEqual(_projectRoot, normalizedProjectRoot))
+        {
+            _generationCancellation?.Cancel();
         }
 
         try
@@ -708,6 +825,12 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         }
 
         _importCancellation?.Cancel();
+        _generationCancellation?.Cancel();
+        if (_generationGateway is not null)
+        {
+            _generationGateway.StateChanged -= OnGenerationGatewayStateChanged;
+        }
+
         var importChangedDocument = IsImporting &&
                                     (Images.Count != _document.Images.Count ||
                                      _assets.Count != _document.Assets.Count);
@@ -773,23 +896,54 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
 
     private bool CanSubmitInstruction() =>
         !IsImporting &&
+        !IsGenerating &&
+        !string.IsNullOrWhiteSpace(_projectRoot) &&
+        _generationGateway is { IsConnected: true, IsBusy: false } &&
         Conversation.Count <= ArtWorkspaceValidator.MaximumMessages - 2 &&
         !string.IsNullOrWhiteSpace(InstructionDraft) &&
         InstructionDraft.Trim().Length <= 16000;
 
-    private void SubmitInstruction()
+    private async Task SubmitInstructionAsync()
     {
         var instruction = InstructionDraft.Trim();
-        if (instruction.Length == 0 || instruction.Length > 16000)
+        if (!CanSubmitInstruction() || instruction.Length == 0 || instruction.Length > 16000)
         {
             return;
         }
 
-        var messages = CreateInstructionMessages(instruction, DateTimeOffset.UtcNow);
+        ArtWorkspaceGenerationRequest frozenRequest;
+        try
+        {
+            frozenRequest = FreezeGenerationRequest(instruction, DateTimeOffset.UtcNow);
+        }
+        catch (Exception exception) when (exception is
+            InvalidDataException or
+            IOException or
+            UnauthorizedAccessException or
+            ArgumentException or
+            NotSupportedException)
+        {
+            _statusMessage = $"无法冻结生成请求：{exception.Message}";
+            NotifySummaryChanged();
+            _console.WriteWarning("ArtWorkspace", _statusMessage);
+            return;
+        }
+
+        var messages = CreateInstructionMessages(
+            instruction,
+            frozenRequest.CreatedAtUtc,
+            _generationGateway?.AgentDisplayName);
         try
         {
             var candidate = CaptureDocument();
             candidate.Conversation.AddRange(messages.Select(CloneMessage));
+            // Reserve the worst-case JSON footprint of the mutable Agent placeholder now. This
+            // keeps every later progress/final update saveable even when the document is already
+            // close to the 16 MiB persistence boundary. System.Text.Json escapes this CJK code
+            // unit as six ASCII bytes, which is the maximum JSON size of one UTF-16 code unit.
+            var reservedAgentMessage = candidate.Conversation[^1];
+            reservedAgentMessage.Text = MaximumSerializedAgentReplyReservation;
+            reservedAgentMessage.State = MaximumSerializedAgentStateReservation;
             var byteCount = Encoding.UTF8.GetByteCount(ArtWorkspaceJson.Serialize(candidate));
             if (byteCount > ArtWorkspaceValidator.MaximumSerializedDocumentBytes)
             {
@@ -812,8 +966,9 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
             Conversation.Add(new ArtWorkspaceConversationMessageViewModel(message));
         }
 
+        var agentMessage = Conversation[^1];
         InstructionDraft = string.Empty;
-        _statusMessage = "创作指令已记录，正在保存工作区；等待生成适配器接入";
+        _statusMessage = $"已冻结生成请求 {frozenRequest.RequestId[..8]}，正在提交 Agent";
         CreationRequested?.Invoke(
             this,
             new ArtWorkspaceCreationRequestedEventArgs(
@@ -825,6 +980,368 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
                 OutputRelativeDirectory,
                 Images.Where(image => image.IsVisible).Select(image => image.Id).ToArray()));
         MarkDirty();
+
+        var cancellation = new CancellationTokenSource();
+        _generationCancellation = cancellation;
+        _activeGenerationRequestId = frozenRequest.RequestId;
+        GenerationProgressPercentage = 0d;
+        GenerationProgressText = "正在提交生成请求";
+        IsGenerating = true;
+
+        var progress = new Progress<ArtWorkspaceGenerationProgress>(update =>
+            ApplyGenerationProgress(frozenRequest, agentMessage, update));
+        try
+        {
+            var gateway = _generationGateway
+                ?? throw new InvalidOperationException("Agent 生成网关在提交前已被移除。");
+            var result = await gateway.GenerateAsync(frozenRequest, progress, cancellation.Token);
+            if (!IsRequestStillCurrent(frozenRequest))
+            {
+                _console.WriteWarning(
+                    "ArtWorkspace",
+                    $"生成请求 {frozenRequest.RequestId} 已结束，但活动项目已切换；结果未导入当前画布。");
+                return;
+            }
+
+            if (!result.IsSuccess)
+            {
+                var failure = string.IsNullOrWhiteSpace(result.ErrorMessage)
+                    ? "Agent 未提供失败原因"
+                    : result.ErrorMessage.Trim();
+                agentMessage.Update($"生成失败：{failure}", "failed");
+                GenerationProgressText = failure;
+                _statusMessage = "Agent 未能完成本次美术生成";
+                MarkDirty();
+                return;
+            }
+
+            var importedCount = await ImportGeneratedOutputsAsync(
+                frozenRequest,
+                result.OutputPaths,
+                cancellation.Token);
+            if (!IsRequestStillCurrent(frozenRequest))
+            {
+                _console.WriteWarning(
+                    "ArtWorkspace",
+                    $"生成请求 {frozenRequest.RequestId} 的产物导入期间项目已切换；未更新当前项目对话。");
+                return;
+            }
+
+            var description = string.IsNullOrWhiteSpace(result.AgentDescription)
+                ? $"图片已生成并导入输出框，共 {importedCount} 张。"
+                : result.AgentDescription.Trim();
+            agentMessage.Update(description, "completed");
+            GenerationProgressPercentage = 100d;
+            GenerationProgressText = $"生成完成 · 已导入 {importedCount} 张图片";
+            _statusMessage = $"Agent 生成完成，{importedCount} 张产物已进入输出框";
+            MarkDirty();
+        }
+        catch (OperationCanceledException)
+        {
+            if (IsRequestStillCurrent(frozenRequest))
+            {
+                agentMessage.Update("本次生成已取消；已落盘的中间产物仍由生成任务保留。", "canceled");
+                GenerationProgressText = "生成已取消";
+                _statusMessage = "已取消当前美术生成";
+                MarkDirty();
+            }
+        }
+        catch (Exception exception)
+        {
+            if (IsRequestStillCurrent(frozenRequest))
+            {
+                agentMessage.Update($"生成失败：{exception.Message}", "failed");
+                GenerationProgressText = exception.Message;
+                _statusMessage = "美术生成执行失败";
+                MarkDirty();
+            }
+
+            _console.WriteError(
+                "ArtWorkspace",
+                $"生成请求 {frozenRequest.RequestId} 执行失败：{exception.Message}",
+                exception);
+        }
+        finally
+        {
+            if (string.Equals(_activeGenerationRequestId, frozenRequest.RequestId, StringComparison.Ordinal))
+            {
+                _activeGenerationRequestId = null;
+                _generationCancellation = null;
+                IsGenerating = false;
+                NotifySummaryChanged();
+            }
+
+            cancellation.Dispose();
+        }
+    }
+
+    private ArtWorkspaceGenerationRequest FreezeGenerationRequest(
+        string instruction,
+        DateTimeOffset createdAtUtc)
+    {
+        if (string.IsNullOrWhiteSpace(_projectRoot))
+        {
+            throw new InvalidOperationException("本地草稿工作区不能启动 Agent 生成。");
+        }
+
+        var projectRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(_projectRoot));
+        var projectPaths = new ProjectPaths(projectRoot);
+        var assetRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(projectPaths.AssetDirectory));
+        var outputDirectory = Path.GetFullPath(Path.Combine(
+            projectRoot,
+            OutputRelativeDirectory.Replace('/', Path.DirectorySeparatorChar)));
+        EnsurePathWithinRoot(assetRoot, outputDirectory, "美术工作区输出目录");
+        EnsureExistingSegmentsAreNotReparsePoints(projectRoot, outputDirectory, "美术工作区输出目录");
+
+        var assetsById = _assets.ToDictionary(asset => asset.Id, StringComparer.Ordinal);
+        var references = new List<ArtWorkspaceGenerationReferenceSnapshot>();
+        foreach (var image in Images.Where(candidate => candidate.IsVisible).OrderBy(candidate => candidate.ZIndex))
+        {
+            if (!assetsById.TryGetValue(image.AssetId, out var asset))
+            {
+                throw new InvalidDataException($"可见图片 {image.Name} 缺少受管素材元数据。");
+            }
+
+            var absolutePath = Path.GetFullPath(image.AbsolutePath);
+            EnsurePathWithinRoot(projectPaths.ArtWorkspaceReferenceDirectory, absolutePath, $"参考图片 {image.Name}");
+            EnsureExistingSegmentsAreNotReparsePoints(projectRoot, absolutePath, $"参考图片 {image.Name}");
+            if (!File.Exists(absolutePath))
+            {
+                throw new FileNotFoundException($"可见参考图片不存在：{image.Name}", absolutePath);
+            }
+
+            references.Add(new ArtWorkspaceGenerationReferenceSnapshot
+            {
+                ImageId = image.Id,
+                AssetId = image.AssetId,
+                Name = image.Name,
+                AbsolutePath = absolutePath,
+                Sha256 = asset.Sha256,
+                MediaType = asset.MediaType,
+                PixelWidth = image.PixelWidth,
+                PixelHeight = image.PixelHeight,
+                X = image.X,
+                Y = image.Y,
+                Width = image.Width,
+                Height = image.Height,
+                RotationDegrees = image.RotationDegrees,
+                Opacity = image.Opacity,
+                ZIndex = image.ZIndex
+            });
+        }
+
+        return new ArtWorkspaceGenerationRequest
+        {
+            RequestId = Guid.NewGuid().ToString("N"),
+            CreatedAtUtc = createdAtUtc,
+            ProjectRoot = projectRoot,
+            AssetRoot = assetRoot,
+            Instruction = instruction,
+            OutputFrame = new ArtWorkspaceGenerationOutputFrameSnapshot
+            {
+                Name = OutputFrameName,
+                X = OutputFrameX,
+                Y = OutputFrameY,
+                Width = OutputFrameWidth,
+                Height = OutputFrameHeight,
+                PixelWidth = checked((int)Math.Round(OutputFrameWidth, MidpointRounding.AwayFromZero)),
+                PixelHeight = checked((int)Math.Round(OutputFrameHeight, MidpointRounding.AwayFromZero)),
+                BackgroundHex = OutputBackgroundHex,
+                OutputRelativeDirectory = OutputRelativeDirectory,
+                OutputDirectoryPath = outputDirectory
+            },
+            VisibleReferences = references.ToArray()
+        };
+    }
+
+    private void ApplyGenerationProgress(
+        ArtWorkspaceGenerationRequest request,
+        ArtWorkspaceConversationMessageViewModel agentMessage,
+        ArtWorkspaceGenerationProgress update)
+    {
+        if (!IsRequestStillCurrent(request) || !Conversation.Contains(agentMessage))
+        {
+            return;
+        }
+
+        var message = string.IsNullOrWhiteSpace(update.AgentDescription)
+            ? update.Message
+            : update.AgentDescription;
+        if (!string.IsNullOrWhiteSpace(message))
+        {
+            agentMessage.Update(message.Trim(), update.State);
+            GenerationProgressText = message.Trim();
+            MarkDirty();
+        }
+
+        if (update.Percentage is { } percentage)
+        {
+            GenerationProgressPercentage = percentage;
+        }
+    }
+
+    private async Task<int> ImportGeneratedOutputsAsync(
+        ArtWorkspaceGenerationRequest request,
+        IEnumerable<string> outputPaths,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(outputPaths);
+        var validatedPaths = outputPaths
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Select(path => ValidateGeneratedOutputPath(request, path))
+            .Distinct(OperatingSystem.IsWindows()
+                ? StringComparer.OrdinalIgnoreCase
+                : StringComparer.Ordinal)
+            .ToArray();
+        if (validatedPaths.Length == 0)
+        {
+            throw new InvalidDataException("Agent 报告成功，但没有返回位于冻结项目 Assets 内的可用图片路径。");
+        }
+
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!IsRequestStillCurrent(request))
+        {
+            return 0;
+        }
+
+        var previousCount = Images.Count;
+        var added = await AddImagesAtAsync(validatedPaths, request.OutputFrame.X, request.OutputFrame.Y);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!IsRequestStillCurrent(request))
+        {
+            return 0;
+        }
+
+        if (added <= 0)
+        {
+            throw new InvalidDataException("生成图片已落盘，但无法复制为美术工作区的受管画布素材。");
+        }
+
+        var generatedImages = Images.Skip(previousCount).Take(added).ToArray();
+        for (var index = 0; index < generatedImages.Length; index++)
+        {
+            var image = generatedImages[index];
+            image.Name = generatedImages.Length == 1
+                ? request.OutputFrame.Name
+                : $"{request.OutputFrame.Name} {index + 1}";
+            image.X = request.OutputFrame.X;
+            image.Y = request.OutputFrame.Y;
+            image.Width = request.OutputFrame.Width;
+            image.Height = request.OutputFrame.Height;
+            image.RotationDegrees = 0d;
+            image.Opacity = 1d;
+        }
+
+        if (generatedImages.Length > 0)
+        {
+            SelectImage(generatedImages[^1]);
+        }
+
+        _statusMessage = $"已保留 Generated 原件，并复制 {added} 张受管画布预览到输出框";
+        MarkDirty();
+        return added;
+    }
+
+    private static string ValidateGeneratedOutputPath(
+        ArtWorkspaceGenerationRequest request,
+        string outputPath)
+    {
+        if (!Path.IsPathRooted(outputPath))
+        {
+            throw new InvalidDataException("Agent 返回的生成产物路径必须是绝对路径。");
+        }
+
+        var fullPath = Path.GetFullPath(outputPath);
+        EnsurePathWithinRoot(request.AssetRoot, fullPath, "Agent 生成产物");
+        EnsurePathWithinRoot(request.OutputFrame.OutputDirectoryPath, fullPath, "Agent 生成产物");
+        EnsureExistingSegmentsAreNotReparsePoints(request.ProjectRoot, fullPath, "Agent 生成产物");
+        if (!File.Exists(fullPath))
+        {
+            throw new FileNotFoundException("Agent 返回的生成产物文件不存在。", fullPath);
+        }
+
+        return fullPath;
+    }
+
+    private bool IsRequestStillCurrent(ArtWorkspaceGenerationRequest request) =>
+        string.Equals(_activeGenerationRequestId, request.RequestId, StringComparison.Ordinal) &&
+        PathsEqual(_projectRoot, request.ProjectRoot);
+
+    private void OnGenerationGatewayStateChanged(object? sender, EventArgs e)
+    {
+        if (_disposed || _dispatcher.HasShutdownStarted || _dispatcher.HasShutdownFinished)
+        {
+            return;
+        }
+
+        if (_dispatcher.CheckAccess())
+        {
+            RefreshGenerationGatewayState();
+        }
+        else
+        {
+            _dispatcher.BeginInvoke(RefreshGenerationGatewayState, DispatcherPriority.DataBind);
+        }
+    }
+
+    private void RefreshGenerationGatewayState()
+    {
+        OnPropertyChanged(nameof(IsAgentConnected));
+        OnPropertyChanged(nameof(IsAgentBusy));
+        OnPropertyChanged(nameof(AgentConnectionStatusText));
+        OnPropertyChanged(nameof(CanSubmitInstructionText));
+        _submitInstructionCommand.RaiseCanExecuteChanged();
+    }
+
+    private static void EnsurePathWithinRoot(string rootPath, string candidatePath, string label)
+    {
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootPath));
+        var candidate = Path.GetFullPath(candidatePath);
+        var relative = Path.GetRelativePath(root, candidate);
+        if (Path.IsPathRooted(relative) ||
+            relative is "." or ".." ||
+            relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal) ||
+            relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal))
+        {
+            throw new InvalidDataException($"{label}必须位于受信根目录内。");
+        }
+    }
+
+    private static void EnsureExistingSegmentsAreNotReparsePoints(
+        string rootPath,
+        string candidatePath,
+        string label)
+    {
+        var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootPath));
+        var candidate = Path.GetFullPath(candidatePath);
+        EnsurePathWithinRoot(root, candidate, label);
+        var relative = Path.GetRelativePath(root, candidate);
+        var current = root;
+        if (File.Exists(current) || Directory.Exists(current))
+        {
+            EnsureNotReparsePoint(current, label);
+        }
+
+        foreach (var segment in relative.Split(
+                     new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            if (!File.Exists(current) && !Directory.Exists(current))
+            {
+                break;
+            }
+
+            EnsureNotReparsePoint(current, label);
+        }
+    }
+
+    private static void EnsureNotReparsePoint(string path, string label)
+    {
+        if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidDataException($"{label}不能经过符号链接或目录联接。");
+        }
     }
 
     private void RemoveSelectedImage()
@@ -1072,6 +1589,7 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(HasSelectedImage));
         OnPropertyChanged(nameof(ImageCountText));
         OnPropertyChanged(nameof(ProjectContextText));
+        OnPropertyChanged(nameof(AgentConnectionStatusText));
         OnPropertyChanged(nameof(CanSubmitInstructionText));
         NotifySummaryChanged();
         _submitInstructionCommand.RaiseCanExecuteChanged();
@@ -1203,7 +1721,8 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
 
     private static IReadOnlyList<ArtWorkspaceConversationMessage> CreateInstructionMessages(
         string instruction,
-        DateTimeOffset createdAtUtc) =>
+        DateTimeOffset createdAtUtc,
+        string? agentDisplayName) =>
     [
         new ArtWorkspaceConversationMessage
         {
@@ -1214,10 +1733,12 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         },
         new ArtWorkspaceConversationMessage
         {
-            Role = ArtWorkspaceMessageRole.Workbench,
-            Text = "创作意图已记录到当前工作区。当前版本尚未启动 AI 生成；后续接入时会从这里冻结提示和输出框。",
+            Role = ArtWorkspaceMessageRole.Agent,
+            Text = string.IsNullOrWhiteSpace(agentDisplayName)
+                ? "Agent 已收到冻结请求，正在准备生成。"
+                : $"{agentDisplayName.Trim()} 已收到冻结请求，正在准备生成。",
             CreatedAtUtc = createdAtUtc,
-            State = "awaiting-generation-adapter"
+            State = "queued"
         }
     ];
 
@@ -1427,8 +1948,11 @@ public sealed class ArtWorkspaceImageItemViewModel : ObservableObject
         Math.Clamp(double.IsFinite(value) ? value : minimum, minimum, maximum);
 }
 
-public sealed class ArtWorkspaceConversationMessageViewModel
+public sealed class ArtWorkspaceConversationMessageViewModel : ObservableObject
 {
+    public const int MaximumTextLength = 16000;
+    public const int MaximumStateLength = 64;
+
     private readonly ArtWorkspaceConversationMessage _model;
 
     public ArtWorkspaceConversationMessageViewModel(ArtWorkspaceConversationMessage model)
@@ -1440,13 +1964,47 @@ public sealed class ArtWorkspaceConversationMessageViewModel
 
     public bool IsUser => _model.Role == ArtWorkspaceMessageRole.User;
 
-    public string RoleLabel => IsUser ? "你" : "工作台";
+    public bool IsAgent => _model.Role == ArtWorkspaceMessageRole.Agent;
+
+    public string RoleLabel => _model.Role switch
+    {
+        ArtWorkspaceMessageRole.User => "你",
+        ArtWorkspaceMessageRole.Agent => "Agent",
+        _ => "工作台"
+    };
 
     public string Text => _model.Text;
 
     public string TimeText => _model.CreatedAtUtc.ToLocalTime().ToString("HH:mm:ss");
 
     public string State => _model.State;
+
+    public void Update(string text, string? state = null)
+    {
+        var normalizedText = string.IsNullOrWhiteSpace(text) ? "Agent 未提供状态文本。" : text.Trim();
+        if (normalizedText.Length > MaximumTextLength)
+        {
+            normalizedText = normalizedText[..MaximumTextLength];
+        }
+
+        var normalizedState = string.IsNullOrWhiteSpace(state) ? _model.State : state.Trim();
+        if (normalizedState.Length > MaximumStateLength)
+        {
+            normalizedState = normalizedState[..MaximumStateLength];
+        }
+
+        if (!string.Equals(_model.Text, normalizedText, StringComparison.Ordinal))
+        {
+            _model.Text = normalizedText;
+            OnPropertyChanged(nameof(Text));
+        }
+
+        if (!string.Equals(_model.State, normalizedState, StringComparison.Ordinal))
+        {
+            _model.State = normalizedState;
+            OnPropertyChanged(nameof(State));
+        }
+    }
 
     public ArtWorkspaceConversationMessage ToModel() => new()
     {

@@ -106,8 +106,8 @@ public static class ArtWorkspaceValidator
         ValidateText(frame.Name, "输出框名称", 160, allowEmpty: false);
         ValidateCoordinate(frame.X, "输出框 X");
         ValidateCoordinate(frame.Y, "输出框 Y");
-        ValidateFiniteRange(frame.Width, 16d, 32768d, "输出框宽度");
-        ValidateFiniteRange(frame.Height, 16d, 32768d, "输出框高度");
+        ValidateFiniteRange(frame.Width, 16d, 16384d, "输出框宽度");
+        ValidateFiniteRange(frame.Height, 16d, 16384d, "输出框高度");
         ValidateText(frame.BackgroundHex, "输出框背景色", 16, allowEmpty: false);
         ValidateRelativePath(frame.OutputRelativeDirectory, "输出目录");
         var normalizedOutputDirectory = frame.OutputRelativeDirectory.Replace('\\', '/').TrimEnd('/');

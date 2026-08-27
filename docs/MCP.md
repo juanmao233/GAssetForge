@@ -169,6 +169,14 @@ codex exec resume --json ... <threadId> -
 
 ## 素材批次与自动发布
 
+美术工作区也复用同一套 Codex Runtime、MCP Server、八工具白名单和单一 Agent 调度器，但使用独立
+`art-workspace` workflow。属性页显示“Agent 已接入可用”后，`发送并生成` 会创建一个冻结单图任务：用户
+指令、输出框像素尺寸与画布几何、项目 `Assets` 根、最终目录及当前可见参考图的哈希和变换均写入约束合同。
+Agent 必须按普通新合同调用 `claim_generation_task → imagegen/image_gen.py → submit_generation_output`；
+无背景剔除的完整画面允许 `stagingPaths=[]`，Harness 会从 `30-model-output` 派生 `35-normalized-input`，保留
+processed 审计副本并原子提交到 `Assets/Generated/ArtWorkspace/<batchId>/Final`。UI 只在持久任务完成且精确
+冻结目标存在后把图片复制为受管画布预览；Agent 文本或可视图片结果本身不算交付。
+
 “素材生成”页的步骤 2 使用批量表格。每行指定内容描述、生成数量和 Assets 内输出目录：
 
 - 单行数量为 1–16。

@@ -15,6 +15,8 @@ namespace GAssetForge.SmokeTests;
 internal static class GeneratedOutputSubmissionSmokeTests
 {
     private const int SourceSize = 1254;
+    private const int OpaqueSourceWidth = 640;
+    private const int OpaqueSourceHeight = 320;
     private const int OutputSize = 512;
     private const string AgentId = "codex-submit-generation-output";
     private static readonly Rgba32 KeyColor = new(255, 0, 255, 255);
@@ -31,6 +33,7 @@ internal static class GeneratedOutputSubmissionSmokeTests
         try
         {
             await SubmissionPreservesAuditableStagesAndCompletesIdempotentlyAsync(dataRoot);
+            await SubmissionWithoutBackgroundRemovalPreservesOpaqueDirectStagesAsync(dataRoot);
             await GeometryFailureReturnsWarningAndPreservesEveryIntermediateAsync(dataRoot);
             await HarnessFallbackGeneratesExactRecommendedPathAndCompletesAsync(dataRoot);
             await HarnessFallbackRefreshesTaskAfterConcurrentCompletionAsync(dataRoot);
@@ -42,6 +45,122 @@ internal static class GeneratedOutputSubmissionSmokeTests
                 Directory.Delete(dataRoot, recursive: true);
             }
         }
+    }
+
+    private static async Task SubmissionWithoutBackgroundRemovalPreservesOpaqueDirectStagesAsync(
+        string dataRoot)
+    {
+        var root = Path.Combine(dataRoot, "opaque-direct-output");
+        var store = new JsonGenerationTaskStore(Path.Combine(root, "Generation"));
+        var options = new ServerOptions(
+            root,
+            McpTransport.Stdio,
+            IPAddress.Loopback,
+            43120,
+            "codex",
+            null,
+            null);
+        var fixture = await CreateOpaqueDirectTaskFixtureAsync(root, store);
+        Equal(false, fixture.Task.Constraints.Output.TransparentBackground,
+            "无背景剔除回归必须冻结为不透明输出");
+        True(fixture.Task.Constraints.Output.BackgroundRemoval is null,
+            "无背景剔除回归不能携带 BackgroundRemoval");
+        Equal(0, fixture.Delivery.StagingPaths.Length,
+            "无背景剔除 delivery 必须保持 StagingPaths=[]");
+
+        var sourcePath = Path.Combine(root, "ModelReturns", "opaque-wide-640x320.png");
+        WriteOpaqueWideModelFixture(sourcePath);
+        var sourceHash = ComputeSha256(sourcePath);
+        var catalog = new GenerationToolProvider(
+                store,
+                new WorkspaceContextResolver(options),
+                options,
+                store.StoreFilePath)
+            .CreateCatalog();
+        var claim = await catalog.CallAsync(
+            "claim_generation_task",
+            JsonSerializer.SerializeToElement(new { taskId = fixture.Task.Id, agentId = AgentId }),
+            CancellationToken.None);
+        False(IsToolError(claim), "无背景剔除回归任务应先成功认领");
+
+        var result = await catalog.CallAsync(
+            "submit_generation_output",
+            JsonSerializer.SerializeToElement(new
+            {
+                taskId = fixture.Task.Id,
+                agentId = AgentId,
+                outputIndex = 0,
+                sourcePath
+            }),
+            CancellationToken.None);
+        False(IsToolError(result),
+            "无 BackgroundRemoval、StagingPaths=[] 的模型 PNG 应由 submit_generation_output 直接完成");
+        var structured = JsonSerializer.SerializeToElement(result, ProtocolJson.Options)
+            .GetProperty("structuredContent");
+        Equal("completed", structured.GetProperty("task").GetProperty("status").GetString(),
+            "无背景剔除提交应自动完成任务");
+        Equal(false, structured.GetProperty("idempotent").GetBoolean(),
+            "无背景剔除首次提交不得误报幂等");
+
+        var submission = structured.GetProperty("submission");
+        Equal(true, submission.GetProperty("sourceResized").GetBoolean(),
+            "640x320 模型原图应 contain-fit 到冻结 512x512 画布");
+        Equal(sourceHash.ToLowerInvariant(), submission.GetProperty("sourceSha256").GetString(),
+            "无背景剔除提交仍应记录原始模型文件 SHA-256");
+
+        var workspace = fixture.Delivery.Workspace
+            ?? throw new InvalidOperationException("无背景剔除回归缺少 generation workspace。");
+        var expectedNormalizedRelativePath = BuildExpectedDirectNormalizedPath(workspace, 0);
+        Equal(expectedNormalizedRelativePath, submission.GetProperty("normalizedPath").GetString(),
+            "StagingPaths=[] 时软件应从 30-model-output 派生 35-normalized-input 路径");
+        Equal(workspace.ProcessedPaths[0], submission.GetProperty("processedPath").GetString(),
+            "无背景剔除提交仍应保留 workspace processed 产物");
+        Equal(fixture.Delivery.TargetPaths[0], submission.GetProperty("targetPath").GetString(),
+            "无背景剔除提交只能写入冻结 Final target");
+
+        var rawPath = AssertArtifactInsideAssets(
+            fixture.AssetRoot,
+            submission.GetProperty("modelOutputPath").GetString(),
+            "无背景剔除 raw 模型原图");
+        var normalizedPath = AssertArtifactInsideAssets(
+            fixture.AssetRoot,
+            submission.GetProperty("normalizedPath").GetString(),
+            "无背景剔除 normalized 输入");
+        var processedPath = AssertArtifactInsideAssets(
+            fixture.AssetRoot,
+            submission.GetProperty("processedPath").GetString(),
+            "无背景剔除 processed 产物");
+        var targetPath = AssertArtifactInsideAssets(
+            fixture.AssetRoot,
+            submission.GetProperty("targetPath").GetString(),
+            "无背景剔除 Final target");
+        AssertImageSize(rawPath, OpaqueSourceWidth, OpaqueSourceHeight,
+            "无背景剔除归档 raw");
+        Equal(sourceHash, ComputeSha256(rawPath),
+            "无背景剔除归档 raw 必须逐字节保留模型原图");
+        AssertOpaqueContainFitOutput(normalizedPath, "无背景剔除 normalized");
+        AssertOpaqueContainFitOutput(processedPath, "无背景剔除 processed");
+        AssertOpaqueContainFitOutput(targetPath, "无背景剔除 Final");
+        Equal(ComputeSha256(normalizedPath), ComputeSha256(processedPath),
+            "无背景剔除 processed 应完整保留归一化像素");
+        Equal(ComputeSha256(processedPath), ComputeSha256(targetPath),
+            "无背景剔除 Final 应完整提交 workspace processed 产物");
+
+        var persisted = await store.GetAsync(fixture.Task.Id)
+            ?? throw new InvalidOperationException("无背景剔除提交任务未持久化。");
+        Equal(GenerationTaskStatus.Completed, persisted.Status,
+            "无背景剔除 submit_generation_output 返回后真相源必须为 Completed");
+        Equal(fixture.Delivery.TargetPaths[0], persisted.RelativeAssetPaths.Single(),
+            "无背景剔除 Completed 任务只应登记冻结 Final target");
+
+        var diagnosticsPath = ResolveArtifactPath(
+            fixture.AssetRoot,
+            workspace.DiagnosticsPath);
+        var journalEvents = ReadJournal(diagnosticsPath);
+        AssertMeasuredStage(journalEvents, "model_output.import");
+        AssertMeasuredStage(journalEvents, "model_output.normalize");
+        AssertMeasuredStage(journalEvents, "output.process_and_commit");
+        AssertMeasuredStage(journalEvents, "task.complete");
     }
 
     private static async Task GeometryFailureReturnsWarningAndPreservesEveryIntermediateAsync(
@@ -470,6 +589,80 @@ internal static class GeneratedOutputSubmissionSmokeTests
             "提交服务拒绝不同源后必须保留原 raw 审计文件");
     }
 
+    private static async Task<TaskFixture> CreateOpaqueDirectTaskFixtureAsync(
+        string dataRoot,
+        JsonGenerationTaskStore store)
+    {
+        var assetRoot = Path.Combine(dataRoot, "Assets");
+        Directory.CreateDirectory(assetRoot);
+        var batchId = Guid.NewGuid().ToString("N");
+        var itemId = Guid.NewGuid().ToString("N");
+        var suggestedBaseName = "opaque-direct-submit-v001";
+        var workspaceService = new GenerationRunWorkspaceService();
+        var run = workspaceService.Prepare(batchId, assetRoot);
+        var workspace = workspaceService.CreateOutputPlan(run, itemId, suggestedBaseName);
+        var targetPath =
+            $"{run.RootRelativePath}/50-final/{itemId}/{suggestedBaseName}.png";
+        var outputDirectory = Path.GetDirectoryName(
+                targetPath.Replace('/', Path.DirectorySeparatorChar))
+            ?.Replace('\\', '/') ?? string.Empty;
+        var constraints = MaterialGenerationConstraintComposer.Compose(
+            new GenerationConstraintPackage
+            {
+                WorkflowId = "opaque-direct-output-smoke",
+                PreferredSkill = "imagegen",
+                Prompt = "生成一张横向不透明游戏美术画面，用于验证软件直接交付链路。",
+                Output = new GenerationOutputSpec
+                {
+                    Width = OutputSize,
+                    Height = OutputSize,
+                    Count = 1,
+                    MaxParallelism = 1,
+                    Format = "png",
+                    TransparentBackground = false,
+                    BackgroundRemoval = null
+                }
+            },
+            new MaterialGenerationStyleSelection
+            {
+                GroupId = "opaque-direct-output-style",
+                Name = "不透明直接交付回归风格",
+                Description = "验证无背景剔除任务的 raw、归一化、processed 与 Final 交付。",
+                Prompt = "clean opaque game art"
+            },
+            new GenerationDeliveryPlan
+            {
+                AssetRoot = assetRoot,
+                OutputDirectory = outputDirectory,
+                TargetPaths = [targetPath],
+                StagingPaths = [],
+                SuggestedBaseName = suggestedBaseName,
+                Workspace = workspace
+            });
+        var tasks = await store.CreateBatchAsync(new CreateGenerationBatchRequest
+        {
+            BatchId = batchId,
+            DisplayName = "无背景剔除 submit_generation_output 回归批次",
+            RequestedBy = "smoke-tests",
+            Items =
+            [
+                new CreateGenerationBatchItemRequest
+                {
+                    ItemId = itemId,
+                    DisplayName = "不透明模型原图软件直接接管提交",
+                    Constraints = constraints
+                }
+            ]
+        });
+        True(
+            MaterialGenerationConstraintComposer.TryReadDelivery(tasks.Single().Constraints, out var delivery),
+            "无背景剔除 submit_generation_output 测试任务应包含有效冻结 delivery");
+        return new TaskFixture(
+            tasks.Single(),
+            delivery ?? throw new InvalidOperationException("无背景剔除 delivery 缺失。"),
+            assetRoot);
+    }
+
     private static async Task<TaskFixture> CreateTaskFixtureAsync(
         string dataRoot,
         JsonGenerationTaskStore store,
@@ -571,6 +764,14 @@ internal static class GeneratedOutputSubmissionSmokeTests
         image.Save(path, new PngEncoder { ColorType = PngColorType.RgbWithAlpha });
     }
 
+    private static void WriteOpaqueWideModelFixture(string path)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)
+            ?? throw new InvalidOperationException("无法解析不透明模型源图片目录。"));
+        using var image = new Image<Rgba32>(OpaqueSourceWidth, OpaqueSourceHeight, SubjectColor);
+        image.Save(path, new PngEncoder { ColorType = PngColorType.RgbWithAlpha });
+    }
+
     private static void WriteGeometryMismatchFixture(string path)
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)
@@ -591,6 +792,27 @@ internal static class GeneratedOutputSubmissionSmokeTests
         Path.GetFullPath(Path.Combine(
             assetRoot,
             relativePath.Replace('/', Path.DirectorySeparatorChar)));
+
+    private static string BuildExpectedDirectNormalizedPath(
+        GenerationRunWorkspacePlan workspace,
+        int outputIndex)
+    {
+        var rootPath = workspace.RootPath.Trim().Replace('\\', '/').Trim('/');
+        var modelPath = workspace.ModelOutputPaths[outputIndex].Trim().Replace('\\', '/').Trim('/');
+        var modelPrefix = $"{rootPath}/30-model-output/";
+        True(modelPath.StartsWith(modelPrefix, StringComparison.OrdinalIgnoreCase),
+            "模型原图路径应位于 generation workspace 的 30-model-output 分类");
+        var suffix = modelPath[modelPrefix.Length..];
+        var directory = Path.GetDirectoryName(suffix)?.Replace('\\', '/');
+        var modelFileName = Path.GetFileName(suffix);
+        True(modelFileName.EndsWith(".model.png", StringComparison.OrdinalIgnoreCase),
+            "回归模型原图应使用 .model.png 后缀");
+        var normalizedFileName =
+            $"{modelFileName[..^".model.png".Length]}.normalized.png";
+        return string.IsNullOrWhiteSpace(directory)
+            ? $"{rootPath}/35-normalized-input/{normalizedFileName}"
+            : $"{rootPath}/35-normalized-input/{directory}/{normalizedFileName}";
+    }
 
     private static void AssertNormalizedImage(string path)
     {
@@ -621,6 +843,31 @@ internal static class GeneratedOutputSubmissionSmokeTests
         Equal((byte)0, image[0, 0].A, $"{label}边框应完成背景剔除");
         Equal(SubjectColor, image[image.Width / 2, image.Height / 2],
             $"{label}中心主体应保持不透明原色");
+    }
+
+    private static void AssertOpaqueContainFitOutput(string path, string label)
+    {
+        using var image = Image.Load<Rgba32>(path);
+        Equal(OutputSize, image.Width, $"{label}宽度");
+        Equal(OutputSize, image.Height, $"{label}高度");
+        var padding = new Rgba32(0, 0, 0, byte.MaxValue);
+        var verticalPadding = (OutputSize - OutputSize * OpaqueSourceHeight / OpaqueSourceWidth) / 2;
+        for (var y = 0; y < image.Height; y++)
+        {
+            for (var x = 0; x < image.Width; x++)
+            {
+                Equal(byte.MaxValue, image[x, y].A,
+                    $"{label}像素 ({x},{y}) 必须保持完全不透明");
+                if (y < verticalPadding || y >= image.Height - verticalPadding)
+                {
+                    Equal(padding, image[x, y],
+                        $"{label}补边像素 ({x},{y}) 应为不透明黑色");
+                }
+            }
+        }
+
+        Equal(SubjectColor, image[image.Width / 2, image.Height / 2],
+            $"{label}中心主体颜色应保持稳定");
     }
 
     private static void AssertImageSize(string path, int width, int height, string label)

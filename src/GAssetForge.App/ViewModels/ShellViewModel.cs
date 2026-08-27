@@ -31,6 +31,7 @@ public sealed class ShellViewModel : ObservableObject
     private readonly RelayCommand _closeNewProjectCommand;
     private readonly RelayCommand _activeDocumentSaveCommand;
     private GenerationBatchDispatchCoordinator _agentDispatchCoordinator = null!;
+    private ProductionArtWorkspaceGenerationGateway _artWorkspaceGenerationPublisher = null!;
     private WorkflowDefinition _currentWorkflow;
     private object _currentWorkspace;
     private string _activeDocumentContentId = "ui-canvas";
@@ -306,6 +307,16 @@ public sealed class ShellViewModel : ObservableObject
         AssetGeneration.BackgroundRemovalRequested += OnAssetGenerationBackgroundRemovalRequested;
         AssetGeneration.BatchPublished += OnGenerationBatchPublished;
         _agentDispatchCoordinator = CreateAgentDispatchCoordinator();
+        _artWorkspaceGenerationPublisher = new ProductionArtWorkspaceGenerationGateway(
+            settingsService.Paths,
+            _generationTaskStore,
+            AgentConnection,
+            (batchId, taskIds) => _agentDispatchCoordinator.TryEnqueue(
+                batchId,
+                taskIds,
+                isRetry: false),
+            _workbenchConsoleService);
+        ArtWorkspace.ConfigureGenerationGateway(_artWorkspaceGenerationPublisher);
         AssetGeneration.ConfigureReconnectAndContinueHandler(
             ReconnectAndContinueGenerationBatchAsync);
         _currentWorkflow = initialWorkflow;
@@ -895,6 +906,9 @@ public sealed class ShellViewModel : ObservableObject
 
     private async Task ResetAgentDispatchForWorkingDirectoryAsync(string workingDirectory)
     {
+        _artWorkspaceGenerationPublisher.CancelProjectWaiters(
+            AgentConnection.WorkingDirectory,
+            "项目已经切换；旧项目任务仍保留在其持久化队列，但迟到结果不会导入新项目画布。");
         var wasDispatching = AssetGeneration.IsDispatching;
         var canceledBatchId = AssetGeneration.CurrentDispatchBatchId;
         AssetGeneration.BatchPublished -= OnGenerationBatchPublished;
@@ -1118,6 +1132,7 @@ public sealed class ShellViewModel : ObservableObject
             }
 
             AssetGeneration.Dispose();
+            _artWorkspaceGenerationPublisher.Dispose();
         }).ConfigureAwait(false);
 
         await AgentConnection.DisposeAsync().ConfigureAwait(false);
@@ -1776,17 +1791,22 @@ public sealed class ShellViewModel : ObservableObject
         GenerationBatchPublishedEventArgs e,
         bool writeQueuedLog)
     {
+        var isArtWorkspaceBatch = _artWorkspaceGenerationPublisher.OwnsBatch(e.BatchId);
         var enqueueResult = _agentDispatchCoordinator.TryEnqueue(e.BatchId, e.TaskIds, e.IsRetry);
         switch (enqueueResult)
         {
             case GenerationBatchDispatchEnqueueResult.Enqueued:
-                AssetGeneration.ReportDispatchQueued(
-                    e.BatchId,
-                    $"{e.TaskIds.Count} 个任务已排队，等待 {AgentConnection.SelectedAgent.DisplayName} 执行");
+                if (!isArtWorkspaceBatch)
+                {
+                    AssetGeneration.ReportDispatchQueued(
+                        e.BatchId,
+                        $"{e.TaskIds.Count} 个任务已排队，等待 {AgentConnection.SelectedAgent.DisplayName} 执行");
+                }
+
                 if (writeQueuedLog)
                 {
                     CommandConsole.WriteInfo(
-                        "Generation",
+                        isArtWorkspaceBatch ? "ArtWorkspace" : "Generation",
                         $"批次 {CompactIdentifier(e.BatchId)} 已进入 Agent 调度队列 · {e.TaskIds.Count} 个任务 · " +
                         $"执行器：{AgentConnection.SelectedAgent.DisplayName}");
                 }
@@ -1796,8 +1816,14 @@ public sealed class ShellViewModel : ObservableObject
                 break;
             case GenerationBatchDispatchEnqueueResult.QueueStopped:
                 const string queueStopped = "Agent 调度队列已停止；任务仍保留在本地 Pending 队列。 ";
-                AssetGeneration.ReportDispatchFailure(e.BatchId, queueStopped);
-                CommandConsole.WriteError("Generation", queueStopped);
+                if (!isArtWorkspaceBatch)
+                {
+                    AssetGeneration.ReportDispatchFailure(e.BatchId, queueStopped);
+                }
+
+                CommandConsole.WriteError(
+                    isArtWorkspaceBatch ? "ArtWorkspace" : "Generation",
+                    queueStopped);
                 break;
             default:
                 throw new ArgumentOutOfRangeException(nameof(enqueueResult), enqueueResult, null);
@@ -1814,6 +1840,35 @@ public sealed class ShellViewModel : ObservableObject
         {
             if (_isShutDown || !ReferenceEquals(sender, _agentDispatchCoordinator))
             {
+                return;
+            }
+
+            if (_artWorkspaceGenerationPublisher.OwnsBatch(e.Snapshot.Request.BatchId))
+            {
+                _artWorkspaceGenerationPublisher.ReportDispatchProgress(e.Snapshot);
+                var artBatchId = CompactIdentifier(e.Snapshot.Request.BatchId);
+                var artLevel = e.Snapshot.Stage == GenerationBatchDispatchStage.Failed
+                    ? WorkbenchLogLevel.Error
+                    : e.Snapshot.Stage is GenerationBatchDispatchStage.Canceled or
+                        GenerationBatchDispatchStage.Interrupted
+                        ? WorkbenchLogLevel.Warning
+                        : WorkbenchLogLevel.Information;
+                _workbenchConsoleService.WriteStructured(
+                    artLevel,
+                    "ArtWorkspace",
+                    $"美术工作区批次 {artBatchId} · {e.Snapshot.Stage} · " +
+                    $"{e.Snapshot.ProgressPercentage:0}% · {e.Snapshot.Detail}",
+                    new WorkbenchLogContext
+                    {
+                        RunId = e.Snapshot.Request.BatchId,
+                        BatchId = e.Snapshot.Request.BatchId,
+                        Stage = e.Snapshot.Stage.ToString(),
+                        Status = e.Snapshot.IsTerminal
+                            ? e.Snapshot.Stage.ToString().ToLowerInvariant()
+                            : "active",
+                        ElapsedMilliseconds = e.Snapshot.ElapsedMilliseconds,
+                        ErrorCode = e.Snapshot.FailureCode
+                    });
                 return;
             }
 
@@ -1871,11 +1926,62 @@ public sealed class ShellViewModel : ObservableObject
         object? sender,
         GenerationBatchDispatchCompletedEventArgs e)
     {
+        var wasArtWorkspaceBatch = _artWorkspaceGenerationPublisher.OwnsBatch(e.Request.BatchId);
+        try
+        {
+            await HandleAgentDispatchCompletedAsync(sender, e).ConfigureAwait(false);
+        }
+        catch (Exception exception)
+        {
+            try
+            {
+                var failure =
+                    $"Agent 调度完成事件发生未处理异常；WPF 已拦截，持久任务状态保持不变：{exception.Message}";
+                if (wasArtWorkspaceBatch &&
+                    _artWorkspaceGenerationPublisher.OwnsBatch(e.Request.BatchId))
+                {
+                    _artWorkspaceGenerationPublisher.ReportDispatchInterrupted(
+                        e.Request.BatchId,
+                        failure);
+                }
+
+                CommandConsole.WriteError(
+                    wasArtWorkspaceBatch ? "ArtWorkspace" : "Generation",
+                    failure,
+                    exception);
+            }
+            catch
+            {
+                // An async-void WPF event boundary must never rethrow, even if shutdown has already
+                // disposed the console or the owning view model.
+            }
+
+            try
+            {
+                if (sender is GenerationBatchDispatchCoordinator coordinator)
+                {
+                    coordinator.ReleaseBatch(e.Request.BatchId);
+                }
+            }
+            catch
+            {
+                // ReleaseBatch is best effort during teardown; durable task state remains authoritative.
+            }
+        }
+    }
+
+    private async Task HandleAgentDispatchCompletedAsync(
+        object? sender,
+        GenerationBatchDispatchCompletedEventArgs e)
+    {
         if (_isShutDown || !ReferenceEquals(sender, _agentDispatchCoordinator))
         {
             return;
         }
 
+        var isArtWorkspaceBatch =
+            _artWorkspaceGenerationPublisher.OwnsBatch(e.Request.BatchId);
+        var turnFailure = AgentTurnFailureClassifier.Classify(e.Result, e.FailureMessage);
         GenerationBatchTurnReconciliationResult reconciliation;
         try
         {
@@ -1895,8 +2001,28 @@ public sealed class ShellViewModel : ObservableObject
                 }
 
                 var failure = $"Agent Turn 已结束，但本地任务状态收束失败：{exception.Message}";
-                AssetGeneration.ReportDispatchFailure(e.Request.BatchId, failure);
-                CommandConsole.WriteError("Generation", failure, exception);
+                if (isArtWorkspaceBatch)
+                {
+                    if (turnFailure?.PreservePendingTasks == true)
+                    {
+                        _artWorkspaceGenerationPublisher.ReportDispatchInterrupted(
+                            e.Request.BatchId,
+                            failure + " 上游传输中断的原任务仍等待续派。 ");
+                        CommandConsole.WriteWarning("ArtWorkspace", failure);
+                    }
+                    else
+                    {
+                        _artWorkspaceGenerationPublisher.ReportDispatchReconciliationFailure(
+                            e.Request.BatchId,
+                            failure);
+                        CommandConsole.WriteError("ArtWorkspace", failure, exception);
+                    }
+                }
+                else
+                {
+                    AssetGeneration.ReportDispatchFailure(e.Request.BatchId, failure);
+                    CommandConsole.WriteError("Generation", failure, exception);
+                }
             }).ConfigureAwait(false);
             if (sender is GenerationBatchDispatchCoordinator failedCoordinator)
             {
@@ -1906,7 +2032,45 @@ public sealed class ShellViewModel : ObservableObject
             return;
         }
 
-        var turnFailure = AgentTurnFailureClassifier.Classify(e.Result, e.FailureMessage);
+        if (isArtWorkspaceBatch)
+        {
+            try
+            {
+                await _artWorkspaceGenerationPublisher.ReportDispatchCompletedAsync(
+                        e,
+                        reconciliation,
+                        turnFailure?.PreservePendingTasks == true)
+                    .ConfigureAwait(false);
+                await InvokeOnDispatcherAsync(() =>
+                {
+                    var summary = reconciliation.CompletedCount == 1 && reconciliation.FailedCount == 0
+                        ? "图片已完成并交付到冻结项目目录。"
+                        : reconciliation.FailureDetail ?? e.FailureMessage ??
+                          "Agent Turn 已结束，最终结果以持久化任务状态为准。";
+                    if (reconciliation.CompletedCount == 1 && reconciliation.FailedCount == 0)
+                    {
+                        CommandConsole.WriteInfo(
+                            "ArtWorkspace",
+                            $"美术工作区批次 {CompactIdentifier(e.Request.BatchId)}：{summary}");
+                    }
+                    else
+                    {
+                        CommandConsole.WriteWarning(
+                            "ArtWorkspace",
+                            $"美术工作区批次 {CompactIdentifier(e.Request.BatchId)}：{summary}");
+                    }
+                }).ConfigureAwait(false);
+            }
+            finally
+            {
+                if (sender is GenerationBatchDispatchCoordinator artCoordinator)
+                {
+                    artCoordinator.ReleaseBatch(e.Request.BatchId);
+                }
+            }
+
+            return;
+        }
 
         AutomaticGenerationRetryResult automaticRetry;
         try
@@ -2216,8 +2380,8 @@ public sealed class ShellViewModel : ObservableObject
         _workbenchConsoleService.Write(
             WorkbenchLogLevel.Information,
             "ArtWorkspace",
-            $"已记录美术工作区创作意图 · 输出 {e.OutputWidth:0.#}×{e.OutputHeight:0.#} · " +
-            $"参考图 {e.VisibleImageIds.Count} 张；当前尚未启动 AI 生成适配器。");
+            $"已冻结美术工作区创作意图 · 输出 {e.OutputWidth:0.#}×{e.OutputHeight:0.#} · " +
+            $"参考图 {e.VisibleImageIds.Count} 张；正在提交共享 Agent 生成链路。");
 
     private static string? CompactIdentifier(string? identifier)
     {

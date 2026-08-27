@@ -90,11 +90,14 @@ Shell 会在一次项目激活中协调项目清单、UI repository、Project Br
 工作区最多承载 128 个活动图片对象，预览按 640 px 最大边解码并使用有界版本缓存，避免合法大型素材把
 WPF 进程推入不可控内存占用。属性页的画布图片列表是选择与可见性的权威入口，因此隐藏对象仍可恢复。
 
-当前“提交创作意图”只把用户文本记录为 `captured` 状态，并保存工作区；它不会启动 Agent、调用图像模型、
-写出输出框图片或伪装成已生成资产。`OutputRelativeDirectory` 目前只是未来交付目标，默认值为
-`Assets/Generated/ArtWorkspace`。后续接入 AI 时必须先把提示、参考图快照、输出框几何和项目 Assets 根冻结成
-可审计合同，再由 Agent/图像模型完成创作步骤；Harness 负责路径校验、中间物落盘、结果验证和原子提交。
-任何可见预览或创作意图都不能绕过现有生成任务所有权与受控 `Assets` 交付边界成为 Final asset。
+属性页通过 `IArtWorkspaceGenerationGateway` 显示受管 Agent 的不可用、忙碌或“已接入可用”状态；只有正式
+项目、可执行连接和空闲调度器同时满足时，`发送并生成` 才可执行。ViewModel 先冻结用户指令、输出框几何与
+像素尺寸、项目 `Assets` 根，以及所有可见参考图的 SHA-256、位置、尺寸、旋转、透明度和层级。生产 Gateway
+把它们转换为 provider-neutral `art-workspace` 单图任务、项目内 Run、Prompt 和 Manifest，并复用 Shell 唯一的
+Agent 调度器。实时 Agent 文本只更新对话和进度，不作为完成依据；只有 MCP 提交的本地 PNG 经过 Harness
+归档、归一化、验证和原子提交并令任务达到 `Completed` 后，ViewModel 才保留 Generated 原件、复制受管预览
+到 `Assets\ArtWorkspace\References`，并按冻结输出框位置与尺寸放入画布。路径逃逸、重解析点和项目切换后的
+迟到结果都会被拒绝。
 
 `ArtStyleLibraryView` 是 ContentId 为 `art-style-library` 的跨工作流共享面板。每个风格组保存稳定 ID、名称、
 描述、人工 AI 风格提示词、可选统一提示词样本和多张参考图片元数据；图片导入后以稳定文件名复制到

@@ -56,10 +56,12 @@ perspective, geometry, style, size, and delivery constraints.
   layout XML stores only shell placement, never canvas images, output geometry, or conversation.
 - Art Workspace imports are managed, cancellable copies; active references are capped and every
   hidden image must remain recoverable from the Properties image list.
-- Capturing an art-workspace instruction currently persists creation intent only. It must not be
-  reported as AI generation or as a final asset until a future Agent/Harness path freezes the intent,
-  produces a real image, validates it, and atomically delivers it below the active project's
-  `Assets` root.
+- An art-workspace instruction may start generation only when a formal project and an executable
+  managed Agent connection are active. Publication freezes the intent, output frame, project
+  `Assets` root, and visible reference hashes/transforms into a durable `art-workspace` task.
+- Art Workspace Agent progress is advisory; only a validated PNG atomically delivered to the exact
+  frozen target below `Assets/Generated/ArtWorkspace/<batchId>/Final` is a generation result. The
+  canvas imports a managed preview copy only after that durable task reaches `Completed`.
 - Product renames must preserve readable legacy state until an explicit migration removes support.
 
 ## Architecture sources

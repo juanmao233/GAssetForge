@@ -39,10 +39,29 @@
                 <Border Style="{StaticResource ArtWorkspaceSectionBorderStyle}">
                     <StackPanel>
                         <DockPanel LastChildFill="True">
-                            <TextBlock DockPanel.Dock="Right"
-                                       Foreground="{DynamicResource App.TextMutedBrush}"
-                                       FontSize="9"
-                                       Text="创作意图 v1" />
+                            <Border x:Name="ArtWorkspaceAgentStatusBadge"
+                                    DockPanel.Dock="Right"
+                                    MaxWidth="190"
+                                    Padding="7,3"
+                                    Background="{DynamicResource App.InputBackgroundBrush}"
+                                    BorderThickness="1"
+                                    CornerRadius="9"
+                                    ToolTip="{Binding AgentConnectionStatusText}">
+                                <Border.Style>
+                                    <Style TargetType="{x:Type Border}">
+                                        <Setter Property="BorderBrush" Value="{DynamicResource App.WarningBrush}" />
+                                        <Style.Triggers>
+                                            <DataTrigger Binding="{Binding IsAgentConnected}" Value="True">
+                                                <Setter Property="BorderBrush" Value="{DynamicResource App.SuccessBrush}" />
+                                            </DataTrigger>
+                                        </Style.Triggers>
+                                    </Style>
+                                </Border.Style>
+                                <TextBlock Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                           FontSize="9"
+                                           Text="{Binding AgentConnectionStatusText}"
+                                           TextTrimming="CharacterEllipsis" />
+                            </Border>
                             <TextBlock Foreground="{DynamicResource App.TextPrimaryBrush}"
                                        FontSize="12"
                                        FontWeight="SemiBold"
@@ -96,13 +115,16 @@
                                                         <Setter Property="HorizontalAlignment" Value="Left" />
                                                         <Setter Property="Background" Value="{DynamicResource App.SurfaceBrush}" />
                                                         <Style.Triggers>
-                                                            <DataTrigger Binding="{Binding IsUser}" Value="True">
-                                                                <Setter Property="HorizontalAlignment" Value="Right" />
-                                                                <Setter Property="Background" Value="{DynamicResource App.SelectionBrush}" />
-                                                                <Setter Property="BorderBrush" Value="{DynamicResource App.AccentBrush}" />
-                                                            </DataTrigger>
-                                                        </Style.Triggers>
-                                                    </Style>
+                                                             <DataTrigger Binding="{Binding IsUser}" Value="True">
+                                                                 <Setter Property="HorizontalAlignment" Value="Right" />
+                                                                 <Setter Property="Background" Value="{DynamicResource App.SelectionBrush}" />
+                                                                 <Setter Property="BorderBrush" Value="{DynamicResource App.AccentBrush}" />
+                                                             </DataTrigger>
+                                                             <DataTrigger Binding="{Binding IsAgent}" Value="True">
+                                                                 <Setter Property="BorderBrush" Value="{DynamicResource App.SuccessBrush}" />
+                                                             </DataTrigger>
+                                                         </Style.Triggers>
+                                                     </Style>
                                                 </Border.Style>
                                             </Border>
                                         </DataTemplate>
@@ -122,11 +144,11 @@
                         <DockPanel Margin="0,8,0,0" LastChildFill="True">
                             <Button x:Name="ArtWorkspaceSubmitInstructionButton"
                                     DockPanel.Dock="Right"
-                                    MinWidth="96"
-                                    Padding="10,6"
-                                    Command="{Binding SubmitInstructionCommand}"
-                                    Content="加入创作指令"
-                                    Style="{DynamicResource App.PrimaryButtonStyle}" />
+                                     MinWidth="96"
+                                     Padding="10,6"
+                                     Command="{Binding SubmitInstructionCommand}"
+                                     Content="{Binding SubmitInstructionButtonText}"
+                                     Style="{DynamicResource App.PrimaryButtonStyle}" />
                             <TextBlock Margin="0,0,8,0"
                                        VerticalAlignment="Center"
                                        Foreground="{DynamicResource App.TextMutedBrush}"
@@ -134,6 +156,18 @@
                                        Text="Ctrl+Enter 提交"
                                        TextWrapping="Wrap" />
                         </DockPanel>
+                        <StackPanel Margin="0,8,0,0"
+                                    Visibility="{Binding IsGenerating, Converter={StaticResource BooleanToVisibilityConverter}}">
+                            <ProgressBar Height="5"
+                                         Minimum="0"
+                                         Maximum="100"
+                                         Value="{Binding GenerationProgressPercentage, Mode=OneWay}" />
+                            <TextBlock Margin="0,4,0,0"
+                                       Foreground="{DynamicResource App.TextMutedBrush}"
+                                       FontSize="9"
+                                       Text="{Binding GenerationProgressText}"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
                         <TextBlock Margin="0,7,0,0"
                                    Foreground="{DynamicResource App.WarningBrush}"
                                    FontSize="9"
@@ -179,12 +213,12 @@
                                          Text="{Binding OutputFrameY, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.##}}" />
                             </StackPanel>
                             <StackPanel Grid.Row="1" Grid.Column="0">
-                                <TextBlock Style="{StaticResource ArtWorkspacePropertyLabelStyle}" Text="宽度" />
+                                <TextBlock Style="{StaticResource ArtWorkspacePropertyLabelStyle}" Text="宽度（16–16384）" />
                                 <TextBox Margin="0,3,0,8"
                                          Text="{Binding OutputFrameWidth, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.##}}" />
                             </StackPanel>
                             <StackPanel Grid.Row="1" Grid.Column="2">
-                                <TextBlock Style="{StaticResource ArtWorkspacePropertyLabelStyle}" Text="高度" />
+                                <TextBlock Style="{StaticResource ArtWorkspacePropertyLabelStyle}" Text="高度（16–16384）" />
                                 <TextBox Margin="0,3,0,8"
                                          Text="{Binding OutputFrameHeight, Mode=TwoWay, UpdateSourceTrigger=LostFocus, StringFormat={}{0:0.##}}" />
                             </StackPanel>
