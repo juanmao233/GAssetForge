@@ -45,6 +45,7 @@ public sealed class ShellViewModel : ObservableObject
     private bool _isApplyingProjectSettings;
     private bool _isShutDown;
     private bool _agentWasConnected;
+    private bool _isExplicitGenerationResumeInProgress;
     private Task? _shutdownTask;
     private readonly List<GatedCommand> _uiCommands = [];
     private readonly Dictionary<string, DateTimeOffset> _agentActivityStarts = new(StringComparer.Ordinal);
@@ -305,6 +306,8 @@ public sealed class ShellViewModel : ObservableObject
         AssetGeneration.BackgroundRemovalRequested += OnAssetGenerationBackgroundRemovalRequested;
         AssetGeneration.BatchPublished += OnGenerationBatchPublished;
         _agentDispatchCoordinator = CreateAgentDispatchCoordinator();
+        AssetGeneration.ConfigureReconnectAndContinueHandler(
+            ReconnectAndContinueGenerationBatchAsync);
         _currentWorkflow = initialWorkflow;
         _activeDocumentContentId = ResolveWorkflowDocumentContentId(initialWorkflow.Kind);
         ProjectBrowser.SetPrefabLibraryAvailability(_currentWorkflow.Kind == WorkflowKind.UiDesign);
@@ -1293,10 +1296,16 @@ public sealed class ShellViewModel : ObservableObject
 
     private void OnAgentConnectionPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (_isShutDown || !ShouldRecoverPendingDispatches(
-                ref _agentWasConnected,
-                e.PropertyName,
-                AgentConnection.IsConnected))
+        if (_isShutDown)
+        {
+            return;
+        }
+
+        var shouldRecover = ShouldRecoverPendingDispatches(
+            ref _agentWasConnected,
+            e.PropertyName,
+            AgentConnection.IsConnected);
+        if (!shouldRecover || _isExplicitGenerationResumeInProgress)
         {
             return;
         }
@@ -1442,6 +1451,181 @@ public sealed class ShellViewModel : ObservableObject
         finally
         {
             _dispatchRecoveryGate.Release();
+        }
+    }
+
+    private async Task ReconnectAndContinueGenerationBatchAsync(
+        GenerationBatchResumeRequest request,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+        if (_isShutDown)
+        {
+            throw new InvalidOperationException("应用正在关闭，不能重新连接生成批次。");
+        }
+
+        if (!string.Equals(
+                AssetGeneration.CurrentBatchId,
+                request.BatchId,
+                StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException("当前生成批次已经切换，请刷新状态后重试。");
+        }
+
+        await _dispatchRecoveryGate.WaitAsync(cancellationToken).ConfigureAwait(true);
+        _isExplicitGenerationResumeInProgress = true;
+        try
+        {
+            if (_isShutDown)
+            {
+                throw new InvalidOperationException("应用正在关闭，不能重新连接生成批次。");
+            }
+
+            if (!string.Equals(
+                    AssetGeneration.CurrentBatchId,
+                    request.BatchId,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException("当前生成批次已经切换，请刷新状态后重试。");
+            }
+
+            var workingDirectory = ResolveAgentWorkingDirectory();
+            var coordinator = _agentDispatchCoordinator;
+            using (var releaseTimeout =
+                   CancellationTokenSource.CreateLinkedTokenSource(cancellationToken))
+            {
+                releaseTimeout.CancelAfter(TimeSpan.FromSeconds(30));
+                try
+                {
+                    await coordinator.WaitForBatchReleasedAsync(
+                            request.BatchId,
+                            releaseTimeout.Token)
+                        .ConfigureAwait(true);
+                }
+                catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+                {
+                    throw new TimeoutException(
+                        "等待上一轮 Agent 调度收束超时；原未完成任务仍保持不变，请稍后再次尝试。");
+                }
+            }
+
+            if (_isShutDown)
+            {
+                throw new InvalidOperationException(
+                    "应用正在关闭，已停止重新连接生成批次。");
+            }
+
+            if (!ReferenceEquals(coordinator, _agentDispatchCoordinator) ||
+                !AgentSessionBookmarkService.PathEquals(
+                    workingDirectory,
+                    ResolveAgentWorkingDirectory()))
+            {
+                throw new InvalidOperationException(
+                    "项目工作目录或 Agent 调度器已切换，请在当前项目刷新批次状态后重试。");
+            }
+
+            CommandConsole.WriteWarning(
+                "Generation",
+                $"正在为批次 {CompactIdentifier(request.BatchId)} 强制重建 Agent Runtime；" +
+                "健康 MCP Server、原 taskId、Run 与产物路径将保持不变。");
+            await AgentConnection.ReconnectSessionAsync(cancellationToken).ConfigureAwait(true);
+            if (!ReferenceEquals(coordinator, _agentDispatchCoordinator) ||
+                !AgentSessionBookmarkService.PathEquals(
+                    workingDirectory,
+                    ResolveAgentWorkingDirectory()) ||
+                !string.Equals(
+                    AssetGeneration.CurrentBatchId,
+                    request.BatchId,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidOperationException(
+                    "重新连接期间项目或当前生成批次已经切换；旧批次没有被续派，请在当前页面刷新后重试。");
+            }
+
+            try
+            {
+                await AssetGeneration.RepairPersistedDispatchWorkspaceAsync(request.BatchId)
+                    .ConfigureAwait(true);
+            }
+            catch (Exception repairException) when (repairException is
+                IOException or UnauthorizedAccessException or InvalidDataException or
+                InvalidOperationException or NotSupportedException or PathTooLongException)
+            {
+                CommandConsole.WriteWarning(
+                    "Generation",
+                    $"批次 {CompactIdentifier(request.BatchId)} 的 Run manifest/prompt 修复失败：" +
+                    $"{repairException.GetType().Name}: {repairException.Message}；" +
+                    "仍将按任务内冻结的约束与路径继续派发。");
+            }
+
+            var resumeDispatch = await AssetGeneration
+                .GetRecoverableExplicitResumeDispatchAsync(request.BatchId, cancellationToken)
+                .ConfigureAwait(true);
+            if (resumeDispatch is null || resumeDispatch.TaskIds.Count == 0)
+            {
+                CommandConsole.WriteInfo(
+                    "Generation",
+                    $"批次 {CompactIdentifier(request.BatchId)} 已重新连接，但持久化队列中已没有" +
+                    "可由 GAssetForge 受管身份安全续派的 Pending/Claimed 任务。");
+                return;
+            }
+
+            var enqueueResult = EnqueueGenerationBatch(
+                new GenerationBatchPublishedEventArgs(
+                    resumeDispatch.BatchId,
+                    resumeDispatch.TaskIds,
+                    resumeDispatch.IsRetry,
+                    dispatchRequested: true),
+                writeQueuedLog: false);
+            switch (enqueueResult)
+            {
+                case GenerationBatchDispatchEnqueueResult.Enqueued:
+                    CommandConsole.WriteWarning(
+                        "Generation",
+                        $"批次 {CompactIdentifier(resumeDispatch.BatchId)} 已重新连接并续派 " +
+                        $"{resumeDispatch.TaskIds.Count} 个原 Pending/Claimed 任务；" +
+                        "受管 Claim 已复用并续租冻结身份，未创建替代任务或新的交付路径。");
+                    break;
+                case GenerationBatchDispatchEnqueueResult.AlreadyScheduled:
+                    CommandConsole.WriteInfo(
+                        "Generation",
+                        $"批次 {CompactIdentifier(resumeDispatch.BatchId)} 已处于调度队列中，重复恢复请求已幂等忽略。");
+                    break;
+                case GenerationBatchDispatchEnqueueResult.QueueStopped:
+                    throw new InvalidOperationException(
+                        "Agent 调度队列已经停止；连接已恢复，但原 Pending/Claimed 任务尚未重新入队。");
+                default:
+                    throw new ArgumentOutOfRangeException(
+                        nameof(enqueueResult),
+                        enqueueResult,
+                        null);
+            }
+        }
+        finally
+        {
+            try
+            {
+                if (!_dispatcher.HasShutdownStarted && !_dispatcher.HasShutdownFinished)
+                {
+                    await _dispatcher.InvokeAsync(
+                        static () => { },
+                        DispatcherPriority.ApplicationIdle);
+                }
+            }
+            catch (TaskCanceledException)
+            {
+                // Shutdown may abort the no-op dispatcher drain. The resume gate still must release.
+            }
+            catch (InvalidOperationException) when (
+                _dispatcher.HasShutdownStarted || _dispatcher.HasShutdownFinished)
+            {
+                // The dispatcher stopped between the state check and queueing the drain operation.
+            }
+            finally
+            {
+                _isExplicitGenerationResumeInProgress = false;
+                _dispatchRecoveryGate.Release();
+            }
         }
     }
 

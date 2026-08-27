@@ -1175,11 +1175,17 @@
                                 <RowDefinition Height="Auto" />
                             </Grid.RowDefinitions>
                             <DockPanel Margin="0,0,0,12">
-                                <Button x:Name="RefreshGenerationTaskButton"
-                                        DockPanel.Dock="Right"
-                                        Command="{Binding RefreshTaskCommand}"
-                                        Content="刷新状态"
-                                        Style="{StaticResource GenerationSmallButtonStyle}" />
+                                <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
+                                    <Button x:Name="ReconnectAndContinueGenerationButton"
+                                            Command="{Binding ReconnectAndContinueCurrentBatchCommand}"
+                                            Content="{Binding ReconnectAndContinueCurrentBatchButtonText}"
+                                            Style="{StaticResource GenerationSmallButtonStyle}"
+                                            ToolTip="重新建立受管 Agent 链路，并只继续当前批次中原有的 Pending 或身份精确匹配的 GAssetForge 已认领任务；续租原身份，不创建新任务、不抢占或续租其他会话，也不覆盖已有产物" />
+                                    <Button x:Name="RefreshGenerationTaskButton"
+                                            Command="{Binding RefreshTaskCommand}"
+                                            Content="刷新状态"
+                                            Style="{StaticResource GenerationSmallButtonStyle}" />
+                                </StackPanel>
                                 <StackPanel>
                                     <TextBlock Style="{StaticResource App.PanelHeaderStyle}"
                                                Text="当前生成批次" />

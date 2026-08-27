@@ -5,6 +5,40 @@ development track; versioning policy will be finalized before the first public r
 
 ## Unreleased
 
+## 1.0.22t1 - 2026-08-27
+
+### Added
+
+- Added a `重新连接并继续` action beside `刷新状态` in the current-generation-batch panel. It
+  re-reads the durable task store and submits only the active project's original resumable
+  `Pending` or GAssetForge-managed `Claimed` task IDs from the current batch.
+
+### Changed
+
+- Agent reconnection now force-replaces the Codex Runtime even when the old app-server process still
+  reports Ready, while preserving the project working directory and thread bookmark. A healthy MCP
+  Server is reused; a stopped, faulted, or mismatched instance is repaired before the Runtime is
+  validated as executable again.
+- Explicit batch continuation waits for the previous scheduling lifecycle to release, serializes
+  against automatic Pending recovery, repairs the existing Run workspace when possible, and then
+  idempotently requeues the same batch and task IDs. Pending tasks receive a stable task-derived Codex
+  identity, while already Claimed managed tasks reuse and immediately renew their exact frozen
+  `ClaimedBy`; completed tasks, unverified Codex/Agent claims, and other historical batches are not
+  restarted. Retry lineage, Run directories, and delivery paths are not rewritten.
+
+### Fixed
+
+- Responses/SSE disconnections could leave the Runtime connection flag continuously Ready, so the
+  existing false-to-true recovery trigger never ran and the preserved Pending tasks could not be
+  woken again from the generation page. The new explicit recovery path reconnects and requeues in one
+  bounded operation while preventing duplicate Runtime, MCP, or Agent Turn launches on repeated clicks.
+- Faulted transports whose child process remained alive are no longer considered reusable sessions.
+  Managed Claimed tasks can now continue immediately with the same owner identity and a refreshed
+  lease, while claims belonging to another Codex session or Agent family remain protected and are
+  never stolen or renewed by the new Turn.
+- MCP processes stuck indefinitely in `Starting` are recycled after the first health timeout and
+  restarted exactly once, instead of timing out on every reconnect attempt.
+
 ## 1.0.21t1 - 2026-08-27
 
 ### Added

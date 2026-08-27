@@ -193,6 +193,15 @@ codex exec resume --json ... <threadId> -
 `Interrupted`，未被 MCP 认领的原任务仍保持 `Pending`，不会创建替代 task、Run 或产物路径。MCP Server 继续
 从同一队列读取任务，不依赖某个瞬时 HTTP MCP 会话一直在线。
 
+“当前生成批次”标题右侧提供“重新连接并继续”。它不是普通状态刷新：应用先等待同一 batch 的旧调度生命周期
+释放，再强制替换 Codex Runtime；健康 MCP Server 保持运行，停止、故障或端口不匹配的 MCP 则先恢复健康。
+连接重新 Ready 后，应用重新读取任务库并只续派当前项目、当前 batch 中
+`dispatchIntent.requested=true` 的原 `Pending` 或 GAssetForge-managed `Claimed` task ID。Pending 使用 taskId
+派生的稳定 Codex 身份；Claimed 只有在 `ClaimedBy` 精确匹配该受管身份时才会立即续租并逐字复用，使同
+所有者重复 claim 成为幂等续作。续派不会创建自动重做或手动重试 task，也不会改写 RetryLineage、Run、
+manifest、模型中间路径或最终 targetPath；租约续期会正常推进 Revision/更新时间。其它 Codex 会话或 Agent
+的 Claim 会被跳过，也不会被本轮心跳续租。
+
 ### Codex 人工接力
 
 自动通道异常时有两个复制入口：
@@ -542,6 +551,13 @@ Run 目录、prompt 与 manifest。调度器按 batch ID 进程内去重，并�
 `QueueStopped`；只有真实新入队才记录一次恢复日志。恢复扫描只在 Agent 连接发生 false→true 变化时触发，
 普通 `/health` 轮询和 thread 书签更新不会重复扫描同一 Pending 批次。
 `requested=false` 的本地队列和人工接力任务只等待用户明确操作。
+
+Responses 断流后 app-server 进程有时仍保持 Ready，因此不会产生新的 false→true 自动恢复边沿。用户点击
+“重新连接并继续”时，显式恢复路径会与自动扫描共用串行 gate，但只处理界面当前 batch：它等待协调器的
+`ReleaseBatch` 信号，强制换新 Runtime，重新验证 MCP ready，并按 batch ID 幂等入队。连点只会建立一个
+Runtime/Turn 生命周期；若队列已经在调度同一 batch，`AlreadyScheduled` 被视为幂等成功。
+若 MCP 进程存在但长期停在 `Starting`，显式恢复会在第一次健康检查超时后回收旧进程并只执行一次重新
+启动与健康校验；第二次失败直接暴露给界面和日志，避免无限重启掩盖端口或服务故障。
 
 如果自动重做在 child 入库前因权限、目录或 Run 准备问题失败，任务会持久化
 `automaticRetryBlockedReason`。此时仍保留原 `FailureRetryable` 和剩余次数用于诊断，但 UI 不再显示“自动重做

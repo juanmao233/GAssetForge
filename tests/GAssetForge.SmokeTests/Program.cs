@@ -164,6 +164,8 @@ internal static class Program
             Console.WriteLine("PASS  Agent 断连、慢反馈、长时间静默、产物心跳与租约风险可确定性判定");
             GenerationBatchDispatchCoordinatorSmokeTests.RunAllAsync().GetAwaiter().GetResult();
             Console.WriteLine("PASS  素材批次通过单消费者队列串行派发 Agent Turn，失败不触发隐式重试");
+            GenerationResumeRaceSmokeTests.Run();
+            Console.WriteLine("PASS  显式重新连接在恢复锁内复核当前批次，避免续派已切换的旧批次");
             GenerationBatchTurnReconcilerSmokeTests.RunAllAsync().GetAwaiter().GetResult();
             Console.WriteLine("PASS  Agent Turn 结束后仅按持久化真相收束，未认领与断流任务保持 Pending");
             CodexManualFallbackPromptSmokeTests.Run();
@@ -4145,6 +4147,10 @@ internal static class Program
                 generationView,
                 "RefreshGenerationTaskButton",
                 "素材生成页缺少刷新任务按钮。");
+            var reconnectAndContinueButton = RequireNamedElement<Button>(
+                generationView,
+                "ReconnectAndContinueGenerationButton",
+                "素材生成页缺少重新连接并继续当前批次按钮。");
             var generatedAssetList = RequireNamedElement<ListBox>(
                 generationView,
                 "GeneratedAssetList",
@@ -4266,6 +4272,8 @@ internal static class Program
             createTaskButton.GetBindingExpression(Button.CommandProperty)?.UpdateTarget();
             startGenerationButton.GetBindingExpression(Button.CommandProperty)?.UpdateTarget();
             refreshTaskButton.GetBindingExpression(Button.CommandProperty)?.UpdateTarget();
+            reconnectAndContinueButton.GetBindingExpression(Button.CommandProperty)?.UpdateTarget();
+            reconnectAndContinueButton.GetBindingExpression(ContentControl.ContentProperty)?.UpdateTarget();
             True(ReferenceEquals(shell.AssetGeneration.ChooseOutputDirectoryCommand, chooseOutputButton.Command),
                 "选择输出目录按钮命令实例");
             True(ReferenceEquals(shell.AssetGeneration.UseProjectCurrentDirectoryCommand, useProjectOutputButton.Command),
@@ -4278,6 +4286,18 @@ internal static class Program
                 "Agent 链路未就绪时开始生成按钮不得执行");
             True(ReferenceEquals(shell.AssetGeneration.RefreshTaskCommand, refreshTaskButton.Command),
                 "刷新生成任务按钮命令实例");
+            True(ReferenceEquals(
+                    shell.AssetGeneration.ReconnectAndContinueCurrentBatchCommand,
+                    reconnectAndContinueButton.Command),
+                "重新连接并继续按钮命令实例");
+            Equal(nameof(AssetGenerationViewModel.ReconnectAndContinueCurrentBatchButtonText),
+                BindingOperations.GetBinding(reconnectAndContinueButton, ContentControl.ContentProperty)?.Path?.Path,
+                "重新连接并继续按钮文本绑定路径");
+            True(reconnectAndContinueButton.Parent is StackPanel batchActionPanel &&
+                 ReferenceEquals(batchActionPanel, refreshTaskButton.Parent) &&
+                 batchActionPanel.Children.IndexOf(reconnectAndContinueButton) <
+                 batchActionPanel.Children.IndexOf(refreshTaskButton),
+                "重新连接并继续按钮应紧邻并位于刷新状态按钮左侧");
             True(ReferenceEquals(shell.AssetGeneration.GeneratedAssets, generatedAssetList.ItemsSource),
                 "生成产物列表应绑定 GeneratedAssets");
             Equal(nameof(AssetGenerationViewModel.DispatchProgress),

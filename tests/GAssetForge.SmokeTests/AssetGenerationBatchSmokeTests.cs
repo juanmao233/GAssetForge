@@ -72,6 +72,10 @@ internal static class AssetGenerationBatchSmokeTests
                 "仅发布队列不得改写已持久化任务的 Pending 状态");
             True(tasks.All(task => task.DispatchIntent is { Requested: false, IsRetry: false }),
                 "仅发布本地队列的任务不得在重启后被自动派发");
+            False(generation.CanReconnectAndContinueCurrentBatch,
+                "DispatchIntent.Requested=false 的仅发布批次不得启用重新连接并继续");
+            False(generation.ReconnectAndContinueCurrentBatchCommand.CanExecute(null),
+                "仅发布队列不得通过重新连接按钮意外转为自动调度");
             Equal(firstEvent.TaskIds[0], tasks[0].Id, "BatchPublished 第一任务顺序");
             Equal(firstEvent.TaskIds[1], tasks[1].Id, "BatchPublished 第二任务顺序");
             Equal(firstEvent.TaskIds[2], tasks[2].Id, "BatchPublished 第三任务顺序");
@@ -210,6 +214,96 @@ internal static class AssetGenerationBatchSmokeTests
                     "重启恢复应重新派发同一个持久化 child，而不是创建新任务");
                 True(recoveredChildDispatch.IsRetry,
                     "恢复后的自动 child 必须保留重试调度标记");
+
+                var capturedResumeRequest = new TaskCompletionSource<GenerationBatchResumeRequest>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                var releaseResumeHandler = new TaskCompletionSource(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+                var resumeHandlerCallCount = 0;
+                retryGeneration.ConfigureReconnectAndContinueHandler(async (request, cancellationToken) =>
+                {
+                    Interlocked.Increment(ref resumeHandlerCallCount);
+                    capturedResumeRequest.TrySetResult(request);
+                    await releaseResumeHandler.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+                });
+                True(retryGeneration.CanReconnectAndContinueCurrentBatch,
+                    "当前自动重做批次存在可恢复 Pending 时应允许重新连接并继续");
+                True(retryGeneration.ReconnectAndContinueCurrentBatchCommand.CanExecute(null),
+                    "重新连接并继续命令应在 handler 与可恢复 Pending 均就绪时启用");
+                var tasksBeforeResume = store.ListAsync().GetAwaiter().GetResult()
+                    .OrderBy(task => task.Id, StringComparer.Ordinal)
+                    .ToArray();
+                retryGeneration.ReconnectAndContinueCurrentBatchCommand.Execute(null);
+                retryGeneration.ReconnectAndContinueCurrentBatchCommand.Execute(null);
+                WaitUntil(
+                    () => capturedResumeRequest.Task.IsCompleted &&
+                          retryGeneration.IsReconnectingAndContinuingCurrentBatch,
+                    TimeSpan.FromSeconds(8),
+                    "重新连接并继续命令未调用异步 handler");
+                Equal(1, Volatile.Read(ref resumeHandlerCallCount),
+                    "重新连接并继续命令执行期间必须防止重复点击重复派发");
+                False(retryGeneration.ReconnectAndContinueCurrentBatchCommand.CanExecute(null),
+                    "重新连接并继续 handler 执行期间命令必须禁用");
+                Equal("正在重新连接…", retryGeneration.ReconnectAndContinueCurrentBatchButtonText,
+                    "重新连接执行期间按钮文本");
+                var resumeRequest = capturedResumeRequest.Task.GetAwaiter().GetResult();
+                Equal(automaticChild.BatchId, resumeRequest.BatchId,
+                    "重新连接请求必须使用当前批次 ID");
+                Equal(automaticChild.Id, resumeRequest.TaskIds.Single(),
+                    "重新连接请求必须复用持久化 Pending taskId");
+                True(resumeRequest.IsRetry,
+                    "重新连接请求必须保留当前批次的自动重做标记");
+                releaseResumeHandler.TrySetResult();
+                WaitUntil(
+                    () => !retryGeneration.IsReconnectingAndContinuingCurrentBatch,
+                    TimeSpan.FromSeconds(8),
+                    "重新连接并继续 handler 完成后页面未解除忙碌状态");
+                var tasksAfterResume = store.ListAsync().GetAwaiter().GetResult()
+                    .OrderBy(task => task.Id, StringComparer.Ordinal)
+                    .ToArray();
+                AssertTaskStoreUnchanged(tasksBeforeResume, tasksAfterResume);
+                True(retryGeneration.StatusText.Contains("不会创建新任务", StringComparison.Ordinal),
+                    "重新连接完成提示应明确复用原任务且不覆盖已有产物");
+
+                var managedResumeAgentId = $"codex:gassetforge:{automaticChild.Id}";
+                store.ClaimAsync(automaticChild.Id, managedResumeAgentId)
+                    .GetAwaiter()
+                    .GetResult();
+                var claimedTasksBeforeResume = store.ListAsync().GetAwaiter().GetResult()
+                    .OrderBy(task => task.Id, StringComparer.Ordinal)
+                    .ToArray();
+                True(retryGeneration.ReconnectAndContinueCurrentBatchCommand.CanExecute(null),
+                    "持久化状态变化尚未刷新到页面前命令可见状态允许保持旧快照");
+                retryGeneration.ReconnectAndContinueCurrentBatchCommand.Execute(null);
+                WaitUntil(
+                    () => !retryGeneration.IsReconnectingAndContinuingCurrentBatch &&
+                          Volatile.Read(ref resumeHandlerCallCount) == 2,
+                    TimeSpan.FromSeconds(8),
+                    "同一受管 agentId 已认领的任务未被重新连接 handler 继续派发");
+                var claimedTasksAfterResume = store.ListAsync().GetAwaiter().GetResult()
+                    .OrderBy(task => task.Id, StringComparer.Ordinal)
+                    .ToArray();
+                AssertTaskStoreUnchanged(claimedTasksBeforeResume, claimedTasksAfterResume);
+                True(retryGeneration.ReconnectAndContinueCurrentBatchCommand.CanExecute(null),
+                    "同一受管 agentId 的 Claimed-only 当前批次应允许再次安全续作");
+
+                store.CompleteAsync(
+                        automaticChild.Id,
+                        managedResumeAgentId,
+                        automaticDelivery!.TargetPaths)
+                    .GetAwaiter()
+                    .GetResult();
+                retryGeneration.RefreshTaskCommand.Execute(null);
+                WaitUntil(
+                    () => retryGeneration.PublishedTasks.Any(task =>
+                        string.Equals(task.TaskId, automaticChild.Id, StringComparison.Ordinal) &&
+                        task.Status == GenerationTaskStatus.Completed),
+                    TimeSpan.FromSeconds(8),
+                    "重新连接测试未刷新出 Completed-only 当前批次");
+                False(retryGeneration.CanReconnectAndContinueCurrentBatch,
+                    "Completed-only 当前批次不得启用重新连接并继续");
+                False(retryGeneration.ReconnectAndContinueCurrentBatchCommand.CanExecute(null),
+                    "Completed-only 当前批次的重新连接命令应禁用");
 
                 var manifestPath = Path.Combine(
                     automaticDelivery!.AssetRoot,
@@ -652,6 +746,64 @@ internal static class AssetGenerationBatchSmokeTests
         }
 
         throw new InvalidOperationException(message);
+    }
+
+    private static void AssertTaskStoreUnchanged(
+        IReadOnlyList<GenerationTask> expected,
+        IReadOnlyList<GenerationTask> actual)
+    {
+        Equal(expected.Count, actual.Count,
+            "重新连接 handler 完成后任务库数量不得变化");
+        True(expected.Select(task => task.Id).SequenceEqual(actual.Select(task => task.Id), StringComparer.Ordinal),
+            "重新连接 handler 完成后任务 ID 集合与顺序不得变化");
+        for (var index = 0; index < expected.Count; index++)
+        {
+            var before = expected[index];
+            var after = actual[index];
+            Equal(before.Revision, after.Revision,
+                $"重新连接不得推进任务 {before.Id} 的 revision");
+            Equal(before.RetryLineage, after.RetryLineage,
+                $"重新连接不得改写任务 {before.Id} 的 RetryLineage");
+            var beforeHasDelivery = MaterialGenerationConstraintComposer.TryReadDelivery(
+                before.Constraints,
+                out var beforeDelivery);
+            var afterHasDelivery = MaterialGenerationConstraintComposer.TryReadDelivery(
+                after.Constraints,
+                out var afterDelivery);
+            Equal(beforeHasDelivery, afterHasDelivery,
+                $"重新连接不得改变任务 {before.Id} 是否具有 delivery");
+            if (!beforeHasDelivery || beforeDelivery is null || afterDelivery is null)
+            {
+                continue;
+            }
+
+            Equal(beforeDelivery.AssetRoot, afterDelivery.AssetRoot,
+                $"重新连接不得改写任务 {before.Id} 的 delivery.AssetRoot");
+            Equal(beforeDelivery.OutputDirectory, afterDelivery.OutputDirectory,
+                $"重新连接不得改写任务 {before.Id} 的 delivery.OutputDirectory");
+            Equal(beforeDelivery.SuggestedBaseName, afterDelivery.SuggestedBaseName,
+                $"重新连接不得改写任务 {before.Id} 的 delivery.SuggestedBaseName");
+            True(beforeDelivery.TargetPaths.SequenceEqual(afterDelivery.TargetPaths, StringComparer.Ordinal),
+                $"重新连接不得改写任务 {before.Id} 的 delivery.TargetPaths");
+            True(beforeDelivery.StagingPaths.SequenceEqual(afterDelivery.StagingPaths, StringComparer.Ordinal),
+                $"重新连接不得改写任务 {before.Id} 的 delivery.StagingPaths");
+            Equal(beforeDelivery.Workspace?.RunId, afterDelivery.Workspace?.RunId,
+                $"重新连接不得改写任务 {before.Id} 的 workspace.RunId");
+            Equal(beforeDelivery.Workspace?.RootPath, afterDelivery.Workspace?.RootPath,
+                $"重新连接不得改写任务 {before.Id} 的 workspace.RootPath");
+            Equal(beforeDelivery.Workspace?.ManifestPath, afterDelivery.Workspace?.ManifestPath,
+                $"重新连接不得改写任务 {before.Id} 的 workspace.ManifestPath");
+            Equal(beforeDelivery.Workspace?.PromptPath, afterDelivery.Workspace?.PromptPath,
+                $"重新连接不得改写任务 {before.Id} 的 workspace.PromptPath");
+            Equal(beforeDelivery.Workspace?.DiagnosticsPath, afterDelivery.Workspace?.DiagnosticsPath,
+                $"重新连接不得改写任务 {before.Id} 的 workspace.DiagnosticsPath");
+            True((beforeDelivery.Workspace?.ModelOutputPaths ?? [])
+                    .SequenceEqual(afterDelivery.Workspace?.ModelOutputPaths ?? [], StringComparer.Ordinal),
+                $"重新连接不得改写任务 {before.Id} 的 workspace.ModelOutputPaths");
+            True((beforeDelivery.Workspace?.ProcessedPaths ?? [])
+                    .SequenceEqual(afterDelivery.Workspace?.ProcessedPaths ?? [], StringComparer.Ordinal),
+                $"重新连接不得改写任务 {before.Id} 的 workspace.ProcessedPaths");
+        }
     }
 
     private static string ResolveAssetPath(string assetRoot, string relativePath) =>

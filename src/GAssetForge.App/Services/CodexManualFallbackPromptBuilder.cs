@@ -76,7 +76,17 @@ public static class CodexManualFallbackPromptBuilder
         ArgumentNullException.ThrowIfNull(taskIds);
 
         var normalizedBatchId = RequireSingleLineValue(batchId.Trim(), nameof(batchId));
-        var executionPrompt = GenerationAgentPromptBuilder.Build(taskIds);
+        var claimIdentities = taskIds
+            .Where(taskId => !string.IsNullOrWhiteSpace(taskId))
+            .Select(taskId => taskId.Trim())
+            .Distinct(StringComparer.Ordinal)
+            .ToDictionary(
+                taskId => taskId,
+                GenerationManagedAgentIdentity.ForTask,
+                StringComparer.Ordinal);
+        var executionPrompt = GenerationAgentPromptBuilder.Build(
+            taskIds,
+            claimIdentities);
         var prompt = new StringBuilder();
         prompt.Append(BuildConnectionPrompt(projectDirectory, mcpEndpoint, tokenEnvironmentVariableName).TrimEnd());
         prompt.AppendLine();

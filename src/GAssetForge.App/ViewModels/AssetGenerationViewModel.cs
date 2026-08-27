@@ -219,6 +219,11 @@ internal sealed record RecoverableGenerationDispatch(
     IReadOnlyList<string> TaskIds,
     bool IsRetry);
 
+internal sealed record GenerationBatchResumeRequest(
+    string BatchId,
+    IReadOnlyList<string> TaskIds,
+    bool IsRetry);
+
 public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
 {
     public const int MaximumDraftRowCount = GenerationInputValidator.MaximumBatchItemCount;
@@ -261,6 +266,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
     private readonly AsyncRelayCommand _createTaskCommand;
     private readonly AsyncRelayCommand _startGenerationCommand;
     private readonly AsyncRelayCommand _refreshTaskCommand;
+    private readonly AsyncRelayCommand _reconnectAndContinueCurrentBatchCommand;
     private readonly RelayCommand _openOutputDirectoryCommand;
     private readonly RelayCommand _addDraftRowCommand;
     private readonly RelayCommand<AssetGenerationDraftRowViewModel> _removeDraftRowCommand;
@@ -319,6 +325,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
     private bool _showCurrentBatchManualPrompt;
     private bool _isPolling;
     private bool _refreshRequested;
+    private bool _isReconnectingAndContinuingCurrentBatch;
     private bool _disposed;
     private int _remainingTerminalArtifactPolls;
     private bool _suppressSettingsNotification = true;
@@ -328,6 +335,8 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
     private readonly HashSet<string> _observedArtifactPaths = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<GenerationBatchDispatchStage, TimeSpan> _dispatchStageDurations = [];
     private readonly SemaphoreSlim _automaticRetryGate = new(1, 1);
+    private Func<GenerationBatchResumeRequest, CancellationToken, Task>? _reconnectAndContinueHandler;
+    private CancellationTokenSource? _reconnectAndContinueCancellation;
 
     public AssetGenerationViewModel(
         WorkspacePaths paths,
@@ -382,6 +391,9 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             () => CanCreateTask);
         _startGenerationCommand = new AsyncRelayCommand(StartGenerationAsync, () => CanStartGeneration);
         _refreshTaskCommand = new AsyncRelayCommand(RefreshCurrentTaskAsync, () => !IsBusy);
+        _reconnectAndContinueCurrentBatchCommand = new AsyncRelayCommand(
+            ReconnectAndContinueCurrentBatchAsync,
+            () => CanReconnectAndContinueCurrentBatch);
         _openOutputDirectoryCommand = new RelayCommand(OpenOutputDirectory, () => Directory.Exists(OutputDirectory));
         _addDraftRowCommand = new RelayCommand(AddDraftRow, () => CanAddDraftRow);
         _removeDraftRowCommand = new RelayCommand<AssetGenerationDraftRowViewModel>(
@@ -414,6 +426,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         CreateTaskCommand = _createTaskCommand;
         StartGenerationCommand = _startGenerationCommand;
         RefreshTaskCommand = _refreshTaskCommand;
+        ReconnectAndContinueCurrentBatchCommand = _reconnectAndContinueCurrentBatchCommand;
         OpenOutputDirectoryCommand = _openOutputDirectoryCommand;
         ChooseOutputDirectoryCommand = new RelayCommand(ChooseOutputDirectory);
         UseProjectCurrentDirectoryCommand = new RelayCommand(UseProjectCurrentDirectory);
@@ -875,6 +888,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             OnPropertyChanged(nameof(CanCreateTask));
             OnPropertyChanged(nameof(CanStartGeneration));
             OnPropertyChanged(nameof(CanCreateManualRetryBatch));
+            OnPropertyChanged(nameof(CanReconnectAndContinueCurrentBatch));
             RaiseCommandStates();
         }
     }
@@ -892,6 +906,26 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             OnPropertyChanged(nameof(CanCreateTask));
             OnPropertyChanged(nameof(CanStartGeneration));
             OnPropertyChanged(nameof(CanCreateManualRetryBatch));
+            OnPropertyChanged(nameof(CanReconnectAndContinueCurrentBatch));
+            RaiseCommandStates();
+        }
+    }
+
+    public bool IsReconnectingAndContinuingCurrentBatch
+    {
+        get => _isReconnectingAndContinuingCurrentBatch;
+        private set
+        {
+            if (!SetProperty(ref _isReconnectingAndContinuingCurrentBatch, value))
+            {
+                return;
+            }
+
+            OnPropertyChanged(nameof(CanCreateTask));
+            OnPropertyChanged(nameof(CanStartGeneration));
+            OnPropertyChanged(nameof(CanCreateManualRetryBatch));
+            OnPropertyChanged(nameof(CanReconnectAndContinueCurrentBatch));
+            OnPropertyChanged(nameof(ReconnectAndContinueCurrentBatchButtonText));
             RaiseCommandStates();
         }
     }
@@ -1068,6 +1102,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
 
     public bool CanCreateTask => !IsBusy &&
                                   !IsDispatching &&
+                                  !IsReconnectingAndContinuingCurrentBatch &&
                                   SelectedStyleGroup is not null &&
                                   HasUsableSelectedStyle(SelectedStyleGroup) &&
                                   (TryGetFreshUnifiedPrompt(SelectedStyleGroup, out _) ||
@@ -1079,6 +1114,22 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                                   TotalRequestedCount is >= 1 and <= MaximumBatchOutputCount;
 
     public bool CanStartGeneration => CanCreateTask && IsAgentConnected;
+
+    public bool CanReconnectAndContinueCurrentBatch =>
+        !_disposed &&
+        !IsBusy &&
+        !IsDispatching &&
+        !IsReconnectingAndContinuingCurrentBatch &&
+        !_agentConnection.IsTurnRunning &&
+        _reconnectAndContinueHandler is not null &&
+        GetCurrentBatchActiveTasks().Any(task =>
+            GenerationManagedAgentIdentity.CanResume(task.Task) &&
+            task.Task.DispatchIntent?.Requested == true);
+
+    public string ReconnectAndContinueCurrentBatchButtonText =>
+        IsReconnectingAndContinuingCurrentBatch
+            ? "正在重新连接…"
+            : "重新连接并继续";
 
     public bool HasCurrentTask => _currentTask is not null || PublishedTasks.Count > 0;
 
@@ -1106,6 +1157,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             var currentTasks = GetCurrentBatchActiveTasks();
             return !IsBusy &&
                    !IsDispatching &&
+                   !IsReconnectingAndContinuingCurrentBatch &&
                    currentTasks.Length > 0 &&
                    currentTasks.All(task => task.Status == GenerationTaskStatus.Failed) &&
                    currentTasks.All(task => !task.HasAutomaticRetryRemaining);
@@ -1219,7 +1271,18 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
 
     public ICommand RefreshTaskCommand { get; }
 
+    public ICommand ReconnectAndContinueCurrentBatchCommand { get; }
+
     public ICommand OpenOutputDirectoryCommand { get; }
+
+    internal void ConfigureReconnectAndContinueHandler(
+        Func<GenerationBatchResumeRequest, CancellationToken, Task> handler)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        _reconnectAndContinueHandler = handler ?? throw new ArgumentNullException(nameof(handler));
+        OnPropertyChanged(nameof(CanReconnectAndContinueCurrentBatch));
+        _reconnectAndContinueCurrentBatchCommand.RaiseCanExecuteChanged();
+    }
 
     public void ShowCodexConnectionPromptPreview()
     {
@@ -1394,6 +1457,41 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                     .Select(task => task.Id)
                     .ToArray(),
                 group.Any(task => task.DispatchIntent?.IsRetry == true)))
+            .ToArray();
+    }
+
+    internal async Task<RecoverableGenerationDispatch?>
+        GetRecoverableExplicitResumeDispatchAsync(
+            string batchId,
+            CancellationToken cancellationToken = default)
+    {
+        var tasks = await LoadExplicitResumeTasksAsync(batchId, cancellationToken)
+            .ConfigureAwait(true);
+        return tasks.Length == 0
+            ? null
+            : new RecoverableGenerationDispatch(
+                batchId.Trim(),
+                tasks.Select(task => task.Id).ToArray(),
+                tasks.Any(task => task.DispatchIntent?.IsRetry == true));
+    }
+
+    private async Task<GenerationTask[]> LoadExplicitResumeTasksAsync(
+        string batchId,
+        CancellationToken cancellationToken)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(batchId);
+        var normalizedBatchId = batchId.Trim();
+        return (await _taskStore.ListBatchAsync(normalizedBatchId, cancellationToken)
+                .ConfigureAwait(true))
+            .Where(task =>
+                task.DispatchIntent?.Requested == true &&
+                string.IsNullOrWhiteSpace(task.SupersededByTaskId) &&
+                string.Equals(task.BatchId, normalizedBatchId, StringComparison.Ordinal) &&
+                IsTaskForCurrentProject(task) &&
+                GenerationManagedAgentIdentity.CanResume(task))
+            .OrderBy(task => task.BatchItemIndex ?? int.MaxValue)
+            .ThenBy(task => task.CreatedAtUtc)
+            .ThenBy(task => task.Id, StringComparer.Ordinal)
             .ToArray();
     }
 
@@ -2199,6 +2297,8 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         }
 
         _disposed = true;
+        _reconnectAndContinueCancellation?.Cancel();
+        _reconnectAndContinueHandler = null;
         _pollTimer.Stop();
         _pollTimer.Tick -= OnPollTimerTick;
         UnsubscribeStyleGroup(_selectedStyleGroup);
@@ -2216,6 +2316,91 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         }
 
         DetachImportedRows();
+    }
+
+    private async Task ReconnectAndContinueCurrentBatchAsync()
+    {
+        var handler = _reconnectAndContinueHandler;
+        var batchId = _currentBatchId;
+        if (handler is null || string.IsNullOrWhiteSpace(batchId))
+        {
+            StatusText = handler is null
+                ? "重新连接恢复功能尚未接入应用调度器"
+                : "当前没有可继续的生成批次";
+            return;
+        }
+
+        if (!CanReconnectAndContinueCurrentBatch)
+        {
+            StatusText = IsDispatching || _agentConnection.IsTurnRunning
+                ? "当前批次仍在执行，请等待现有 Agent Turn 收束后再重新连接"
+                : "当前批次没有可由 GAssetForge 受管身份安全继续的 Pending/Claimed 任务";
+            return;
+        }
+
+        using var cancellation = new CancellationTokenSource();
+        _reconnectAndContinueCancellation = cancellation;
+        IsReconnectingAndContinuingCurrentBatch = true;
+        try
+        {
+            StatusText = $"正在重新读取批次 {ShortId(batchId)} 的持久化任务状态…";
+            var resumableTasks = await LoadExplicitResumeTasksAsync(batchId, cancellation.Token)
+                .ConfigureAwait(true);
+            if (resumableTasks.Length == 0)
+            {
+                await RefreshCurrentTaskAsync().ConfigureAwait(true);
+                var incompatibleClaims = GetCurrentBatchActiveTasks()
+                    .Where(task =>
+                        task.Status == GenerationTaskStatus.Claimed &&
+                        !GenerationManagedAgentIdentity.IsManagedClaimantForTask(
+                            task.TaskId,
+                            task.Task.ClaimedBy))
+                    .ToArray();
+                StatusText = incompatibleClaims.Length > 0
+                    ? $"当前批次仍有 {incompatibleClaims.Length} 个任务不属于当前 GAssetForge 受管身份；" +
+                      "不会冒用或抢占，原任务与产物保持不变"
+                    : "当前批次没有可继续调度的 Pending/Claimed 任务；已完成产物保持不变";
+                return;
+            }
+
+            var request = new GenerationBatchResumeRequest(
+                batchId,
+                resumableTasks.Select(task => task.Id).ToArray(),
+                resumableTasks.Any(task => task.DispatchIntent?.IsRetry == true));
+            var pendingCount = resumableTasks.Count(task => task.Status == GenerationTaskStatus.Pending);
+            var claimedCount = resumableTasks.Length - pendingCount;
+            StatusText =
+                $"正在重新连接 Agent，并继续批次 {ShortId(batchId)} 的 {resumableTasks.Length} 个原任务" +
+                $"（Pending {pendingCount} / Claimed {claimedCount}）…";
+            await handler(request, cancellation.Token).ConfigureAwait(true);
+            StatusText =
+                $"重新连接处理已返回；本次仅提交批次 {ShortId(batchId)} 的 {resumableTasks.Length} 个原 Pending/Claimed 任务，" +
+                "不会创建新任务或覆盖已有产物；请以刷新后的任务状态为准";
+            _remainingTerminalArtifactPolls = TerminalArtifactPollCount;
+            _pollTimer.Start();
+            await RefreshCurrentTaskAsync().ConfigureAwait(true);
+        }
+        catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
+        {
+            if (!_disposed)
+            {
+                StatusText = $"批次 {ShortId(batchId)} 的重新连接请求已取消；原任务仍保留在本地队列";
+            }
+        }
+        catch (Exception exception)
+        {
+            StatusText =
+                $"无法重新连接并继续批次 {ShortId(batchId)}：{exception.Message}；原任务与已落盘产物均未改写";
+        }
+        finally
+        {
+            if (ReferenceEquals(_reconnectAndContinueCancellation, cancellation))
+            {
+                _reconnectAndContinueCancellation = null;
+            }
+
+            IsReconnectingAndContinuingCurrentBatch = false;
+        }
     }
 
     private async Task StartGenerationAsync()
@@ -2925,6 +3110,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
     private bool CanRetryFailedTask(PublishedGenerationTaskViewModel? task) =>
         !IsBusy &&
         !IsDispatching &&
+        !IsReconnectingAndContinuingCurrentBatch &&
         IsAgentConnected &&
         task?.CanRetry == true;
 
@@ -3495,7 +3681,9 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(CurrentTaskId));
         OnPropertyChanged(nameof(CurrentTaskStatusText));
         OnPropertyChanged(nameof(CurrentTaskDetail));
+        OnPropertyChanged(nameof(CanReconnectAndContinueCurrentBatch));
         RefreshManualFallbackState();
+        _reconnectAndContinueCurrentBatchCommand.RaiseCanExecuteChanged();
 
         GeneratedAssets.Clear();
         var shouldRefreshProject = false;
@@ -4201,6 +4389,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(UnifiedStylePromptStatusText));
         OnPropertyChanged(nameof(CanCreateTask));
         OnPropertyChanged(nameof(CanStartGeneration));
+        OnPropertyChanged(nameof(CanReconnectAndContinueCurrentBatch));
         RefreshManualFallbackState();
         RaiseCommandStates();
     }
@@ -4951,6 +5140,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         _createTaskCommand?.RaiseCanExecuteChanged();
         _startGenerationCommand?.RaiseCanExecuteChanged();
         _refreshTaskCommand?.RaiseCanExecuteChanged();
+        _reconnectAndContinueCurrentBatchCommand?.RaiseCanExecuteChanged();
         _openOutputDirectoryCommand?.RaiseCanExecuteChanged();
         _addDraftRowCommand?.RaiseCanExecuteChanged();
         _removeDraftRowCommand?.RaiseCanExecuteChanged();

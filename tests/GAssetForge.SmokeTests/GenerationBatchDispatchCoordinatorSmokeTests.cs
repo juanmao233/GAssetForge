@@ -15,6 +15,9 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
         RecommendedSourcePathRejectsReparsePointAncestors();
         PendingRecoveryOnlyRunsOnConnectedRisingEdge();
         await EnqueueResultsDistinguishNewDuplicateAndStoppedCoordinatorAsync();
+        await BatchReleaseWaitersTrackEachSchedulingLifecycleAsync();
+        await DisposeCompletesBatchReleaseWaitersAsync();
+        await ManagedCodexClaimResumesIdempotentlyAndForeignClaimIsNotStolenAsync();
         await DispatchProgressIsMonotonicAndSerializedAsync();
         await LegacyTaskSkipsNewImageDeliveryPreflightAsync();
         await PublishedBatchesRunAsSerializedTurnsAsync();
@@ -98,6 +101,263 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
             await coordinator.DisposeAsync();
         }
     }
+
+    private static async Task BatchReleaseWaitersTrackEachSchedulingLifecycleAsync()
+    {
+        await using var coordinator = new GenerationBatchDispatchCoordinator((_, _) =>
+            Task.FromResult(new AgentTurnResult(
+                ThreadId: "thread-release-waiter",
+                TurnId: "turn-release-waiter",
+                Status: "completed",
+                ErrorMessage: null)));
+
+        const string batchId = "batch-release-waiter";
+        Equal(
+            GenerationBatchDispatchEnqueueResult.Enqueued,
+            coordinator.TryEnqueue(batchId, ["task-release-first"], isRetry: false),
+            "首次批次生命周期应进入调度队列");
+        var firstRelease = coordinator.WaitForBatchReleasedAsync(batchId);
+        False(firstRelease.IsCompleted,
+            "ReleaseBatch 前批次释放等待必须保持阻塞");
+        Equal(
+            GenerationBatchDispatchEnqueueResult.AlreadyScheduled,
+            coordinator.TryEnqueue(batchId, ["task-release-first-duplicate"], isRetry: false),
+            "释放前重复续派同一批次必须保持幂等");
+
+        coordinator.ReleaseBatch(batchId);
+        await firstRelease.WaitAsync(TimeSpan.FromSeconds(3));
+        True(firstRelease.IsCompletedSuccessfully,
+            "ReleaseBatch 后当前批次生命周期的等待者必须完成");
+
+        Equal(
+            GenerationBatchDispatchEnqueueResult.Enqueued,
+            coordinator.TryEnqueue(batchId, ["task-release-second"], isRetry: false),
+            "释放后应允许同一 batchId 建立新的调度生命周期");
+        var secondRelease = coordinator.WaitForBatchReleasedAsync(batchId);
+        False(secondRelease.IsCompleted,
+            "续派后的新批次生命周期必须使用新的未完成释放信号");
+        False(ReferenceEquals(firstRelease, secondRelease),
+            "同一 batchId 的不同调度生命周期不得复用已完成释放信号");
+        Equal(
+            GenerationBatchDispatchEnqueueResult.AlreadyScheduled,
+            coordinator.TryEnqueue(batchId, ["task-release-second-duplicate"], isRetry: false),
+            "续派生命周期内再次点击恢复仍只能保留一个调度请求");
+
+        coordinator.ReleaseBatch(batchId);
+        await secondRelease.WaitAsync(TimeSpan.FromSeconds(3));
+        True(secondRelease.IsCompletedSuccessfully,
+            "第二次 ReleaseBatch 必须只完成续派生命周期的等待者");
+    }
+
+    private static async Task DisposeCompletesBatchReleaseWaitersAsync()
+    {
+        var turnStarted = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var coordinator = new GenerationBatchDispatchCoordinator(
+            async (_, cancellationToken) =>
+            {
+                turnStarted.TrySetResult();
+                await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                return new AgentTurnResult(
+                    ThreadId: null,
+                    TurnId: null,
+                    Status: "completed",
+                    ErrorMessage: null);
+            });
+        try
+        {
+            Equal(
+                GenerationBatchDispatchEnqueueResult.Enqueued,
+                coordinator.TryEnqueue("batch-release-on-dispose", ["task-dispose"], isRetry: false),
+                "关闭等待测试批次应进入调度队列");
+            await turnStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            var release = coordinator.WaitForBatchReleasedAsync("batch-release-on-dispose");
+            False(release.IsCompleted,
+                "协调器关闭前活动批次的释放等待不得提前完成");
+
+            await coordinator.DisposeAsync();
+            await release.WaitAsync(TimeSpan.FromSeconds(3));
+            True(release.IsCompletedSuccessfully,
+                "DisposeAsync 必须结束所有仍在等待的批次释放任务");
+        }
+        finally
+        {
+            await coordinator.DisposeAsync();
+        }
+    }
+
+    private static async Task ManagedCodexClaimResumesIdempotentlyAndForeignClaimIsNotStolenAsync()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "GAssetForge.ManagedClaimResumeSmokeTests",
+            Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            var time = new LeaseRegressionTests.ManualTimeProvider(
+                new DateTimeOffset(2026, 8, 27, 9, 0, 0, TimeSpan.Zero));
+            var store = new JsonGenerationTaskStore(
+                root,
+                time,
+                TimeSpan.FromMinutes(10));
+            var managedBatchId = Guid.NewGuid().ToString("N");
+            var managedTask = (await store.CreateBatchAsync(new CreateGenerationBatchRequest
+            {
+                BatchId = managedBatchId,
+                DisplayName = "受管 Codex Claim 续作",
+                DispatchRequested = true,
+                Items =
+                [
+                    new CreateGenerationBatchItemRequest
+                    {
+                        ItemId = Guid.NewGuid().ToString("N"),
+                        DisplayName = "保持原任务与路径",
+                        Constraints = CreateClaimResumeConstraints("保持原任务与路径")
+                    }
+                ]
+            })).Single();
+            var managedAgentId = GenerationManagedAgentIdentity.ForTask(managedTask.Id);
+            var firstClaim = await store.ClaimAsync(managedTask.Id, managedAgentId);
+            var repeatedClaim = await store.ClaimAsync(managedTask.Id, managedAgentId);
+            Equal(firstClaim.Id, repeatedClaim.Id,
+                "同一受管身份重复 claim 必须复用原 taskId");
+            Equal(firstClaim.Revision, repeatedClaim.Revision,
+                "同一受管身份重复 claim 必须保持 revision 不变");
+            Equal(firstClaim.RetryLineage, repeatedClaim.RetryLineage,
+                "同一受管身份重复 claim 必须保持 retry lineage 不变");
+            Equal(firstClaim.ClaimedBy, repeatedClaim.ClaimedBy,
+                "同一受管身份重复 claim 必须保持冻结所有者不变");
+            time.Advance(TimeSpan.FromMinutes(9));
+
+            string? managedPrompt = null;
+            var managedCompletion = new TaskCompletionSource<GenerationBatchDispatchCompletedEventArgs>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            await using (var coordinator = new GenerationBatchDispatchCoordinator(
+                             (prompt, _) =>
+                             {
+                                 managedPrompt = prompt;
+                                 return Task.FromResult(new AgentTurnResult(
+                                     ThreadId: "managed-claim-thread",
+                                     TurnId: "managed-claim-turn",
+                                     Status: "completed",
+                                     ErrorMessage: null));
+                             },
+                             store))
+            {
+                coordinator.DispatchCompleted += (_, eventArgs) =>
+                    managedCompletion.TrySetResult(eventArgs);
+                Equal(
+                    GenerationBatchDispatchEnqueueResult.Enqueued,
+                    coordinator.TryEnqueue(managedBatchId, [managedTask.Id], isRetry: false),
+                    "Claimed-only 受管任务应进入重新调度生命周期");
+                var completed = await managedCompletion.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                True(completed.IsSuccess,
+                    $"同一 Codex Claim 的续作 Turn 应启动成功：{completed.FailureMessage}");
+            }
+
+            True(managedPrompt?.Contains(
+                    $"{managedTask.Id} => `{managedAgentId}`",
+                    StringComparison.Ordinal) == true,
+                "续作 prompt 必须逐任务复用冻结 ClaimedBy");
+            True(managedPrompt?.Contains(
+                    "相同身份重复 claim 是断线后的幂等续作",
+                    StringComparison.Ordinal) == true,
+                "续作 prompt 必须明确同身份幂等语义");
+            var afterManagedDispatch = await store.GetAsync(managedTask.Id)
+                ?? throw new InvalidOperationException("受管续作任务丢失。");
+            Equal(repeatedClaim.Revision + 1, afterManagedDispatch.Revision,
+                "续作 Turn 启动前必须立即续租临近过期的 Claimed 任务");
+            Equal(time.GetUtcNow(), afterManagedDispatch.UpdatedAtUtc,
+                "立即续租必须把租约基准推进到续作启动时间");
+            Equal(repeatedClaim.RetryLineage, afterManagedDispatch.RetryLineage,
+                "立即续租不得改写 retry lineage");
+            Equal(managedAgentId, afterManagedDispatch.ClaimedBy,
+                "立即续租不得改写冻结所有者");
+            time.Advance(TimeSpan.FromMinutes(2));
+            var afterOriginalLeaseBoundary = await store.GetAsync(managedTask.Id)
+                ?? throw new InvalidOperationException("受管续作租约边界任务丢失。");
+            Equal(GenerationTaskStatus.Claimed, afterOriginalLeaseBoundary.Status,
+                "续作前立即续租后，任务跨过原租约边界仍应保持 Claimed");
+
+            var foreignBatchId = Guid.NewGuid().ToString("N");
+            var foreignTask = (await store.CreateBatchAsync(new CreateGenerationBatchRequest
+            {
+                BatchId = foreignBatchId,
+                DisplayName = "其它 Codex 会话 Claim 不得冒用",
+                DispatchRequested = true,
+                Items =
+                [
+                    new CreateGenerationBatchItemRequest
+                    {
+                        ItemId = Guid.NewGuid().ToString("N"),
+                        DisplayName = "外部 Agent 所有权",
+                        Constraints = CreateClaimResumeConstraints("外部 Agent 所有权")
+                    }
+                ]
+            })).Single();
+            const string foreignAgentId = "codex:external-session-owner";
+            var foreignClaim = await store.ClaimAsync(foreignTask.Id, foreignAgentId);
+            var foreignTurnCount = 0;
+            var foreignCompletion = new TaskCompletionSource<GenerationBatchDispatchCompletedEventArgs>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            await using (var coordinator = new GenerationBatchDispatchCoordinator(
+                             (_, _) =>
+                             {
+                                 Interlocked.Increment(ref foreignTurnCount);
+                                 return Task.FromResult(new AgentTurnResult(
+                                     ThreadId: "must-not-start",
+                                     TurnId: "must-not-start",
+                                     Status: "completed",
+                                     ErrorMessage: null));
+                             },
+                             store))
+            {
+                coordinator.DispatchCompleted += (_, eventArgs) =>
+                    foreignCompletion.TrySetResult(eventArgs);
+                Equal(
+                    GenerationBatchDispatchEnqueueResult.Enqueued,
+                    coordinator.TryEnqueue(foreignBatchId, [foreignTask.Id], isRetry: false),
+                    "外部 Claim 请求仍应进入协调器并得到结构化拒绝结果");
+                var rejected = await foreignCompletion.Task.WaitAsync(TimeSpan.FromSeconds(3));
+                False(rejected.IsSuccess,
+                    "其它 Codex 会话的 Claimed-only 批次不得启动续作 Turn");
+                True(rejected.FailureMessage?.Contains("不会抢占", StringComparison.Ordinal) == true,
+                    "外部 Claim 拒绝必须明确说明不会抢占");
+            }
+
+            Equal(0, foreignTurnCount,
+                "其它 Codex 会话所有者不得进入 Agent Turn");
+            var afterForeignAttempt = await store.GetAsync(foreignTask.Id)
+                ?? throw new InvalidOperationException("外部 Claim 任务丢失。");
+            Equal(foreignClaim.Revision, afterForeignAttempt.Revision,
+                "拒绝外部 Claim 续作不得推进 revision");
+            Equal(foreignAgentId, afterForeignAttempt.ClaimedBy,
+                "拒绝外部 Claim 续作不得改写原所有者");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    private static GenerationConstraintPackage CreateClaimResumeConstraints(string prompt) => new()
+    {
+        WorkflowId = "managed-claim-resume-smoke",
+        PreferredSkill = "imagegen",
+        Prompt = prompt,
+        Output = new GenerationOutputSpec
+        {
+            Width = 64,
+            Height = 64,
+            Count = 1,
+            MaxParallelism = 1,
+            Format = "png"
+        }
+    };
 
     private static async Task LegacyTaskSkipsNewImageDeliveryPreflightAsync()
     {

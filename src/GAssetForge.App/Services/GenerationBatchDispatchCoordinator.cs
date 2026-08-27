@@ -105,6 +105,8 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
     private readonly Func<TimeSpan, CancellationToken, Task> _heartbeatDelay;
     private readonly object _scheduledBatchLock = new();
     private readonly HashSet<string> _scheduledBatchIds = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, TaskCompletionSource> _batchReleaseSignals =
+        new(StringComparer.Ordinal);
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Task _worker;
     private int _disposed;
@@ -172,6 +174,9 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
                 return GenerationBatchDispatchEnqueueResult.AlreadyScheduled;
             }
 
+            var releaseSignal = new TaskCompletionSource(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            _batchReleaseSignals.Add(normalizedBatchId, releaseSignal);
             if (_requests.Writer.TryWrite(
                     new GenerationBatchDispatchRequest(normalizedBatchId, normalizedTaskIds, isRetry)))
             {
@@ -179,8 +184,36 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
             }
 
             _scheduledBatchIds.Remove(normalizedBatchId);
+            _batchReleaseSignals.Remove(normalizedBatchId);
+            releaseSignal.TrySetResult();
             return GenerationBatchDispatchEnqueueResult.QueueStopped;
         }
+    }
+
+    public Task WaitForBatchReleasedAsync(
+        string batchId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(batchId);
+        if (cancellationToken.IsCancellationRequested)
+        {
+            return Task.FromCanceled(cancellationToken);
+        }
+
+        Task releaseTask;
+        lock (_scheduledBatchLock)
+        {
+            if (!_batchReleaseSignals.TryGetValue(batchId.Trim(), out var releaseSignal))
+            {
+                return Task.CompletedTask;
+            }
+
+            releaseTask = releaseSignal.Task;
+        }
+
+        return cancellationToken.CanBeCanceled
+            ? releaseTask.WaitAsync(cancellationToken)
+            : releaseTask;
     }
 
     public void ReleaseBatch(string batchId)
@@ -190,10 +223,15 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
             return;
         }
 
+        TaskCompletionSource? releaseSignal;
         lock (_scheduledBatchLock)
         {
-            _scheduledBatchIds.Remove(batchId.Trim());
+            var normalizedBatchId = batchId.Trim();
+            _scheduledBatchIds.Remove(normalizedBatchId);
+            _batchReleaseSignals.Remove(normalizedBatchId, out releaseSignal);
         }
+
+        releaseSignal?.TrySetResult();
     }
 
     private async Task ProcessRequestsAsync()
@@ -254,6 +292,10 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
                 }
             }
 
+            var identityResolution = await ResolveClaimIdentitiesAsync(request, cancellationToken)
+                .ConfigureAwait(false);
+            request = request with { TaskIds = identityResolution.TaskIds };
+
             var chunks = request.TaskIds
                 .Chunk(MaximumTasksPerTurn)
                 .Select(chunk => (IReadOnlyList<string>)chunk)
@@ -275,6 +317,10 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
             {
                 var chunkTaskIds = chunks[chunkIndex];
                 var chunkRequest = request with { TaskIds = chunkTaskIds };
+                var chunkClaimIdentities = chunkTaskIds.ToDictionary(
+                    taskId => taskId,
+                    taskId => identityResolution.ClaimIdentities[taskId],
+                    StringComparer.Ordinal);
                 var chunkNumber = chunkIndex + 1;
                 var buildingProgress = BuildingInstructionProgress + chunkProgressSpan * chunkIndex;
                 var startingProgress = buildingProgress + chunkProgressSpan * 0.5d;
@@ -290,8 +336,11 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
                         ? $"正在构建 {chunkLabel} 的 Agent 指令。"
                         : $"{preflight.StatusText} 正在构建 {chunkLabel} 的 Agent 指令。");
                 var prompt = preflightPerformed
-                    ? GenerationAgentPromptBuilder.Build(chunkTaskIds, preflight)
-                    : GenerationAgentPromptBuilder.Build(chunkTaskIds);
+                    ? GenerationAgentPromptBuilder.Build(
+                        chunkTaskIds,
+                        preflight,
+                        chunkClaimIdentities)
+                    : GenerationAgentPromptBuilder.Build(chunkTaskIds, chunkClaimIdentities);
                 lastProgress = ReportProgress(
                     chunkRequest,
                     GenerationBatchDispatchStage.StartingAgentTurn,
@@ -312,6 +361,7 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
                     $"{chunkLabel} 已提交，等待这些任务通过 MCP 被认领。");
                 result = await AwaitTurnWithClaimHeartbeatAsync(
                         chunkRequest,
+                        chunkClaimIdentities,
                         turnTask,
                         turnCancellation,
                         cancellationToken)
@@ -395,6 +445,96 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
         DispatchCompleted?.Invoke(
             this,
             new GenerationBatchDispatchCompletedEventArgs(request, result, failureMessage));
+    }
+
+    private async Task<DispatchClaimIdentityResolution> ResolveClaimIdentitiesAsync(
+        GenerationBatchDispatchRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (_taskStore is null)
+        {
+            var fallbackIdentities = request.TaskIds.ToDictionary(
+                taskId => taskId,
+                GenerationManagedAgentIdentity.ForTask,
+                StringComparer.Ordinal);
+            return new DispatchClaimIdentityResolution(request.TaskIds, fallbackIdentities);
+        }
+
+        var taskIds = new List<string>(request.TaskIds.Count);
+        var claimIdentities = new Dictionary<string, string>(StringComparer.Ordinal);
+        var incompatibleClaims = new List<string>();
+        foreach (var taskId in request.TaskIds)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var task = await _taskStore.GetAsync(taskId, cancellationToken).ConfigureAwait(false)
+                ?? throw new InvalidDataException($"Agent 调度找不到任务：{taskId}");
+            if (!string.IsNullOrWhiteSpace(task.BatchId) &&
+                !string.Equals(task.BatchId, request.BatchId, StringComparison.Ordinal))
+            {
+                throw new InvalidDataException(
+                    $"任务 {task.Id} 属于批次 {task.BatchId}，不能由批次 {request.BatchId} 续派。");
+            }
+
+            if (!string.IsNullOrWhiteSpace(task.SupersededByTaskId) ||
+                task.Status is GenerationTaskStatus.Completed or GenerationTaskStatus.Failed)
+            {
+                continue;
+            }
+
+            if (task.Status == GenerationTaskStatus.Claimed &&
+                !GenerationManagedAgentIdentity.IsManagedClaimantForTask(
+                    task.Id,
+                    task.ClaimedBy))
+            {
+                incompatibleClaims.Add($"{task.Id} ({task.ClaimedBy ?? "unknown"})");
+                continue;
+            }
+
+            if (!GenerationManagedAgentIdentity.CanResume(task))
+            {
+                continue;
+            }
+
+            var claimIdentity = GenerationManagedAgentIdentity.ResolveForTask(task);
+            if (task.Status == GenerationTaskStatus.Claimed)
+            {
+                try
+                {
+                    task = await _taskStore.RenewClaimAsync(
+                            task.Id,
+                            claimIdentity,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                catch (InvalidOperationException)
+                {
+                    var latest = await _taskStore.GetAsync(task.Id, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (latest?.Status != GenerationTaskStatus.Pending)
+                    {
+                        throw;
+                    }
+
+                    task = latest;
+                    claimIdentity = GenerationManagedAgentIdentity.ForTask(task.Id);
+                }
+            }
+
+            taskIds.Add(task.Id);
+            claimIdentities.Add(task.Id, claimIdentity);
+        }
+
+        if (taskIds.Count == 0)
+        {
+            var ownershipDetail = incompatibleClaims.Count == 0
+                ? string.Empty
+                : $" 非当前受管所有者：{string.Join(", ", incompatibleClaims)}；不会抢占。";
+            throw new InvalidOperationException(
+                $"批次 {request.BatchId} 已没有可由当前 Codex Runtime 继续的 Pending/Claimed 任务。" +
+                ownershipDetail);
+        }
+
+        return new DispatchClaimIdentityResolution(taskIds, claimIdentities);
     }
 
     private async Task<IReadOnlyList<string>> ResolveRecommendedSourcePathsAsync(
@@ -534,6 +674,7 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
 
     private async Task<AgentTurnResult> AwaitTurnWithClaimHeartbeatAsync(
         GenerationBatchDispatchRequest request,
+        IReadOnlyDictionary<string, string> claimIdentities,
         Task<AgentTurnResult> turnTask,
         CancellationTokenSource turnCancellation,
         CancellationToken cancellationToken)
@@ -544,7 +685,10 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
         }
 
         using var heartbeatCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        var heartbeatTask = MaintainClaimLeasesAsync(request, heartbeatCancellation.Token);
+        var heartbeatTask = MaintainClaimLeasesAsync(
+            request,
+            claimIdentities,
+            heartbeatCancellation.Token);
         try
         {
             var completed = await Task.WhenAny(turnTask, heartbeatTask).ConfigureAwait(false);
@@ -602,6 +746,7 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
 
     private async Task MaintainClaimLeasesAsync(
         GenerationBatchDispatchRequest request,
+        IReadOnlyDictionary<string, string> claimIdentities,
         CancellationToken cancellationToken)
     {
         while (true)
@@ -617,9 +762,22 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
                     continue;
                 }
 
+                if (!claimIdentities.TryGetValue(task.Id, out var expectedAgentId))
+                {
+                    throw new InvalidOperationException(
+                        $"任务 {task.Id} 缺少本轮冻结的受管 Agent 身份，停止续租。");
+                }
+
+                if (!string.Equals(task.ClaimedBy, expectedAgentId, StringComparison.Ordinal))
+                {
+                    throw new InvalidOperationException(
+                        $"任务 {task.Id} 已由身份 {task.ClaimedBy} 抢先认领，" +
+                        $"与本轮冻结身份 {expectedAgentId} 不一致；不会替其它身份续租。");
+                }
+
                 try
                 {
-                    await _taskStore.RenewClaimAsync(task.Id, task.ClaimedBy, cancellationToken)
+                    await _taskStore.RenewClaimAsync(task.Id, expectedAgentId, cancellationToken)
                         .ConfigureAwait(false);
                 }
                 catch (InvalidOperationException exception)
@@ -712,6 +870,19 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
             return;
         }
 
+        TaskCompletionSource[] releaseSignals;
+        lock (_scheduledBatchLock)
+        {
+            _scheduledBatchIds.Clear();
+            releaseSignals = _batchReleaseSignals.Values.ToArray();
+            _batchReleaseSignals.Clear();
+        }
+
+        foreach (var releaseSignal in releaseSignals)
+        {
+            releaseSignal.TrySetResult();
+        }
+
         _requests.Writer.TryComplete();
         _shutdown.Cancel();
         try
@@ -727,4 +898,8 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
             _shutdown.Dispose();
         }
     }
+
+    private sealed record DispatchClaimIdentityResolution(
+        IReadOnlyList<string> TaskIds,
+        IReadOnlyDictionary<string, string> ClaimIdentities);
 }

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -28,6 +29,11 @@ internal static class AgentConnectionLifecycleSmokeTests
         RuntimeFailureKeepsHealthyMcpAndAllowsRetry(temporaryRoot);
         StandaloneMcpStartsAndStopsWithoutStartingRuntime(temporaryRoot);
         HealthyMcpIsReusedWhenRuntimeRetrySucceeds(temporaryRoot);
+        ReconnectSessionReplacesRuntimeAndReusesHealthyMcp(temporaryRoot);
+        ReconnectSessionRestartsUnavailableMcp(temporaryRoot);
+        ReconnectSessionRecyclesMcpStuckInStartingAfterHealthTimeout(temporaryRoot);
+        FaultedRunningTransportIsNotReused(temporaryRoot);
+        ReconnectSessionRejectsRunningTurn(temporaryRoot);
         RuntimeSessionReceivesFreshPathOverride(temporaryRoot);
         RuntimeEnvironmentSnapshotCoversImageApiAndProxyVariables();
         EnvironmentFingerprintIsStableAndDoesNotExposeSecrets();
@@ -185,6 +191,274 @@ internal static class AgentConnectionLifecycleSmokeTests
             "Runtime 重试成功后 MCP Server 应继续运行。");
         False(GetBooleanProperty(viewModel, "IsMcpServerStandalone"),
             "Runtime 就绪后 MCP Server 不应继续标记为独立运行。");
+    }
+
+    private static void ReconnectSessionReplacesRuntimeAndReusesHealthyMcp(string temporaryRoot)
+    {
+        const string resumeThreadId = "fixture-reconnect-thread";
+        var transports = new ConcurrentQueue<FakeAgentSessionTransport>();
+        var fixture = CreateFixture(
+            temporaryRoot,
+            "reconnect-runtime-preserves-mcp-and-thread",
+            _ =>
+            {
+                var transport = FakeAgentSessionTransport.Ready();
+                transports.Enqueue(transport);
+                return transport;
+            },
+            _ => FakeAgentSessionTransport.Failing("exec fallback should not be used"),
+            resumeThreadId: resumeThreadId);
+        using var viewModel = fixture.ViewModel;
+
+        viewModel.StartCommand.Execute(null);
+        PumpUntil(
+            () => viewModel.IsConnected && fixture.AppServerFactoryCallCount == 1,
+            CommandTimeout,
+            "重连 fixture 的初始 Agent 会话未进入 Ready。");
+        var initialEndpoint = fixture.Server.Endpoint;
+        Equal(1, CountMcpLaunches(fixture.ServerLogs),
+            "初始 Agent 会话只应启动一个 MCP Server");
+
+        var reconnectTask = viewModel.ReconnectSessionAsync();
+        PumpUntil(
+            () => reconnectTask.IsCompleted,
+            CommandTimeout,
+            "ReconnectSessionAsync 未在限定时间内完成。");
+        reconnectTask.GetAwaiter().GetResult();
+
+        Equal(2, fixture.AppServerFactoryCallCount,
+            "强制重连必须创建新的 App Server transport，而不是复用 Ready Runtime");
+        Equal(0, fixture.ExecFactoryCallCount,
+            "App Server 重连成功时不得进入 exec fallback");
+        Equal(1, CountMcpLaunches(fixture.ServerLogs),
+            "强制重连必须复用健康 MCP Server，不能重复启动子进程");
+        Equal(initialEndpoint, fixture.Server.Endpoint,
+            "复用健康 MCP 时 Endpoint 不得改变");
+        Equal(fixture.WorkingDirectory, viewModel.WorkingDirectory,
+            "重连后必须保留项目工作目录");
+        Equal(resumeThreadId, fixture.Runtime.ThreadId,
+            "重连后必须恢复原 Codex thread bookmark");
+        Equal(2, transports.Count,
+            "重连应保留可观察的旧、新两个 transport 实例");
+        Equal(1, transports.Last().ResumeThreadCallCount,
+            "新的 Runtime 必须显式恢复重连前的 thread bookmark");
+        True(viewModel.IsConnected,
+            "ReconnectSessionAsync 成功返回前必须验证 Agent 与 MCP 已恢复可执行状态");
+    }
+
+    private static void ReconnectSessionRestartsUnavailableMcp(string temporaryRoot)
+    {
+        var fixture = CreateFixture(
+            temporaryRoot,
+            "reconnect-restarts-unavailable-mcp",
+            _ => FakeAgentSessionTransport.Ready(),
+            _ => FakeAgentSessionTransport.Failing("exec fallback should not be used"));
+        using var viewModel = fixture.ViewModel;
+
+        viewModel.StartCommand.Execute(null);
+        PumpUntil(
+            () => viewModel.IsConnected,
+            CommandTimeout,
+            "MCP 恢复 fixture 的初始 Agent 会话未进入 Ready。");
+        var resumeThreadId = fixture.Runtime.ThreadId;
+        fixture.Server.StopAsync().GetAwaiter().GetResult();
+        PumpUntil(
+            () => !fixture.Server.IsProcessRunning && !viewModel.IsConnected,
+            CommandTimeout,
+            "fixture MCP Server 未停止。");
+
+        var reconnectTask = viewModel.ReconnectSessionAsync();
+        PumpUntil(
+            () => reconnectTask.IsCompleted,
+            CommandTimeout,
+            "MCP Server 不可用时 ReconnectSessionAsync 未完成。");
+        reconnectTask.GetAwaiter().GetResult();
+
+        Equal(2, CountMcpLaunches(fixture.ServerLogs),
+            "MCP Server 已停止时重连必须执行一次新的健康启动");
+        Equal(2, fixture.AppServerFactoryCallCount,
+            "MCP 恢复后必须重新创建 Runtime transport");
+        Equal(resumeThreadId, fixture.Runtime.ThreadId,
+            "MCP 与 Runtime 恢复后必须继续使用原 thread bookmark");
+        True(viewModel.IsConnected,
+            "MCP 恢复并重建 Runtime 后必须重新达到可执行状态");
+    }
+
+    private static void ReconnectSessionRecyclesMcpStuckInStartingAfterHealthTimeout(
+        string temporaryRoot)
+    {
+        const string resumeThreadId = "fixture-starting-reconnect-thread";
+        var fixture = CreateFixture(
+            temporaryRoot,
+            "reconnect-recycles-starting-mcp-after-timeout",
+            _ => FakeAgentSessionTransport.Ready(),
+            _ => FakeAgentSessionTransport.Failing("exec fallback should not be used"),
+            resumeThreadId: resumeThreadId,
+            mcpHealthReadyTimeout: TimeSpan.FromMilliseconds(250));
+        using var viewModel = fixture.ViewModel;
+
+        fixture.Server.StartAsync(viewModel.Port, "codex").GetAwaiter().GetResult();
+        PumpUntil(
+            () => IsMcpHealthReady(fixture.Server.State),
+            CommandTimeout,
+            "Starting 超时恢复 fixture 的初始 MCP Server 未进入健康状态。");
+        fixture.Server.StopAsync().GetAwaiter().GetResult();
+        PumpUntil(
+            () => !fixture.Server.IsProcessRunning,
+            CommandTimeout,
+            "Starting 超时恢复 fixture 未停止初始 MCP Server。");
+
+        var stalledProcess = StartStalledMcpPlaceholderProcess();
+        var stalledProcessId = stalledProcess.Id;
+        InjectStalledStartingMcpProcess(fixture.Server, stalledProcess, viewModel.Port);
+        True(fixture.Server.IsProcessRunning &&
+             fixture.Server.State == McpServerProcessState.Starting,
+            "回归 fixture 必须模拟进程存活但健康状态长期停在 Starting。");
+
+        try
+        {
+            var reconnectTask = viewModel.ReconnectSessionAsync();
+            PumpUntil(
+                () => reconnectTask.IsCompleted,
+                CommandTimeout,
+                "Starting MCP 健康检查超时后 ReconnectSessionAsync 未完成。");
+            reconnectTask.GetAwaiter().GetResult();
+
+            False(IsProcessAlive(stalledProcessId),
+                "Starting 健康检查超时后必须回收原占位进程。");
+            Equal(2, CountMcpLaunches(fixture.ServerLogs),
+                "Starting 超时后只应执行一次新的 MCP Server 健康启动");
+            Equal(1, fixture.AppServerFactoryCallCount,
+                "回收 Starting MCP 后必须重新创建 Runtime transport");
+            Equal(resumeThreadId, fixture.Runtime.ThreadId,
+                "回收 Starting MCP 后必须继续使用原 thread bookmark");
+            Equal(1, viewModel.Logs.Count(entry =>
+                    entry.Contains("健康检查超时", StringComparison.Ordinal) &&
+                    entry.Contains("回收", StringComparison.Ordinal)),
+                "Starting 超时恢复原因只应记录一次");
+            True(viewModel.IsConnected,
+                "Starting MCP 被回收并单次重启后必须恢复可执行状态");
+        }
+        finally
+        {
+            TryTerminateProcess(stalledProcessId);
+        }
+    }
+
+    private static void FaultedRunningTransportIsNotReused(string temporaryRoot)
+    {
+        FakeAgentSessionTransport? firstTransport = null;
+        var fixture = CreateFixture(
+            temporaryRoot,
+            "faulted-running-transport-is-replaced",
+            attempt =>
+            {
+                var transport = attempt == 1
+                    ? FakeAgentSessionTransport.Ready(processRemainsRunningWhenFaulted: true)
+                    : FakeAgentSessionTransport.Ready();
+                firstTransport ??= transport;
+                return transport;
+            },
+            _ => FakeAgentSessionTransport.Failing("exec fallback should not be used"));
+        using var viewModel = fixture.ViewModel;
+
+        viewModel.StartCommand.Execute(null);
+        PumpUntil(
+            () => viewModel.IsConnected && fixture.AppServerFactoryCallCount == 1,
+            CommandTimeout,
+            "Faulted transport fixture 的初始会话未进入 Ready。");
+        var resumeThreadId = fixture.Runtime.ThreadId;
+        True(!string.IsNullOrWhiteSpace(resumeThreadId),
+            "Faulted transport fixture 必须先建立可恢复 thread");
+
+        firstTransport!.SimulateFaultKeepingProcessAlive("fixture protocol stream faulted");
+        PumpUntil(
+            () => fixture.Runtime.State == AgentSessionTransportState.Faulted,
+            CommandTimeout,
+            "fixture transport 未进入进程仍存活的 Faulted 状态。");
+        True(firstTransport.IsRunning,
+            "该回归场景必须模拟进程仍存活但协议 transport 已 Faulted");
+
+        var ensureTask = fixture.Runtime.EnsureSessionAsync(
+            fixture.WorkingDirectory,
+            resumeThreadId,
+            fixture.Server);
+        PumpUntil(
+            () => ensureTask.IsCompleted,
+            CommandTimeout,
+            "Faulted transport 的 EnsureSessionAsync 未完成。");
+        ensureTask.GetAwaiter().GetResult();
+
+        Equal(2, fixture.AppServerFactoryCallCount,
+            "Faulted transport 即使进程仍存活也必须被替换");
+        Equal(AgentSessionTransportState.Ready, fixture.Runtime.State,
+            "替换 Faulted transport 后 Runtime 必须恢复 Ready");
+        Equal(resumeThreadId, fixture.Runtime.ThreadId,
+            "替换 Faulted transport 后必须恢复原 thread bookmark");
+    }
+
+    private static void ReconnectSessionRejectsRunningTurn(string temporaryRoot)
+    {
+        var turnEntered = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var fixture = CreateFixture(
+            temporaryRoot,
+            "reconnect-rejects-running-turn",
+            _ => FakeAgentSessionTransport.ReadyWithBlockingTurn(turnEntered),
+            _ => FakeAgentSessionTransport.Failing("exec fallback should not be used"));
+        using var viewModel = fixture.ViewModel;
+        using var turnCancellation = new CancellationTokenSource();
+
+        viewModel.StartCommand.Execute(null);
+        PumpUntil(
+            () => viewModel.IsConnected,
+            CommandTimeout,
+            "运行中 Turn fixture 的 Agent 会话未进入 Ready。");
+        var turnTask = viewModel.RunTurnAsync(
+            "执行运行中 Turn 重连拒绝测试。",
+            turnCancellation.Token);
+        PumpUntil(
+            () => turnEntered.Task.IsCompleted && viewModel.IsTurnRunning,
+            CommandTimeout,
+            "fixture Turn 未进入 RunningTurn。");
+
+        var reconnectTask = viewModel.ReconnectSessionAsync();
+        PumpUntil(
+            () => reconnectTask.IsCompleted,
+            CommandTimeout,
+            "运行中 Turn 的重连拒绝没有及时返回。");
+        Exception? reconnectFailure = null;
+        try
+        {
+            reconnectTask.GetAwaiter().GetResult();
+        }
+        catch (Exception exception)
+        {
+            reconnectFailure = exception;
+        }
+
+        True(reconnectFailure is InvalidOperationException &&
+             reconnectFailure.Message.Contains("Turn", StringComparison.Ordinal),
+            "运行中 Turn 的重连必须以准确 InvalidOperationException 拒绝");
+        Equal(1, fixture.AppServerFactoryCallCount,
+            "拒绝运行中 Turn 重连时不得替换 Runtime");
+        Equal(1, CountMcpLaunches(fixture.ServerLogs),
+            "拒绝运行中 Turn 重连时不得重启 MCP Server");
+        True(viewModel.IsTurnRunning,
+            "重连拒绝不得中断原本正在执行的 Turn");
+
+        turnCancellation.Cancel();
+        PumpUntil(
+            () => turnTask.IsCompleted,
+            CommandTimeout,
+            "清理 fixture Turn 时没有响应取消。");
+        try
+        {
+            turnTask.GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException)
+        {
+        }
     }
 
     private static void SlowRuntimeStartupCanBeDisposedWithoutUiDeadlock(string temporaryRoot)
@@ -527,7 +801,8 @@ internal static class AgentConnectionLifecycleSmokeTests
         Func<int, IAgentSessionTransport> execFactory,
         Func<string>? pathEnvironmentProvider = null,
         Func<IReadOnlyDictionary<string, string?>>? environmentVariablesProvider = null,
-        string? resumeThreadId = null)
+        string? resumeThreadId = null,
+        TimeSpan? mcpHealthReadyTimeout = null)
     {
         var root = Path.Combine(temporaryRoot, testName, Guid.NewGuid().ToString("N"));
         var paths = new WorkspacePaths(Path.Combine(root, "app-data"));
@@ -545,14 +820,135 @@ internal static class AgentConnectionLifecycleSmokeTests
             environmentVariablesProvider);
         fixture.Runtime = runtime;
         fixture.WorkingDirectory = workingDirectory;
-        fixture.ViewModel = new AgentConnectionViewModel(
-            server,
-            runtime,
-            selectedAgentKey: "codex",
-            port: GetAvailableLoopbackPort(),
-            workingDirectory: workingDirectory,
-            resumeThreadId: resumeThreadId);
+        var port = GetAvailableLoopbackPort();
+        fixture.ViewModel = mcpHealthReadyTimeout is { } timeout
+            ? new AgentConnectionViewModel(
+                server,
+                runtime,
+                selectedAgentKey: "codex",
+                port: port,
+                workingDirectory: workingDirectory,
+                resumeThreadId: resumeThreadId,
+                workbenchLogSink: null,
+                codexExecutablePath: null,
+                codexExecutablePicker: null,
+                mcpHealthReadyTimeout: timeout)
+            : new AgentConnectionViewModel(
+                server,
+                runtime,
+                selectedAgentKey: "codex",
+                port: port,
+                workingDirectory: workingDirectory,
+                resumeThreadId: resumeThreadId);
         return fixture;
+    }
+
+    private static Process StartStalledMcpPlaceholderProcess()
+    {
+        var commandProcessor = Environment.GetEnvironmentVariable("ComSpec");
+        if (string.IsNullOrWhiteSpace(commandProcessor))
+        {
+            commandProcessor = "cmd.exe";
+        }
+
+        var process = new Process
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = commandProcessor,
+                Arguments = "/d /c \"ping -t 127.0.0.1 > nul\"",
+                UseShellExecute = false,
+                CreateNoWindow = true
+            }
+        };
+        if (!process.Start())
+        {
+            process.Dispose();
+            throw new InvalidOperationException("无法启动 Starting MCP 占位进程。");
+        }
+
+        return process;
+    }
+
+    private static void InjectStalledStartingMcpProcess(
+        McpServerProcessService server,
+        Process process,
+        int port)
+    {
+        var stateLock = GetPrivateField<object>(server, "_stateLock");
+        lock (stateLock)
+        {
+            SetPrivateField(server, "_process", process);
+            SetPrivateField(server, "_runCancellation", new CancellationTokenSource());
+            SetPrivateField(server, "_port", port);
+            SetPrivateField(server, "_state", McpServerProcessState.Starting);
+            SetPrivateField(server, "_detail", "fixture MCP health remains Starting");
+        }
+
+        var raiseStateChanged = typeof(McpServerProcessService).GetMethod(
+            "RaiseStateChanged",
+            System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException(
+                "McpServerProcessService 缺少 RaiseStateChanged 测试缝隙。");
+        raiseStateChanged.Invoke(server, null);
+    }
+
+    private static T GetPrivateField<T>(object source, string fieldName)
+    {
+        var field = source.GetType().GetField(
+            fieldName,
+            System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException(
+                $"{source.GetType().Name} 缺少测试字段 {fieldName}。");
+        return field.GetValue(source) is T value
+            ? value
+            : throw new InvalidOperationException(
+                $"{source.GetType().Name}.{fieldName} 类型不符合测试预期。");
+    }
+
+    private static void SetPrivateField(object source, string fieldName, object? value)
+    {
+        var field = source.GetType().GetField(
+            fieldName,
+            System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.NonPublic)
+            ?? throw new InvalidOperationException(
+                $"{source.GetType().Name} 缺少测试字段 {fieldName}。");
+        field.SetValue(source, value);
+    }
+
+    private static bool IsProcessAlive(int processId)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            return !process.HasExited;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    private static void TryTerminateProcess(int processId)
+    {
+        try
+        {
+            using var process = Process.GetProcessById(processId);
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                process.WaitForExit(5000);
+            }
+        }
+        catch (ArgumentException)
+        {
+        }
+        catch (InvalidOperationException)
+        {
+        }
     }
 
     private static ICommand GetCommand(object source, string propertyName)
@@ -684,6 +1080,9 @@ internal static class AgentConnectionLifecycleSmokeTests
         private readonly TaskCompletionSource<bool>? _startEntered;
         private readonly Action<AgentSessionStartOptions>? _started;
         private readonly bool _deferredThreadStart;
+        private readonly bool _processRemainsRunningWhenFaulted;
+        private readonly bool _blockTurnUntilCancelled;
+        private readonly TaskCompletionSource<bool>? _turnEntered;
         private AgentSessionTransportState _state = AgentSessionTransportState.Stopped;
         private int _threadSequence;
 
@@ -692,23 +1091,40 @@ internal static class AgentConnectionLifecycleSmokeTests
             bool blockUntilCancelled = false,
             TaskCompletionSource<bool>? startEntered = null,
             Action<AgentSessionStartOptions>? started = null,
-            bool deferredThreadStart = false)
+            bool deferredThreadStart = false,
+            bool processRemainsRunningWhenFaulted = false,
+            bool blockTurnUntilCancelled = false,
+            TaskCompletionSource<bool>? turnEntered = null)
         {
             _startFailure = startFailure;
             _blockUntilCancelled = blockUntilCancelled;
             _startEntered = startEntered;
             _started = started;
             _deferredThreadStart = deferredThreadStart;
+            _processRemainsRunningWhenFaulted = processRemainsRunningWhenFaulted;
+            _blockTurnUntilCancelled = blockTurnUntilCancelled;
+            _turnEntered = turnEntered;
         }
 
         public static FakeAgentSessionTransport Failing(string message) => new(message);
 
         public static FakeAgentSessionTransport Ready(
-            Action<AgentSessionStartOptions>? started = null) =>
-            new(null, started: started);
+            Action<AgentSessionStartOptions>? started = null,
+            bool processRemainsRunningWhenFaulted = false) =>
+            new(
+                null,
+                started: started,
+                processRemainsRunningWhenFaulted: processRemainsRunningWhenFaulted);
 
         public static FakeAgentSessionTransport ReadyWithDeferredThreadStart() =>
             new(null, deferredThreadStart: true);
+
+        public static FakeAgentSessionTransport ReadyWithBlockingTurn(
+            TaskCompletionSource<bool> turnEntered) =>
+            new(
+                null,
+                blockTurnUntilCancelled: true,
+                turnEntered: turnEntered);
 
         public static FakeAgentSessionTransport BlockingUntilCancelled(
             TaskCompletionSource<bool> startEntered) =>
@@ -730,7 +1146,9 @@ internal static class AgentConnectionLifecycleSmokeTests
         public bool IsRunning => _state is
             AgentSessionTransportState.Starting or
             AgentSessionTransportState.Ready or
-            AgentSessionTransportState.RunningTurn;
+            AgentSessionTransportState.RunningTurn ||
+            (_state == AgentSessionTransportState.Faulted &&
+             _processRemainsRunningWhenFaulted);
 
         public string? RuntimeVersion => _startFailure is null ? "fixture-1.0" : null;
 
@@ -858,7 +1276,7 @@ internal static class AgentConnectionLifecycleSmokeTests
             return Task.FromResult(new AgentThreadResult(CurrentThreadId));
         }
 
-        public Task<AgentTurnResult> StartTurnAsync(
+        public async Task<AgentTurnResult> StartTurnAsync(
             string prompt,
             CancellationToken cancellationToken = default)
         {
@@ -868,16 +1286,42 @@ internal static class AgentConnectionLifecycleSmokeTests
                 CurrentThreadId = "fixture-deferred-thread";
             }
 
-            return Task.FromResult(new AgentTurnResult(
+            if (_blockTurnUntilCancelled)
+            {
+                Transition(AgentSessionTransportState.RunningTurn, "fixture turn running");
+                _turnEntered?.TrySetResult(true);
+                try
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken)
+                        .ConfigureAwait(false);
+                }
+                finally
+                {
+                    Transition(AgentSessionTransportState.Ready, "fixture turn canceled");
+                }
+            }
+
+            return new AgentTurnResult(
                 CurrentThreadId,
                 "fixture-turn",
                 "completed",
                 null,
-                (JsonElement?)null));
+                (JsonElement?)null);
         }
 
         public Task InterruptTurnAsync(CancellationToken cancellationToken = default) =>
             Task.CompletedTask;
+
+        public void SimulateFaultKeepingProcessAlive(string detail)
+        {
+            if (!_processRemainsRunningWhenFaulted)
+            {
+                throw new InvalidOperationException(
+                    "该 fixture transport 未配置 Faulted 后保持进程存活。");
+            }
+
+            Transition(AgentSessionTransportState.Faulted, detail);
+        }
 
         public async ValueTask DisposeAsync()
         {

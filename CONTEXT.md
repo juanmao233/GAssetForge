@@ -43,6 +43,10 @@ perspective, geometry, style, size, and delivery constraints.
 - Agent output is never final merely because a Turn completed.
 - New generation tasks contain exactly one output; table quantity expands into multiple tasks.
 - The task store and final paths remain authoritative across Agent/MCP disconnects.
+- Explicit generation reconnect must reuse the current batch's original resumable Pending or
+  verifiably GAssetForge-managed Claimed task IDs, claimant identity, Run, and frozen delivery paths;
+  it may renew the existing lease but must never create a replacement task, impersonate another Codex
+  session, or steal/renew another Agent's claim merely because the transport disconnected.
 - The harness performs deterministic work; the image model performs only the creative raster step.
 - A task cannot escape its frozen project `Assets` root or be completed by a different claimant.
 - `90°` control angle plus `0°` rotation means an axis-aligned square, not a 45° diamond.

@@ -207,6 +207,7 @@ internal static class LeaseRegressionTests
         {
             var store = new JsonGenerationTaskStore(testRoot, time, lease);
             var activeTask = await store.CreateAsync(CreateRequest("活动 Turn 自动续租"));
+            var activeAgentId = GenerationManagedAgentIdentity.ForTask(activeTask.Id);
             var heartbeatGate = new ManualHeartbeatGate();
             var turnClaimed = new TaskCompletionSource<GenerationTask>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
@@ -218,10 +219,10 @@ internal static class LeaseRegressionTests
             await using (var coordinator = new GenerationBatchDispatchCoordinator(
                              async (_, cancellationToken) =>
                              {
-                                 var claimed = await store.ClaimAsync(
-                                     activeTask.Id,
-                                     "codex:active-turn",
-                                     cancellationToken);
+                                  var claimed = await store.ClaimAsync(
+                                      activeTask.Id,
+                                      activeAgentId,
+                                      cancellationToken);
                                  turnClaimed.TrySetResult(claimed);
                                  await finishTurn.Task.WaitAsync(cancellationToken);
                                  return new AgentTurnResult(
@@ -249,11 +250,11 @@ internal static class LeaseRegressionTests
 
                 Equal(GenerationTaskStatus.Claimed, renewed.Status,
                     "活动 Turn 跨过首次租约边界后任务必须仍为 Claimed");
-                Equal("codex:active-turn", renewed.ClaimedBy,
+                Equal(activeAgentId, renewed.ClaimedBy,
                     "调度续租不得改变任务所有者");
                 var completed = await store.CompleteAsync(
                     activeTask.Id,
-                    "codex:active-turn",
+                    activeAgentId,
                     ["Generated/active-turn-completed.png"]);
                 Equal(GenerationTaskStatus.Completed, completed.Status,
                     "自动续租后原 Agent 必须能正常完成任务");
@@ -264,16 +265,17 @@ internal static class LeaseRegressionTests
             }
 
             var abandonedTask = await store.CreateAsync(CreateRequest("Turn 结束后停止续租"));
+            var abandonedAgentId = GenerationManagedAgentIdentity.ForTask(abandonedTask.Id);
             var abandonedDispatchCompleted = new TaskCompletionSource<GenerationBatchDispatchCompletedEventArgs>(
                 TaskCreationOptions.RunContinuationsAsynchronously);
             var noHeartbeatGate = new ManualHeartbeatGate();
             await using (var coordinator = new GenerationBatchDispatchCoordinator(
                              async (_, cancellationToken) =>
                              {
-                                 await store.ClaimAsync(
-                                     abandonedTask.Id,
-                                     "codex:ended-turn",
-                                     cancellationToken);
+                                  await store.ClaimAsync(
+                                      abandonedTask.Id,
+                                      abandonedAgentId,
+                                      cancellationToken);
                                  return new AgentTurnResult(
                                      ThreadId: "thread-ended",
                                      TurnId: "turn-ended",
@@ -295,8 +297,63 @@ internal static class LeaseRegressionTests
             time.Advance(TimeSpan.FromMinutes(11));
             var recovered = await store.GetAsync(abandonedTask.Id)
                 ?? throw new InvalidOperationException("Turn 结束后停止续租任务丢失。");
-            Equal(GenerationTaskStatus.Pending, recovered.Status,
-                "Turn 结束后调度器必须停止心跳，使遗留 Claimed 任务仍能按原租约回收");
+                Equal(GenerationTaskStatus.Pending, recovered.Status,
+                    "Turn 结束后调度器必须停止心跳，使遗留 Claimed 任务仍能按原租约回收");
+
+            var contestedTask = await store.CreateAsync(CreateRequest("抢先认领不得被续租"));
+            var contestedHeartbeatGate = new ManualHeartbeatGate();
+            var contestedClaimed = new TaskCompletionSource<GenerationTask>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var contestedDispatchCompleted =
+                new TaskCompletionSource<GenerationBatchDispatchCompletedEventArgs>(
+                    TaskCreationOptions.RunContinuationsAsynchronously);
+            const string unexpectedAgentId = "codex:external-race-owner";
+            await using (var coordinator = new GenerationBatchDispatchCoordinator(
+                             async (_, cancellationToken) =>
+                             {
+                                 var claimed = await store.ClaimAsync(
+                                     contestedTask.Id,
+                                     unexpectedAgentId,
+                                     cancellationToken);
+                                 contestedClaimed.TrySetResult(claimed);
+                                 await Task.Delay(Timeout.InfiniteTimeSpan, cancellationToken);
+                                 return new AgentTurnResult(
+                                     ThreadId: "must-be-canceled",
+                                     TurnId: "must-be-canceled",
+                                     Status: "completed",
+                                     ErrorMessage: null);
+                             },
+                             store,
+                             claimHeartbeatInterval: TimeSpan.FromMinutes(2),
+                             heartbeatDelay: contestedHeartbeatGate.WaitAsync))
+            {
+                coordinator.DispatchCompleted += (_, eventArgs) =>
+                    contestedDispatchCompleted.TrySetResult(eventArgs);
+                Equal(
+                    GenerationBatchDispatchEnqueueResult.Enqueued,
+                    coordinator.TryEnqueue(
+                        "batch-contested-heartbeat",
+                        [contestedTask.Id],
+                        isRetry: false),
+                    "所有权竞态测试批次必须进入调度队列");
+                var claimedByUnexpectedAgent = await contestedClaimed.Task
+                    .WaitAsync(TimeSpan.FromSeconds(3));
+                contestedHeartbeatGate.Pulse();
+                var rejected = await contestedDispatchCompleted.Task
+                    .WaitAsync(TimeSpan.FromSeconds(3));
+                Equal(false, rejected.IsSuccess,
+                    "本轮冻结身份之外的抢先认领必须中断 Turn");
+                Equal(true, rejected.FailureMessage?.Contains(
+                        "不会替其它身份续租",
+                        StringComparison.Ordinal) == true,
+                    "所有权竞态应报告不会替其它身份续租");
+                var afterRejectedHeartbeat = await store.GetAsync(contestedTask.Id)
+                    ?? throw new InvalidOperationException("所有权竞态任务丢失。");
+                Equal(claimedByUnexpectedAgent.Revision, afterRejectedHeartbeat.Revision,
+                    "调度器不得替抢先认领者推进租约 revision");
+                Equal(unexpectedAgentId, afterRejectedHeartbeat.ClaimedBy,
+                    "拒绝续租不得改写抢先认领者");
+            }
         }
         finally
         {

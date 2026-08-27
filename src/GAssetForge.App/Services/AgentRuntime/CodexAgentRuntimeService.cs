@@ -393,7 +393,11 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
         string workingDirectory,
         Uri endpoint,
         string environmentFingerprint) =>
-        _transport is { IsRunning: true } &&
+        _transport is
+            {
+                IsRunning: true,
+                State: AgentSessionTransportState.Ready or AgentSessionTransportState.RunningTurn
+            } &&
         string.Equals(_sessionWorkingDirectory, workingDirectory, StringComparison.OrdinalIgnoreCase) &&
         Equals(_sessionMcpEndpoint, endpoint) &&
         string.Equals(

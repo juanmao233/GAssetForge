@@ -69,6 +69,7 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
     private readonly IWorkbenchLogRedactionRegistry? _workbenchRedactionRegistry;
     private readonly AgentActivityParser _activityParser = new();
     private readonly Dispatcher _dispatcher;
+    private readonly TimeSpan _mcpHealthReadyTimeout;
     private readonly SemaphoreSlim _lifecycleGate = new(1, 1);
     private readonly SemaphoreSlim _turnGate = new(1, 1);
     private readonly object _disposeLock = new();
@@ -134,12 +135,45 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
         IWorkbenchLogSink? workbenchLogSink = null,
         string? codexExecutablePath = null,
         ICodexExecutablePicker? codexExecutablePicker = null)
+        : this(
+            serverService,
+            runtimeService,
+            selectedAgentKey,
+            port,
+            workingDirectory,
+            resumeThreadId,
+            workbenchLogSink,
+            codexExecutablePath,
+            codexExecutablePicker,
+            McpHealthReadyTimeout)
     {
+    }
+
+    internal AgentConnectionViewModel(
+        McpServerProcessService serverService,
+        CodexAgentRuntimeService runtimeService,
+        string? selectedAgentKey,
+        int port,
+        string? workingDirectory,
+        string? resumeThreadId,
+        IWorkbenchLogSink? workbenchLogSink,
+        string? codexExecutablePath,
+        ICodexExecutablePicker? codexExecutablePicker,
+        TimeSpan mcpHealthReadyTimeout)
+    {
+        if (mcpHealthReadyTimeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(mcpHealthReadyTimeout),
+                "MCP 健康检查超时时间必须大于零。");
+        }
+
         _serverService = serverService ?? throw new ArgumentNullException(nameof(serverService));
         _runtimeService = runtimeService ?? throw new ArgumentNullException(nameof(runtimeService));
         _codexExecutablePicker = codexExecutablePicker ?? new DesktopCodexExecutablePicker();
         _workbenchLogSink = workbenchLogSink;
         _workbenchRedactionRegistry = workbenchLogSink as IWorkbenchLogRedactionRegistry;
+        _mcpHealthReadyTimeout = mcpHealthReadyTimeout;
         _workbenchRedactionRegistry?.RegisterSensitiveValue(
             _serverService.TokenEnvironmentVariableValue);
         _dispatcher = Dispatcher.CurrentDispatcher;
@@ -788,6 +822,134 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
         }
     }
 
+    public async Task ReconnectSessionAsync(CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        await _lifecycleGate.WaitAsync(cancellationToken).ConfigureAwait(true);
+        var turnGateEntered = false;
+        var reconnectStarted = false;
+        try
+        {
+            if (!_turnGate.Wait(0))
+            {
+                throw new InvalidOperationException(
+                    "当前 Agent Turn 或批次线程准备仍在执行，不能同时重新连接会话。");
+            }
+
+            turnGateEntered = true;
+            if (_runtimeService.IsTurnRunning)
+            {
+                throw new InvalidOperationException(
+                    "当前 Agent Turn 正在执行，请等待 Turn 结束或先中断后再重新连接会话。");
+            }
+
+            if (!SelectedAgent.IsRuntimeAvailable)
+            {
+                throw new NotSupportedException(
+                    $"{SelectedAgent.DisplayName} Runtime 尚未适配，不能重新连接会话。");
+            }
+
+            if (!IsPortValid)
+            {
+                throw new InvalidOperationException("MCP Server 端口无效，不能重新连接 Agent 会话。");
+            }
+
+            if (!Directory.Exists(WorkingDirectory))
+            {
+                throw new DirectoryNotFoundException($"Agent 工作目录不存在：{WorkingDirectory}");
+            }
+
+            var resumeThreadId = NormalizeThreadId(_runtimeService.ThreadId) ?? _resumeThreadId;
+            _resumeThreadId = resumeThreadId;
+            _faultMessage = null;
+            _isStarting = true;
+            reconnectStarted = true;
+            _lastTurnStatus = "正在重新连接 Agent 会话";
+            RefreshState();
+            AddLog(
+                DateTimeOffset.Now,
+                "正在强制替换 Codex Runtime；健康的 MCP Server 将保持运行。",
+                false);
+
+            try
+            {
+                await _runtimeService.StopAsync(cancellationToken).ConfigureAwait(true);
+                _activeWorkingDirectory = null;
+                await EnsureReconnectMcpServerHealthyAsync(cancellationToken).ConfigureAwait(true);
+                await _runtimeService.EnsureSessionAsync(
+                        WorkingDirectory,
+                        resumeThreadId,
+                        _serverService,
+                        cancellationToken)
+                    .ConfigureAwait(true);
+
+                _activeWorkingDirectory = WorkingDirectory;
+                _resumeThreadId = NormalizeThreadId(_runtimeService.ThreadId) ?? resumeThreadId;
+                CaptureRuntimeSession();
+                if (!IsConnected)
+                {
+                    throw new InvalidOperationException(
+                        "Agent Runtime 已重新启动，但认证或 MCP 工具尚未达到可执行状态。" +
+                        $" 当前状态：{BuildOverallStatus().Text}");
+                }
+
+                _faultMessage = null;
+                _lastTurnStatus = "Agent 会话已重新连接，可继续原持久化任务";
+                AddLog(
+                    DateTimeOffset.Now,
+                    "Codex Runtime 已重新连接；工作目录、线程书签与健康 MCP Server 均已保留。",
+                    false);
+            }
+            catch (OperationCanceledException)
+            {
+                _activeWorkingDirectory = null;
+                AddLog(DateTimeOffset.Now, "Agent 会话重新连接已取消。", false);
+                throw;
+            }
+            catch (Exception exception)
+            {
+                var detail = Sanitize(exception.Message);
+                var mcpStateDetail = _serverService.IsProcessRunning &&
+                                     IsMcpHealthReady(_serverService.State)
+                    ? "MCP Server 已保持健康运行。"
+                    : "MCP Server 当前也未达到健康状态，请同时检查端口与服务日志。";
+                _faultMessage =
+                    $"Agent 会话重新连接失败；{mcpStateDetail}{Environment.NewLine}{detail}";
+                CodexRuntimeDiagnosticsText = detail;
+                AddLog(DateTimeOffset.Now, _faultMessage, true);
+                try
+                {
+                    await _runtimeService.StopAsync(CancellationToken.None).ConfigureAwait(true);
+                }
+                catch (Exception cleanupException)
+                {
+                    AddLog(
+                        DateTimeOffset.Now,
+                        $"清理失败的 Agent Runtime 时发生错误：{Sanitize(cleanupException.Message)}",
+                        true);
+                }
+
+                _activeWorkingDirectory = null;
+                throw new InvalidOperationException(_faultMessage, exception);
+            }
+        }
+        finally
+        {
+            if (reconnectStarted)
+            {
+                _isStarting = false;
+                RefreshState();
+            }
+
+            if (turnGateEntered)
+            {
+                _turnGate.Release();
+            }
+
+            _lifecycleGate.Release();
+        }
+    }
+
     public async Task<AgentThreadResult> StartFreshGenerationThreadAsync(
         CancellationToken cancellationToken = default)
     {
@@ -1020,7 +1182,10 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
             try
             {
                 await _serverService.StartAsync(Port, SelectedAgent.Key, cancellationToken).ConfigureAwait(true);
-                await WaitForMcpHealthReadyAsync(cancellationToken).ConfigureAwait(true);
+                await WaitForMcpHealthReadyAsync(
+                        _mcpHealthReadyTimeout,
+                        cancellationToken)
+                    .ConfigureAwait(true);
                 AddLog(DateTimeOffset.Now, "MCP Server 已就绪，可继续启动 Agent Runtime 或独立诊断。", false);
             }
             catch (Exception exception) when (exception is not OperationCanceledException)
@@ -1259,8 +1424,11 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
         }
     }
 
-    private async Task EnsureMcpServerHealthyAsync(CancellationToken cancellationToken)
+    private async Task EnsureMcpServerHealthyAsync(
+        CancellationToken cancellationToken,
+        TimeSpan? healthReadyTimeout = null)
     {
+        var effectiveHealthReadyTimeout = healthReadyTimeout ?? _mcpHealthReadyTimeout;
         if (_serverService.IsProcessRunning)
         {
             if (_serverService.Endpoint?.Port != Port)
@@ -1270,7 +1438,10 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
                     "请先停止 MCP Server 后再修改端口。");
             }
 
-            await WaitForMcpHealthReadyAsync(cancellationToken).ConfigureAwait(true);
+            await WaitForMcpHealthReadyAsync(
+                    effectiveHealthReadyTimeout,
+                    cancellationToken)
+                .ConfigureAwait(true);
             AddLog(DateTimeOffset.Now, "复用已就绪的 MCP Server，继续启动 Codex Runtime。", false);
             return;
         }
@@ -1279,10 +1450,65 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
             Port,
             SelectedAgent.Key,
             cancellationToken).ConfigureAwait(true);
-        await WaitForMcpHealthReadyAsync(cancellationToken).ConfigureAwait(true);
+        await WaitForMcpHealthReadyAsync(
+                effectiveHealthReadyTimeout,
+                cancellationToken)
+            .ConfigureAwait(true);
     }
 
-    private async Task WaitForMcpHealthReadyAsync(CancellationToken cancellationToken)
+    private async Task EnsureReconnectMcpServerHealthyAsync(CancellationToken cancellationToken)
+    {
+        if (_serverService.IsProcessRunning)
+        {
+            var endpointUnavailable = _serverService.Endpoint is null;
+            var endpointPortMismatch = _serverService.Endpoint is { } endpoint &&
+                                       endpoint.Port != Port;
+            var stateRequiresRestart = _serverService.State is
+                McpServerProcessState.Faulted or
+                McpServerProcessState.Stopping or
+                McpServerProcessState.Stopped;
+            if (endpointUnavailable || endpointPortMismatch || stateRequiresRestart)
+            {
+                var reason = endpointUnavailable
+                    ? "MCP Server 进程存在但 Endpoint 尚不可用"
+                    : endpointPortMismatch
+                    ? $"MCP Server 当前端口 {_serverService.Endpoint?.Port} 与设置端口 {Port} 不一致"
+                    : $"MCP Server 当前状态为 {_serverService.State}";
+                AddLog(
+                    DateTimeOffset.Now,
+                    $"{reason}，重新连接将先回收旧服务再执行健康启动。",
+                    false);
+                await _serverService.StopAsync(cancellationToken).ConfigureAwait(true);
+                _lastMcpToolStatus = "尚未初始化";
+            }
+        }
+
+        try
+        {
+            await EnsureMcpServerHealthyAsync(cancellationToken).ConfigureAwait(true);
+        }
+        catch (TimeoutException exception) when (_serverService.IsProcessRunning)
+        {
+            AddLog(
+                DateTimeOffset.Now,
+                $"{exception.Message} MCP Server 进程仍在运行且状态为 {_serverService.State}，" +
+                "重新连接将回收旧服务并仅重启一次。",
+                false);
+            await _serverService.StopAsync(cancellationToken).ConfigureAwait(true);
+            _lastMcpToolStatus = "尚未初始化";
+
+            // Deliberately do not loop: a second startup/health failure must remain visible
+            // instead of turning one broken endpoint into an unbounded restart cycle.
+            await EnsureMcpServerHealthyAsync(
+                    cancellationToken,
+                    McpHealthReadyTimeout)
+                .ConfigureAwait(true);
+        }
+    }
+
+    private async Task WaitForMcpHealthReadyAsync(
+        TimeSpan healthReadyTimeout,
+        CancellationToken cancellationToken)
     {
         if (IsMcpHealthReady(_serverService.State))
         {
@@ -1317,7 +1543,7 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
             }
 
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-            timeout.CancelAfter(McpHealthReadyTimeout);
+            timeout.CancelAfter(healthReadyTimeout);
             try
             {
                 await completion.Task.WaitAsync(timeout.Token).ConfigureAwait(true);
@@ -1325,7 +1551,7 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
             catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
                 throw new TimeoutException(
-                    $"等待 MCP Server 健康检查超时（{McpHealthReadyTimeout.TotalSeconds:0} 秒）。");
+                    $"等待 MCP Server 健康检查超时（{healthReadyTimeout.TotalSeconds:0.###} 秒）。");
             }
         }
         finally
