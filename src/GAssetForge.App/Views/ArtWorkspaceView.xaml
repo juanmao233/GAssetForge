@@ -31,11 +31,28 @@
 
         <Style x:Key="ArtWorkspaceImageCardStyle" TargetType="{x:Type Border}">
             <Setter Property="Background" Value="{DynamicResource App.SurfaceRaisedBrush}" />
-            <Setter Property="BorderBrush" Value="{DynamicResource App.BorderBrush}" />
-            <Setter Property="BorderThickness" Value="1" />
             <Setter Property="CornerRadius" Value="4" />
             <Setter Property="SnapsToDevicePixels" Value="True" />
             <Setter Property="Cursor" Value="SizeAll" />
+            <Style.Triggers>
+                <DataTrigger Binding="{Binding IsLocked}" Value="True">
+                    <Setter Property="Cursor" Value="Arrow" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding DataContext.IsImageRegionSelectToolActive, RelativeSource={RelativeSource AncestorType={x:Type UserControl}}}"
+                             Value="True">
+                    <Setter Property="Cursor" Value="Cross" />
+                </DataTrigger>
+                <DataTrigger Binding="{Binding IsMissing}" Value="True">
+                    <Setter Property="Cursor" Value="No" />
+                </DataTrigger>
+            </Style.Triggers>
+        </Style>
+
+        <Style x:Key="ArtWorkspaceImageSelectionBorderStyle" TargetType="{x:Type Border}">
+            <Setter Property="BorderBrush" Value="{DynamicResource App.BorderBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="4" />
+            <Setter Property="IsHitTestVisible" Value="False" />
             <Style.Triggers>
                 <DataTrigger Binding="{Binding IsSelected}" Value="True">
                     <Setter Property="BorderBrush" Value="{DynamicResource App.AccentBrush}" />
@@ -43,9 +60,6 @@
                 </DataTrigger>
                 <DataTrigger Binding="{Binding IsMissing}" Value="True">
                     <Setter Property="BorderBrush" Value="{DynamicResource App.DangerBrush}" />
-                </DataTrigger>
-                <DataTrigger Binding="{Binding IsLocked}" Value="True">
-                    <Setter Property="Cursor" Value="Arrow" />
                 </DataTrigger>
             </Style.Triggers>
         </Style>
@@ -140,6 +154,16 @@
               PreviewMouseUp="ArtWorkspaceViewport_OnPreviewMouseUp"
               PreviewMouseWheel="ArtWorkspaceViewport_OnPreviewMouseWheel"
               LostMouseCapture="ArtWorkspaceViewport_OnLostMouseCapture">
+            <Grid.Style>
+                <Style TargetType="{x:Type Grid}">
+                    <Setter Property="Cursor" Value="Arrow" />
+                    <Style.Triggers>
+                        <DataTrigger Binding="{Binding IsImageRegionSelectToolActive}" Value="True">
+                            <Setter Property="Cursor" Value="Cross" />
+                        </DataTrigger>
+                    </Style.Triggers>
+                </Style>
+            </Grid.Style>
             <Canvas x:Name="ArtWorkspaceWorld"
                     Width="{Binding CanvasWidth}"
                     Height="{Binding CanvasHeight}">
@@ -184,11 +208,12 @@
                                     Height="{Binding Height}"
                                     Opacity="{Binding Opacity}"
                                     PreviewMouseLeftButtonDown="ImageCard_OnPreviewMouseLeftButtonDown"
+                                    RenderTransformOrigin="0.5,0.5"
                                     Style="{StaticResource ArtWorkspaceImageCardStyle}">
-                                <Grid RenderTransformOrigin="0.5,0.5">
-                                    <Grid.RenderTransform>
-                                        <RotateTransform Angle="{Binding RotationDegrees}" />
-                                    </Grid.RenderTransform>
+                                <Border.RenderTransform>
+                                    <RotateTransform Angle="{Binding RotationDegrees}" />
+                                </Border.RenderTransform>
+                                <Grid ClipToBounds="False">
                                     <Image Source="{Binding AbsolutePath, Converter={StaticResource FilePathToImageSourceConverter}, ConverterParameter=640}"
                                            Stretch="Fill"
                                            SnapsToDevicePixels="True" />
@@ -221,6 +246,35 @@
                                                        TextAlignment="Center" />
                                         </StackPanel>
                                     </Border>
+
+                                    <Canvas ClipToBounds="True"
+                                            IsHitTestVisible="False">
+                                        <Border x:Name="ArtWorkspaceImageRegionMarquee"
+                                                Canvas.Left="{Binding SelectedRegionX}"
+                                                Canvas.Top="{Binding SelectedRegionY}"
+                                                Width="{Binding SelectedRegionWidth}"
+                                                Height="{Binding SelectedRegionHeight}"
+                                                Background="#243B82F6"
+                                                BorderBrush="White"
+                                                BorderThickness="2"
+                                                CornerRadius="2">
+                                            <Border.Style>
+                                                <Style TargetType="{x:Type Border}">
+                                                    <Setter Property="Visibility" Value="Collapsed" />
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding HasSelectedRegion}" Value="True">
+                                                            <Setter Property="Visibility" Value="Visible" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Border.Style>
+                                            <Rectangle Margin="2"
+                                                       Stroke="{DynamicResource App.AccentBrush}"
+                                                       StrokeDashArray="5,3"
+                                                       StrokeThickness="2" />
+                                        </Border>
+                                    </Canvas>
+                                    <Border Style="{StaticResource ArtWorkspaceImageSelectionBorderStyle}" />
                                 </Grid>
                             </Border>
                         </DataTemplate>
@@ -289,8 +343,20 @@
                     CornerRadius="5"
                     IsHitTestVisible="False">
                 <TextBlock Foreground="#DFFFFFFF"
-                           FontSize="10"
-                           Text="将 PNG/JPG/WebP 等图片拖入画布；单击选择、左拖移动、Delete 移除引用。" />
+                           FontSize="10">
+                    <TextBlock.Style>
+                        <Style TargetType="{x:Type TextBlock}">
+                            <Setter Property="Text"
+                                    Value="将 PNG/JPG/WebP 等图片拖入画布；单击选择、左拖移动、Delete 移除引用。" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsImageRegionSelectToolActive}" Value="True">
+                                    <Setter Property="Text"
+                                            Value="图像框选已启用：在当前图片上按住左键拖动；Esc 或工具栏“取消框选”可清除。" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </TextBlock.Style>
+                </TextBlock>
             </Border>
         </Grid>
 

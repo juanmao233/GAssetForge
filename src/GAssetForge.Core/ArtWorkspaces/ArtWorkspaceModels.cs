@@ -34,6 +34,13 @@ public sealed class ArtWorkspaceDocument
     public List<ArtWorkspaceConversationMessage> Conversation { get; set; } = [];
 
     public string? SelectedImageId { get; set; }
+
+    /// <summary>
+    /// Optional local-space region on the currently selected image. Coordinates are normalized
+    /// against the unrotated image bounds so the same source pixels remain selected when the
+    /// canvas object is moved, resized, or rotated.
+    /// </summary>
+    public ArtWorkspaceImageRegionSelection? SelectedImageRegion { get; set; }
 }
 
 public sealed class ArtWorkspaceViewport
@@ -112,6 +119,19 @@ public sealed class ArtWorkspaceImageItem
     public bool IsVisible { get; set; } = true;
 }
 
+public sealed class ArtWorkspaceImageRegionSelection
+{
+    public string ImageId { get; set; } = string.Empty;
+
+    public double X { get; set; }
+
+    public double Y { get; set; }
+
+    public double Width { get; set; } = 1d;
+
+    public double Height { get; set; } = 1d;
+}
+
 public sealed class ArtWorkspaceConversationMessage
 {
     public string Id { get; set; } = Guid.NewGuid().ToString("N");
@@ -123,6 +143,14 @@ public sealed class ArtWorkspaceConversationMessage
     public DateTimeOffset CreatedAtUtc { get; set; }
 
     public string State { get; set; } = "captured";
+
+    public string? ReferenceImageId { get; set; }
+
+    /// <summary>
+    /// User-facing, coordinate-free summary of the image/region frozen with this message.
+    /// Historical conversation remains readable even if the canvas object is later removed.
+    /// </summary>
+    public string? ReferenceSummary { get; set; }
 }
 
 public static class ArtWorkspaceDocumentFactory

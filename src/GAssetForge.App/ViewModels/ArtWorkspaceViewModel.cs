@@ -1,6 +1,7 @@
 using GAssetForge.App.Infrastructure;
 using GAssetForge.App.Services;
 using GAssetForge.Core.ArtWorkspaces;
+using GAssetForge.Core.Generation;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Text;
@@ -24,6 +25,12 @@ public readonly record struct ArtWorkspaceWorldBounds(
     double Width,
     double Height);
 
+public enum ArtWorkspaceToolMode
+{
+    SelectMove,
+    ImageRegionSelect
+}
+
 public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
 {
     public const double MinimumZoom = 0.1d;
@@ -39,10 +46,12 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
     private readonly IArtWorkspaceImagePicker _imagePicker;
     private readonly WorkbenchConsoleService _console;
     private readonly DispatcherTimer _saveTimer;
+    private readonly DispatcherTimer _referenceAvailabilityTimer;
     private readonly AsyncRelayCommand _importImagesCommand;
     private readonly AsyncRelayCommand _submitInstructionCommand;
     private readonly RelayCommand _removeSelectedImageCommand;
     private readonly RelayCommand _bringSelectedToFrontCommand;
+    private readonly RelayCommand _imageRegionSelectToolCommand;
     private readonly RelayCommand _cancelImportCommand;
     private readonly RelayCommand<ArtWorkspaceImageItemViewModel> _selectImageCommand;
     private readonly Dispatcher _dispatcher;
@@ -54,6 +63,8 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
     private string _instructionDraft = string.Empty;
     private string? _lastImportDirectory;
     private ArtWorkspaceImageItemViewModel? _selectedImage;
+    private ArtWorkspaceImageRegionSelection? _selectedImageRegion;
+    private ArtWorkspaceToolMode _activeToolMode = ArtWorkspaceToolMode.SelectMove;
     private double _canvasWidth = 8192d;
     private double _canvasHeight = 8192d;
     private double _panX = 48d;
@@ -77,6 +88,8 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
     private bool _isGenerating;
     private string _generationProgressText = "尚未启动生成";
     private double _generationProgressPercentage;
+    private bool _lastHasMissingVisibleImages;
+    private bool _missingAvailabilityInitialized;
     private bool _disposed;
 
     public ArtWorkspaceViewModel(
@@ -101,6 +114,11 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         RemoveSelectedImageCommand = _removeSelectedImageCommand;
         _bringSelectedToFrontCommand = new RelayCommand(BringSelectedToFront, () => SelectedImage is not null);
         BringSelectedToFrontCommand = _bringSelectedToFrontCommand;
+        SelectMoveToolCommand = new RelayCommand(() => ActiveToolMode = ArtWorkspaceToolMode.SelectMove);
+        _imageRegionSelectToolCommand = new RelayCommand(
+            () => ActiveToolMode = ArtWorkspaceToolMode.ImageRegionSelect,
+            () => SelectedImage is { IsVisible: true, IsMissing: false });
+        ImageRegionSelectToolCommand = _imageRegionSelectToolCommand;
         _selectImageCommand = new RelayCommand<ArtWorkspaceImageItemViewModel>(SelectImage);
         SelectImageCommand = _selectImageCommand;
         _saveTimer = new DispatcherTimer(DispatcherPriority.Background)
@@ -108,6 +126,12 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
             Interval = AutoSaveDelay
         };
         _saveTimer.Tick += OnSaveTimerTick;
+        _referenceAvailabilityTimer = new DispatcherTimer(DispatcherPriority.Background)
+        {
+            Interval = TimeSpan.FromSeconds(2)
+        };
+        _referenceAvailabilityTimer.Tick += OnReferenceAvailabilityTimerTick;
+        _referenceAvailabilityTimer.Start();
     }
 
     public event EventHandler<ArtWorkspaceCreationRequestedEventArgs>? CreationRequested;
@@ -254,11 +278,13 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
                         ? $"Agent 尚不可用：{_generationGateway.StatusText}"
                         : IsAgentBusy
                             ? "Agent 当前正在执行其它任务，完成后即可发送。"
-                            : Conversation.Count > ArtWorkspaceValidator.MaximumMessages - 2
-                                ? "对话记录已达到上限，请先归档或创建新的工作区会话。"
-                                : string.IsNullOrWhiteSpace(InstructionDraft)
-                                    ? "输入希望创建的内容、构图、风格或修改要求。"
-                                    : "发送后会冻结当前输出框与可见参考图，并通过已接入 Agent 生成图片。";
+                            : HasMissingVisibleImages
+                                ? "当前画布存在受管文件缺失的可见参考图片；请重新导入或先隐藏该图片。"
+                                : Conversation.Count > ArtWorkspaceValidator.MaximumMessages - 2
+                                    ? "对话记录已达到上限，请先归档或创建新的工作区会话。"
+                                    : string.IsNullOrWhiteSpace(InstructionDraft)
+                                        ? "输入希望创建的内容、构图、风格或修改要求。"
+                                        : "发送后会冻结当前输出框与可见参考图，并通过已接入 Agent 生成图片。";
 
     public double OutputFrameX
     {
@@ -354,23 +380,68 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
             if (_selectedImage is not null)
             {
                 _selectedImage.IsSelected = false;
+                _selectedImage.SetSelectedRegion(null);
             }
 
             _selectedImage = value;
+            _selectedImageRegion = null;
             if (_selectedImage is not null)
             {
                 _selectedImage.IsSelected = true;
             }
+            else if (ActiveToolMode == ArtWorkspaceToolMode.ImageRegionSelect)
+            {
+                ActiveToolMode = ArtWorkspaceToolMode.SelectMove;
+            }
 
             OnPropertyChanged();
             OnPropertyChanged(nameof(HasSelectedImage));
+            OnPropertyChanged(nameof(SelectedImageRegion));
+            OnPropertyChanged(nameof(HasSelectedImageRegion));
+            OnPropertyChanged(nameof(SelectedImageReferenceText));
             _removeSelectedImageCommand.RaiseCanExecuteChanged();
             _bringSelectedToFrontCommand.RaiseCanExecuteChanged();
+            _imageRegionSelectToolCommand.RaiseCanExecuteChanged();
             MarkDirty();
         }
     }
 
     public bool HasSelectedImage => SelectedImage is not null;
+
+    public bool HasMissingVisibleImages => Images.Any(image => image.IsVisible && image.IsMissing);
+
+    public ArtWorkspaceImageRegionSelection? SelectedImageRegion =>
+        _selectedImageRegion is null ? null : CloneRegion(_selectedImageRegion);
+
+    public bool HasSelectedImageRegion => _selectedImageRegion is not null;
+
+    public string SelectedImageReferenceText => SelectedImage switch
+    {
+        null => "本轮未指定图片指代",
+        { IsVisible: false } image => $"所选图片“{image.Name}”当前已隐藏，不会随指令提交",
+        { IsMissing: true } image => $"所选图片“{image.Name}”的受管文件缺失，请重新导入或隐藏后再提交",
+        var image when HasSelectedImageRegion => $"本轮指代：{image.Name} · 已框选局部区域",
+        var image => $"本轮指代：{image.Name} · 整张图片"
+    };
+
+    public ArtWorkspaceToolMode ActiveToolMode
+    {
+        get => _activeToolMode;
+        private set
+        {
+            if (!SetProperty(ref _activeToolMode, value))
+            {
+                return;
+            }
+
+            OnPropertyChanged(nameof(IsSelectMoveToolActive));
+            OnPropertyChanged(nameof(IsImageRegionSelectToolActive));
+        }
+    }
+
+    public bool IsSelectMoveToolActive => ActiveToolMode == ArtWorkspaceToolMode.SelectMove;
+
+    public bool IsImageRegionSelectToolActive => ActiveToolMode == ArtWorkspaceToolMode.ImageRegionSelect;
 
     public ICommand ImportImagesCommand { get; }
 
@@ -389,6 +460,10 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
     public ICommand BringSelectedToFrontCommand { get; }
 
     public ICommand SelectImageCommand { get; }
+
+    public ICommand SelectMoveToolCommand { get; }
+
+    public ICommand ImageRegionSelectToolCommand { get; }
 
     public void ConfigureGenerationGateway(IArtWorkspaceGenerationGateway? gateway)
     {
@@ -586,6 +661,7 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         }
 
         OnPropertyChanged(nameof(ImageCountText));
+        NotifyReferenceAvailabilityChanged();
         OnPropertyChanged(nameof(StatusText));
         return added;
     }
@@ -697,12 +773,120 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         }
 
         OnPropertyChanged(nameof(ImageCountText));
+        NotifyReferenceAvailabilityChanged();
         OnPropertyChanged(nameof(StatusText));
         return added;
     }
 
     public void SelectImage(ArtWorkspaceImageItemViewModel? image) =>
         SelectedImage = image is not null && Images.Contains(image) ? image : null;
+
+    public bool SetSelectedImageRegionNormalized(
+        double x,
+        double y,
+        double width,
+        double height,
+        bool commit)
+    {
+        if (SelectedImage is not { IsVisible: true, IsMissing: false } selected ||
+            !double.IsFinite(x) ||
+            !double.IsFinite(y) ||
+            !double.IsFinite(width) ||
+            !double.IsFinite(height))
+        {
+            return false;
+        }
+
+        var left = Math.Clamp(Math.Min(x, x + width), 0d, 1d);
+        var top = Math.Clamp(Math.Min(y, y + height), 0d, 1d);
+        var right = Math.Clamp(Math.Max(x, x + width), 0d, 1d);
+        var bottom = Math.Clamp(Math.Max(y, y + height), 0d, 1d);
+        if (right - left <= ArtWorkspaceImageRegionGeometry.BoundaryTolerance ||
+            bottom - top <= ArtWorkspaceImageRegionGeometry.BoundaryTolerance)
+        {
+            return false;
+        }
+
+        var region = new ArtWorkspaceImageRegionSelection
+        {
+            ImageId = selected.Id,
+            X = left,
+            Y = top,
+            Width = right - left,
+            Height = bottom - top
+        };
+        ArtWorkspaceImageRegionGeometry.ValidateRegion(region, selected.Id);
+        ApplySelectedImageRegion(region, commit);
+        return true;
+    }
+
+    public bool SetSelectedImageRegionFromWorldPoints(
+        double startWorldX,
+        double startWorldY,
+        double endWorldX,
+        double endWorldY,
+        bool commit)
+    {
+        if (SelectedImage is not { IsVisible: true, IsMissing: false } selected)
+        {
+            return false;
+        }
+
+        try
+        {
+            var region = ArtWorkspaceImageRegionGeometry.FromWorldPoints(
+                selected.Id,
+                selected.X,
+                selected.Y,
+                selected.Width,
+                selected.Height,
+                selected.RotationDegrees,
+                startWorldX,
+                startWorldY,
+                endWorldX,
+                endWorldY);
+            ApplySelectedImageRegion(region, commit);
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    public void ClearSelectedImageRegion(bool commit = true)
+    {
+        if (_selectedImageRegion is null)
+        {
+            return;
+        }
+
+        _selectedImageRegion = null;
+        SelectedImage?.SetSelectedRegion(null);
+        OnPropertyChanged(nameof(SelectedImageRegion));
+        OnPropertyChanged(nameof(HasSelectedImageRegion));
+        OnPropertyChanged(nameof(SelectedImageReferenceText));
+        if (commit)
+        {
+            MarkDirty();
+        }
+    }
+
+    private void ApplySelectedImageRegion(
+        ArtWorkspaceImageRegionSelection region,
+        bool commit)
+    {
+        _selectedImageRegion = CloneRegion(region);
+        SelectedImage?.SetSelectedRegion(_selectedImageRegion);
+        OnPropertyChanged(nameof(SelectedImageRegion));
+        OnPropertyChanged(nameof(HasSelectedImageRegion));
+        OnPropertyChanged(nameof(SelectedImageReferenceText));
+        if (commit)
+        {
+            _statusMessage = $"已将 {SelectedImage?.Name ?? "所选图片"} 的局部区域绑定到下一条对话指令";
+            MarkDirty();
+        }
+    }
 
     public void MoveImage(ArtWorkspaceImageItemViewModel image, double x, double y, bool commit)
     {
@@ -858,6 +1042,8 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         _disposed = true;
         _saveTimer.Stop();
         _saveTimer.Tick -= OnSaveTimerTick;
+        _referenceAvailabilityTimer.Stop();
+        _referenceAvailabilityTimer.Tick -= OnReferenceAvailabilityTimerTick;
         foreach (var image in Images)
         {
             image.Changed -= OnImageChanged;
@@ -899,6 +1085,7 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         !IsGenerating &&
         !string.IsNullOrWhiteSpace(_projectRoot) &&
         _generationGateway is { IsConnected: true, IsBusy: false } &&
+        !HasMissingVisibleImages &&
         Conversation.Count <= ArtWorkspaceValidator.MaximumMessages - 2 &&
         !string.IsNullOrWhiteSpace(InstructionDraft) &&
         InstructionDraft.Trim().Length <= 16000;
@@ -932,7 +1119,8 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         var messages = CreateInstructionMessages(
             instruction,
             frozenRequest.CreatedAtUtc,
-            _generationGateway?.AgentDisplayName);
+            _generationGateway?.AgentDisplayName,
+            frozenRequest);
         try
         {
             var candidate = CaptureDocument();
@@ -1130,6 +1318,27 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
             });
         }
 
+        ArtWorkspaceGenerationInstructionReference? instructionReference = null;
+        if (SelectedImage is { IsVisible: true, IsMissing: false } selected &&
+            references.Any(reference => string.Equals(reference.ImageId, selected.Id, StringComparison.Ordinal)))
+        {
+            var selectedRegion = _selectedImageRegion is not null &&
+                                 string.Equals(_selectedImageRegion.ImageId, selected.Id, StringComparison.Ordinal)
+                ? new ArtWorkspaceGenerationRegion
+                {
+                    X = _selectedImageRegion.X,
+                    Y = _selectedImageRegion.Y,
+                    Width = _selectedImageRegion.Width,
+                    Height = _selectedImageRegion.Height
+                }
+                : null;
+            instructionReference = new ArtWorkspaceGenerationInstructionReference
+            {
+                ImageId = selected.Id,
+                Region = selectedRegion
+            };
+        }
+
         return new ArtWorkspaceGenerationRequest
         {
             RequestId = Guid.NewGuid().ToString("N"),
@@ -1150,7 +1359,8 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
                 OutputRelativeDirectory = OutputRelativeDirectory,
                 OutputDirectoryPath = outputDirectory
             },
-            VisibleReferences = references.ToArray()
+            VisibleReferences = references.ToArray(),
+            InstructionReference = instructionReference
         };
     }
 
@@ -1361,6 +1571,7 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         SelectedImage = null;
         _statusMessage = $"已从画布移除 {selected.Name}；受管源文件仍保留供审计与复用";
         OnPropertyChanged(nameof(ImageCountText));
+        NotifyReferenceAvailabilityChanged();
         MarkDirty();
     }
 
@@ -1397,6 +1608,17 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
             .ToList();
         var nextSelectedImage = nextImages.FirstOrDefault(image =>
             string.Equals(image.Id, nextDocument.SelectedImageId, StringComparison.Ordinal));
+        var nextSelectedRegion = nextSelectedImage is { IsVisible: true, IsMissing: false } &&
+                                 nextDocument.SelectedImageRegion is { } persistedRegion &&
+                                 string.Equals(persistedRegion.ImageId, nextSelectedImage.Id, StringComparison.Ordinal)
+            ? CloneRegion(persistedRegion)
+            : null;
+        var discardedInvalidSelectedRegion = nextDocument.SelectedImageRegion is not null &&
+                                             nextSelectedRegion is null;
+        if (discardedInvalidSelectedRegion)
+        {
+            nextDocument.SelectedImageRegion = null;
+        }
 
         _suppressAutoSave = true;
         try
@@ -1438,9 +1660,12 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
             }
 
             _selectedImage = nextSelectedImage;
+            _selectedImageRegion = nextSelectedRegion;
+            _activeToolMode = ArtWorkspaceToolMode.SelectMove;
             if (_selectedImage is not null)
             {
                 _selectedImage.IsSelected = true;
+                _selectedImage.SetSelectedRegion(_selectedImageRegion);
             }
 
             _hasPendingSave = false;
@@ -1460,6 +1685,11 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         }
 
         NotifyAllChanged();
+        if (discardedInvalidSelectedRegion)
+        {
+            _statusMessage = "已清除隐藏或缺失图片上的无效框选区域";
+            MarkDirty();
+        }
     }
 
     private ArtWorkspaceDocument CaptureDocument()
@@ -1499,7 +1729,8 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
                 .ToList(),
             Images = Images.Select(image => image.ToModel()).ToList(),
             Conversation = Conversation.Select(message => message.ToModel()).ToList(),
-            SelectedImageId = SelectedImage?.Id
+            SelectedImageId = SelectedImage?.Id,
+            SelectedImageRegion = _selectedImageRegion is null ? null : CloneRegion(_selectedImageRegion)
         };
     }
 
@@ -1527,8 +1758,16 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         if (ReferenceEquals(sender, SelectedImage))
         {
             OnPropertyChanged(nameof(SelectedImage));
+            OnPropertyChanged(nameof(SelectedImageReferenceText));
+            _imageRegionSelectToolCommand.RaiseCanExecuteChanged();
+            if (SelectedImage is { IsVisible: false })
+            {
+                ClearSelectedImageRegion();
+                ActiveToolMode = ArtWorkspaceToolMode.SelectMove;
+            }
         }
 
+        NotifyReferenceAvailabilityChanged();
         MarkDirty();
     }
 
@@ -1571,6 +1810,8 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
 
     private void NotifyAllChanged()
     {
+        _lastHasMissingVisibleImages = HasMissingVisibleImages;
+        _missingAvailabilityInitialized = true;
         OnPropertyChanged(nameof(CanvasWidth));
         OnPropertyChanged(nameof(CanvasHeight));
         OnPropertyChanged(nameof(PanX));
@@ -1587,6 +1828,13 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(OutputFrameSummary));
         OnPropertyChanged(nameof(SelectedImage));
         OnPropertyChanged(nameof(HasSelectedImage));
+        OnPropertyChanged(nameof(HasMissingVisibleImages));
+        OnPropertyChanged(nameof(SelectedImageRegion));
+        OnPropertyChanged(nameof(HasSelectedImageRegion));
+        OnPropertyChanged(nameof(SelectedImageReferenceText));
+        OnPropertyChanged(nameof(ActiveToolMode));
+        OnPropertyChanged(nameof(IsSelectMoveToolActive));
+        OnPropertyChanged(nameof(IsImageRegionSelectToolActive));
         OnPropertyChanged(nameof(ImageCountText));
         OnPropertyChanged(nameof(ProjectContextText));
         OnPropertyChanged(nameof(AgentConnectionStatusText));
@@ -1595,6 +1843,46 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         _submitInstructionCommand.RaiseCanExecuteChanged();
         _removeSelectedImageCommand.RaiseCanExecuteChanged();
         _bringSelectedToFrontCommand.RaiseCanExecuteChanged();
+        _imageRegionSelectToolCommand.RaiseCanExecuteChanged();
+    }
+
+    private void OnReferenceAvailabilityTimerTick(object? sender, EventArgs e)
+    {
+        var changed = false;
+        foreach (var image in Images)
+        {
+            changed |= image.RefreshMissingState();
+        }
+
+        if (changed)
+        {
+            if (SelectedImage is { IsMissing: true })
+            {
+                ClearSelectedImageRegion();
+                ActiveToolMode = ArtWorkspaceToolMode.SelectMove;
+            }
+
+            NotifyReferenceAvailabilityChanged(force: true);
+        }
+    }
+
+    private void NotifyReferenceAvailabilityChanged(bool force = false)
+    {
+        var hasMissingVisibleImages = HasMissingVisibleImages;
+        var availabilityChanged = !_missingAvailabilityInitialized ||
+                                  _lastHasMissingVisibleImages != hasMissingVisibleImages;
+        _lastHasMissingVisibleImages = hasMissingVisibleImages;
+        _missingAvailabilityInitialized = true;
+        if (!force && !availabilityChanged)
+        {
+            return;
+        }
+
+        OnPropertyChanged(nameof(HasMissingVisibleImages));
+        OnPropertyChanged(nameof(SelectedImageReferenceText));
+        OnPropertyChanged(nameof(CanSubmitInstructionText));
+        _submitInstructionCommand.RaiseCanExecuteChanged();
+        _imageRegionSelectToolCommand.RaiseCanExecuteChanged();
     }
 
     private void NotifySummaryChanged()
@@ -1722,14 +2010,29 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
     private static IReadOnlyList<ArtWorkspaceConversationMessage> CreateInstructionMessages(
         string instruction,
         DateTimeOffset createdAtUtc,
-        string? agentDisplayName) =>
-    [
+        string? agentDisplayName,
+        ArtWorkspaceGenerationRequest frozenRequest)
+    {
+        var instructionReference = frozenRequest.InstructionReference;
+        var selectedReference = instructionReference is null
+            ? null
+            : frozenRequest.VisibleReferences.FirstOrDefault(reference =>
+                string.Equals(reference.ImageId, instructionReference.ImageId, StringComparison.Ordinal));
+        var referenceSummary = selectedReference is null
+            ? null
+            : instructionReference!.Region is null
+                ? $"引用：{selectedReference.Name} · 整张图片"
+                : $"引用：{selectedReference.Name} · 已框选局部区域";
+        return
+        [
         new ArtWorkspaceConversationMessage
         {
             Role = ArtWorkspaceMessageRole.User,
             Text = instruction,
             CreatedAtUtc = createdAtUtc,
-            State = "captured"
+            State = "captured",
+            ReferenceImageId = selectedReference?.ImageId,
+            ReferenceSummary = referenceSummary
         },
         new ArtWorkspaceConversationMessage
         {
@@ -1740,7 +2043,8 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
             CreatedAtUtc = createdAtUtc,
             State = "queued"
         }
-    ];
+        ];
+    }
 
     private static bool PathsEqual(string? left, string? right)
     {
@@ -1784,13 +2088,25 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         IsVisible = image.IsVisible
     };
 
+    private static ArtWorkspaceImageRegionSelection CloneRegion(
+        ArtWorkspaceImageRegionSelection region) => new()
+    {
+        ImageId = region.ImageId,
+        X = region.X,
+        Y = region.Y,
+        Width = region.Width,
+        Height = region.Height
+    };
+
     private static ArtWorkspaceConversationMessage CloneMessage(ArtWorkspaceConversationMessage message) => new()
     {
         Id = message.Id,
         Role = message.Role,
         Text = message.Text,
         CreatedAtUtc = message.CreatedAtUtc,
-        State = message.State
+        State = message.State,
+        ReferenceImageId = message.ReferenceImageId,
+        ReferenceSummary = message.ReferenceSummary
     };
 }
 
@@ -1807,6 +2123,8 @@ public sealed class ArtWorkspaceImageItemViewModel : ObservableObject
     private bool _isLocked;
     private bool _isVisible;
     private bool _isSelected;
+    private bool _isMissing;
+    private ArtWorkspaceImageRegionSelection? _selectedRegion;
 
     public ArtWorkspaceImageItemViewModel(
         ArtWorkspaceImageItem model,
@@ -1830,6 +2148,7 @@ public sealed class ArtWorkspaceImageItemViewModel : ObservableObject
         _zIndex = model.ZIndex;
         _isLocked = model.IsLocked;
         _isVisible = model.IsVisible;
+        _isMissing = !File.Exists(absolutePath);
     }
 
     public event EventHandler? Changed;
@@ -1869,13 +2188,27 @@ public sealed class ArtWorkspaceImageItemViewModel : ObservableObject
     public double Width
     {
         get => _width;
-        set => SetChanged(ref _width, NormalizeFinite(value, 1d, 32768d), nameof(Width));
+        set
+        {
+            if (SetChanged(ref _width, NormalizeFinite(value, 1d, 32768d), nameof(Width)))
+            {
+                OnPropertyChanged(nameof(SelectedRegionX));
+                OnPropertyChanged(nameof(SelectedRegionWidth));
+            }
+        }
     }
 
     public double Height
     {
         get => _height;
-        set => SetChanged(ref _height, NormalizeFinite(value, 1d, 32768d), nameof(Height));
+        set
+        {
+            if (SetChanged(ref _height, NormalizeFinite(value, 1d, 32768d), nameof(Height)))
+            {
+                OnPropertyChanged(nameof(SelectedRegionY));
+                OnPropertyChanged(nameof(SelectedRegionHeight));
+            }
+        }
     }
 
     public double RotationDegrees
@@ -1914,6 +2247,48 @@ public sealed class ArtWorkspaceImageItemViewModel : ObservableObject
         set => SetProperty(ref _isSelected, value);
     }
 
+    public bool HasSelectedRegion => _selectedRegion is not null;
+
+    public double SelectedRegionX => (_selectedRegion?.X ?? 0d) * Width;
+
+    public double SelectedRegionY => (_selectedRegion?.Y ?? 0d) * Height;
+
+    public double SelectedRegionWidth => (_selectedRegion?.Width ?? 0d) * Width;
+
+    public double SelectedRegionHeight => (_selectedRegion?.Height ?? 0d) * Height;
+
+    internal void SetSelectedRegion(ArtWorkspaceImageRegionSelection? region)
+    {
+        _selectedRegion = region is null
+            ? null
+            : new ArtWorkspaceImageRegionSelection
+            {
+                ImageId = region.ImageId,
+                X = region.X,
+                Y = region.Y,
+                Width = region.Width,
+                Height = region.Height
+            };
+        OnPropertyChanged(nameof(HasSelectedRegion));
+        OnPropertyChanged(nameof(SelectedRegionX));
+        OnPropertyChanged(nameof(SelectedRegionY));
+        OnPropertyChanged(nameof(SelectedRegionWidth));
+        OnPropertyChanged(nameof(SelectedRegionHeight));
+    }
+
+    internal bool RefreshMissingState()
+    {
+        var isMissing = !File.Exists(AbsolutePath);
+        if (_isMissing == isMissing)
+        {
+            return false;
+        }
+
+        _isMissing = isMissing;
+        OnPropertyChanged(nameof(IsMissing));
+        return true;
+    }
+
     public ArtWorkspaceImageItem ToModel() => new()
     {
         Id = Id,
@@ -1930,12 +2305,15 @@ public sealed class ArtWorkspaceImageItemViewModel : ObservableObject
         IsVisible = IsVisible
     };
 
-    private void SetChanged<T>(ref T field, T value, string propertyName)
+    private bool SetChanged<T>(ref T field, T value, string propertyName)
     {
         if (SetProperty(ref field, value, propertyName))
         {
             Changed?.Invoke(this, EventArgs.Empty);
+            return true;
         }
+
+        return false;
     }
 
     private static string NormalizeName(string? value)
@@ -1979,6 +2357,10 @@ public sealed class ArtWorkspaceConversationMessageViewModel : ObservableObject
 
     public string State => _model.State;
 
+    public bool HasReferenceSummary => !string.IsNullOrWhiteSpace(_model.ReferenceSummary);
+
+    public string ReferenceSummary => _model.ReferenceSummary ?? string.Empty;
+
     public void Update(string text, string? state = null)
     {
         var normalizedText = string.IsNullOrWhiteSpace(text) ? "Agent 未提供状态文本。" : text.Trim();
@@ -2012,6 +2394,8 @@ public sealed class ArtWorkspaceConversationMessageViewModel : ObservableObject
         Role = _model.Role,
         Text = _model.Text,
         CreatedAtUtc = _model.CreatedAtUtc,
-        State = _model.State
+        State = _model.State,
+        ReferenceImageId = _model.ReferenceImageId,
+        ReferenceSummary = _model.ReferenceSummary
     };
 }

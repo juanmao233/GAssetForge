@@ -172,7 +172,13 @@ codex exec resume --json ... <threadId> -
 美术工作区也复用同一套 Codex Runtime、MCP Server、八工具白名单和单一 Agent 调度器，但使用独立
 `art-workspace` workflow。属性页显示“Agent 已接入可用”后，`发送并生成` 会创建一个冻结单图任务：用户
 指令、输出框像素尺寸与画布几何、项目 `Assets` 根、最终目录及当前可见参考图的哈希和变换均写入约束合同。
-Agent 必须按普通新合同调用 `claim_generation_task → imagegen/image_gen.py → submit_generation_output`；
+当前有效可见选图会自动写入 Schema v2 的 `parameters.artWorkspace.instructionReference`，作为本轮“这张图”
+等措辞的唯一明确指代；若用户在图像框选工具中选择局部，合同还包含
+`coordinateSpace=image-local-normalized-unrotated` 的 `x/y/width/height`、从原图尺寸派生的
+`sourcePixelBounds`，以及结合图片位置、显示尺寸和旋转得到的 `canvasPolygon`。图片/资产 ID、名称、受管
+相对路径和 SHA-256-bearing 可见参考快照一起被冻结。用户对话 UI 只显示名称与整图/局部状态，不显示这些
+数字；Prompt 明确要求 Agent 使用合同目标，不得重新猜测其它参考图。Agent 必须按普通新合同调用
+`claim_generation_task → imagegen/image_gen.py → submit_generation_output`；
 无背景剔除的完整画面允许 `stagingPaths=[]`，Harness 会从 `30-model-output` 派生 `35-normalized-input`，保留
 processed 审计副本并原子提交到 `Assets/Generated/ArtWorkspace/<batchId>/Final`。UI 只在持久任务完成且精确
 冻结目标存在后把图片复制为受管画布预览；Agent 文本或可视图片结果本身不算交付。

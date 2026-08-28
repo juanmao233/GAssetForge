@@ -51,6 +51,11 @@ internal static class ArtWorkspaceSmokeTests
             projectB,
             fixtureA,
             fixtureB);
+        InvalidSelectedRegionsDoNotSurviveProjectReload(
+            workspacePaths,
+            repository,
+            projectParent,
+            fixtureA);
         ValidatorAndConversationLimitsFailClosed(workspacePaths);
         AsyncImportAndUnusedAssetMetadataCleanupStayStable(
             workspacePaths,
@@ -74,6 +79,110 @@ internal static class ArtWorkspaceSmokeTests
             fixtureA);
         FailedSaveKeepsActiveGenerationAlive(workspacePaths, repository);
         DockDocumentUsesArtWorkspaceContexts(Path.Combine(root, "dock-ui"));
+    }
+
+    private static void InvalidSelectedRegionsDoNotSurviveProjectReload(
+        WorkspacePaths workspacePaths,
+        JsonArtWorkspaceRepository repository,
+        string projectParent,
+        string fixturePath)
+    {
+        var projectService = new ProjectWorkspaceService();
+        var hiddenProject = projectService.Create(
+            projectParent,
+            $"ArtWorkspaceHiddenRegion-{Guid.NewGuid():N}",
+            "ui");
+        var missingProject = projectService.Create(
+            projectParent,
+            $"ArtWorkspaceMissingRegion-{Guid.NewGuid():N}",
+            "ui");
+
+        using (var setupConsole = new WorkbenchConsoleService(workspacePaths))
+        using (var setup = new ArtWorkspaceViewModel(repository, new StubImagePicker(), setupConsole))
+        {
+            True(setup.Activate(hiddenProject.Paths.RootDirectory),
+                "隐藏框选回归应激活正式项目");
+            Equal(1, setup.AddImagesAt([fixturePath], 80d, 120d),
+                "隐藏框选回归应导入受管图片");
+            True(setup.SetSelectedImageRegionNormalized(0.2d, 0.3d, 0.4d, 0.5d, commit: true),
+                "隐藏框选回归应建立局部区域");
+            True(setup.SaveNow(), "隐藏框选回归应保存初始工作区");
+        }
+
+        var hiddenDocument = repository.LoadOrCreate(hiddenProject.Paths.RootDirectory).Document;
+        hiddenDocument.Images.Single().IsVisible = false;
+        True(hiddenDocument.SelectedImageRegion is not null,
+            "隐藏框选回归夹具应保留旧版悬空区域");
+        repository.Save(hiddenProject.Paths.RootDirectory, hiddenDocument);
+
+        using (var hiddenConsole = new WorkbenchConsoleService(workspacePaths))
+        using (var hiddenReload = new ArtWorkspaceViewModel(repository, new StubImagePicker(), hiddenConsole))
+        {
+            True(hiddenReload.Activate(hiddenProject.Paths.RootDirectory),
+                "隐藏框选工作区应可重载");
+            False(hiddenReload.HasSelectedImageRegion,
+                "隐藏图片上的框选区域不得在项目重载后存活");
+            False(hiddenReload.SelectedImage!.HasSelectedRegion,
+                "隐藏图片模板不得恢复悬空框选视觉状态");
+        }
+
+        var sanitizedHiddenDocument = repository.LoadOrCreate(hiddenProject.Paths.RootDirectory).Document;
+        True(sanitizedHiddenDocument.SelectedImageRegion is null,
+            "隐藏图片的无效框选应在首次重载关闭时持久化清除");
+        sanitizedHiddenDocument.Images.Single().IsVisible = true;
+        repository.Save(hiddenProject.Paths.RootDirectory, sanitizedHiddenDocument);
+        using (var visibleConsole = new WorkbenchConsoleService(workspacePaths))
+        using (var visibleReload = new ArtWorkspaceViewModel(repository, new StubImagePicker(), visibleConsole))
+        {
+            True(visibleReload.Activate(hiddenProject.Paths.RootDirectory),
+                "重新显示图片后的工作区应可再次重载");
+            False(visibleReload.HasSelectedImageRegion,
+                "重新显示图片并再次重载不得复活已废弃的旧框选区域");
+        }
+
+        string missingManagedPath;
+        using (var setupConsole = new WorkbenchConsoleService(workspacePaths))
+        using (var setup = new ArtWorkspaceViewModel(repository, new StubImagePicker(), setupConsole))
+        {
+            True(setup.Activate(missingProject.Paths.RootDirectory),
+                "缺失框选回归应激活正式项目");
+            Equal(1, setup.AddImagesAt([fixturePath], 160d, 200d),
+                "缺失框选回归应导入受管图片");
+            True(setup.SetSelectedImageRegionNormalized(0.1d, 0.15d, 0.6d, 0.7d, commit: true),
+                "缺失框选回归应建立局部区域");
+            missingManagedPath = setup.SelectedImage!.AbsolutePath;
+            True(setup.SaveNow(), "缺失框选回归应保存初始工作区");
+        }
+
+        File.Delete(missingManagedPath);
+        using (var missingConsole = new WorkbenchConsoleService(workspacePaths))
+        using (var missingReload = new ArtWorkspaceViewModel(repository, new StubImagePicker(), missingConsole))
+        {
+            True(missingReload.Activate(missingProject.Paths.RootDirectory),
+                "缺失框选工作区应可重载");
+            True(missingReload.SelectedImage!.IsMissing,
+                "缺失框选回归应识别受管文件不存在");
+            False(missingReload.HasSelectedImageRegion,
+                "缺失图片上的框选区域不得在项目重载后存活");
+            False(missingReload.SelectedImage.HasSelectedRegion,
+                "缺失图片模板不得恢复悬空框选视觉状态");
+        }
+
+
+        var sanitizedMissingDocument = repository.LoadOrCreate(missingProject.Paths.RootDirectory).Document;
+        True(sanitizedMissingDocument.SelectedImageRegion is null,
+            "缺失图片的无效框选应在首次重载关闭时持久化清除");
+        File.Copy(fixturePath, missingManagedPath);
+        using (var restoredConsole = new WorkbenchConsoleService(workspacePaths))
+        using (var restoredReload = new ArtWorkspaceViewModel(repository, new StubImagePicker(), restoredConsole))
+        {
+            True(restoredReload.Activate(missingProject.Paths.RootDirectory),
+                "受管文件恢复后的工作区应可再次重载");
+            False(restoredReload.SelectedImage!.IsMissing,
+                "恢复后的受管文件应重新可用");
+            False(restoredReload.HasSelectedImageRegion,
+                "受管文件恢复并再次重载不得复活已废弃的旧框选区域");
+        }
     }
 
     private static void ValidatorAndConversationLimitsFailClosed(WorkspacePaths workspacePaths)
@@ -118,6 +227,44 @@ internal static class ArtWorkspaceSmokeTests
         Throws<InvalidDataException>(
             () => ArtWorkspaceValidator.Validate(oversizedOutputDocument),
             "美术工作区输出框任一边超过 16384 时必须被拒绝");
+
+        var regionDocument = ArtWorkspaceDocumentFactory.Create();
+        var regionAsset = CreateManagedAsset(
+            "Assets/ArtWorkspace/References/region.png",
+            pixelWidth: 64,
+            pixelHeight: 32);
+        var regionImage = new ArtWorkspaceImageItem
+        {
+            AssetId = regionAsset.Id,
+            Name = "区域参考",
+            Width = 320d,
+            Height = 160d
+        };
+        regionDocument.Assets.Add(regionAsset);
+        regionDocument.Images.Add(regionImage);
+        regionDocument.SelectedImageId = regionImage.Id;
+        regionDocument.SelectedImageRegion = new ArtWorkspaceImageRegionSelection
+        {
+            ImageId = regionImage.Id,
+            X = 0.25d,
+            Y = 0.125d,
+            Width = 0.5d,
+            Height = 0.75d
+        };
+        var regionRoundTrip = ArtWorkspaceJson.Deserialize(ArtWorkspaceJson.Serialize(regionDocument));
+        Near(0.25d, regionRoundTrip.SelectedImageRegion!.X,
+            "图片本地归一化框选区域应完成 JSON 往返");
+        var escapedRegionDocument = ArtWorkspaceJson.Deserialize(ArtWorkspaceJson.Serialize(regionDocument));
+        escapedRegionDocument.SelectedImageRegion!.X = 0.8d;
+        escapedRegionDocument.SelectedImageRegion.Width = 0.4d;
+        Throws<InvalidDataException>(
+            () => ArtWorkspaceValidator.Validate(escapedRegionDocument),
+            "图片框选区域不得越出图片本地边界");
+        var mismatchedRegionDocument = ArtWorkspaceJson.Deserialize(ArtWorkspaceJson.Serialize(regionDocument));
+        mismatchedRegionDocument.SelectedImageRegion!.ImageId = Guid.NewGuid().ToString("N");
+        Throws<InvalidDataException>(
+            () => ArtWorkspaceValidator.Validate(mismatchedRegionDocument),
+            "框选区域必须绑定当前所选图片");
 
         var maximumConstraintInput = new ArtWorkspaceGenerationConstraintInput
         {
@@ -429,6 +576,27 @@ internal static class ArtWorkspaceSmokeTests
                 "相同哈希重复导入不得复制新的实体参考文件");
 
             viewModel.MoveImage(first, 444.5d, 555.25d, commit: true);
+            viewModel.SelectImage(first);
+            first.RotationDegrees = 35d;
+            True(viewModel.ImageRegionSelectToolCommand.CanExecute(null),
+                "可见且文件存在的所选图片应允许启用图像框选工具");
+            viewModel.ImageRegionSelectToolCommand.Execute(null);
+            True(viewModel.IsImageRegionSelectToolActive,
+                "图像框选工具命令应切换工作区工具模式");
+            True(viewModel.SetSelectedImageRegionNormalized(
+                    0.2d,
+                    0.25d,
+                    0.5d,
+                    0.4d,
+                    commit: true),
+                "所选图片应接受图片本地归一化框选区域");
+            True(viewModel.HasSelectedImageRegion && first.HasSelectedRegion,
+                "父工作区和图片对象应同时暴露当前框选状态");
+            Near(first.Width * 0.2d, first.SelectedRegionX,
+                "图片模板框选 X 应随当前显示宽度解释");
+            True(viewModel.SelectedImageReferenceText.Contains(first.Name, StringComparison.Ordinal) &&
+                 viewModel.SelectedImageReferenceText.Contains("局部区域", StringComparison.Ordinal),
+                "对话输入区引用摘要应显示图片名称和局部语义，不暴露坐标");
             viewModel.SetOutputFrame(700d, 820d, 512d, 768d, commit: true);
             viewModel.OutputFrameName = "角色立绘输出";
             viewModel.OutputRelativeDirectory = "Assets/Generated/ArtWorkspace/Characters";
@@ -445,6 +613,12 @@ internal static class ArtWorkspaceSmokeTests
             True(viewModel.Conversation.Any(message =>
                     message.IsUser && string.Equals(message.Text, projectAInstruction, StringComparison.Ordinal)),
                 "创作指令应先作为本地对话记录持久化");
+            True(viewModel.Conversation.Any(message =>
+                    message.IsUser &&
+                    message.HasReferenceSummary &&
+                    message.ReferenceSummary.Contains(first.Name, StringComparison.Ordinal) &&
+                    message.ReferenceSummary.Contains("局部区域", StringComparison.Ordinal)),
+                "用户对话记录应显示坐标无关的冻结图片/区域引用摘要");
             True(viewModel.Conversation.Any(message =>
                     message.IsAgent && message.State == "failed"),
                 "测试网关失败时应把原因写入可见 Agent 对话，而不是停留在等待适配器状态");
@@ -465,6 +639,10 @@ internal static class ArtWorkspaceSmokeTests
             var restoredFirst = viewModel.Images.Single(image => image.Id == firstImageId);
             Near(444.5d, restoredFirst.X, "项目切换后应恢复图片 X 坐标");
             Near(555.25d, restoredFirst.Y, "项目切换后应恢复图片 Y 坐标");
+            True(viewModel.HasSelectedImageRegion,
+                "项目切换后应恢复当前图片局部框选状态");
+            Near(0.2d, viewModel.SelectedImageRegion!.X,
+                "项目切换后应恢复归一化框选 X");
             Near(700d, viewModel.OutputFrameX, "项目切换后应恢复输出框 X 坐标");
             Near(820d, viewModel.OutputFrameY, "项目切换后应恢复输出框 Y 坐标");
             Near(512d, viewModel.OutputFrameWidth, "项目切换后应恢复输出框宽度");
@@ -485,6 +663,10 @@ internal static class ArtWorkspaceSmokeTests
         var reloadedFirst = reloaded.Images.Single(image => image.Id == firstImageId);
         Equal(firstAssetId, reloadedFirst.AssetId, "新建 ViewModel 应保留素材引用 ID");
         Near(444.5d, reloadedFirst.X, "新建 ViewModel 应恢复图片位置");
+        True(reloaded.HasSelectedImageRegion,
+            "新建 ViewModel 应从项目 JSON 恢复图片框选区域");
+        Near(0.5d, reloaded.SelectedImageRegion!.Width,
+            "重载后归一化框选宽度");
         True(reloaded.Conversation.Any(message => message.Text == projectAInstruction),
             "新建 ViewModel 应恢复创作对话");
     }
@@ -524,6 +706,14 @@ internal static class ArtWorkspaceSmokeTests
 
         Equal(1, viewModel.AddImagesAt([referenceFixture], 120d, 180d),
             "Agent 生成测试应先加入一张可见参考图");
+        var selectedReference = viewModel.Images.Single();
+        True(viewModel.SetSelectedImageRegionNormalized(
+                0.125d,
+                0.25d,
+                0.5d,
+                0.5d,
+                commit: true),
+            "Agent 生成测试应冻结当前图片的局部框选");
         viewModel.SetOutputFrame(640d, 720d, 20000d, 30000d, commit: true);
         Near(16384d, viewModel.OutputFrameWidth,
             "属性输入超过生成合同上限时输出框宽度应收束到 16384");
@@ -579,6 +769,14 @@ internal static class ArtWorkspaceSmokeTests
         Equal(512, capturedRequest.OutputFrame.PixelWidth, "冻结请求输出像素宽度");
         Equal(384, capturedRequest.OutputFrame.PixelHeight, "冻结请求输出像素高度");
         Equal(1, capturedRequest.VisibleReferences.Length, "冻结请求应只包含当前可见参考图");
+        True(capturedRequest.InstructionReference is not null,
+            "冻结请求应独立携带当前所选图片指代");
+        Equal(selectedReference.Id, capturedRequest.InstructionReference!.ImageId,
+            "冻结请求所选图片 ID");
+        Near(0.125d, capturedRequest.InstructionReference.Region!.X,
+            "冻结请求局部区域 X");
+        Near(0.5d, capturedRequest.InstructionReference.Region.Height,
+            "冻结请求局部区域高度");
         True(Path.IsPathRooted(capturedRequest.VisibleReferences[0].AbsolutePath),
             "冻结参考图必须使用绝对受管路径");
         True(File.Exists(finalPath), "导入画布后必须保留 Generated 正式原件");

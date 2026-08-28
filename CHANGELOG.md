@@ -5,6 +5,34 @@ development track; versioning policy will be finalized before the first public r
 
 ## Unreleased
 
+## 1.0.24t1 - 2026-08-28
+
+### Added
+
+- Added an Art Workspace image-region tool. A drag on the selected image stores the marquee in the
+  image's unrotated local `0..1` coordinate space, so the same source pixels remain selected while
+  the canvas object is moved, resized, or rotated.
+- Added an explicit per-instruction image reference to the `art-workspace` generation contract.
+  The currently selected, visible managed image is automatically frozen as the user's whole-image
+  target, or as the local region when a marquee exists; the generated Prompt no longer asks the
+  Agent to guess which canvas image words such as “this image” or “this area” refer to.
+
+### Changed
+
+- Advanced the Art Workspace constraint contract to Schema v2. A local-region reference now carries
+  the selected image and asset identities, managed snapshot path, SHA-256-bearing frozen reference,
+  normalized bounds, derived source-pixel bounds, and its rotation-aware canvas polygon.
+- Kept image-reference details readable but coordinate-free in the conversation UI: users see the
+  image name and either “whole image” or “selected local region”, while numeric geometry remains in
+  the durable Agent contract and project document.
+
+### Fixed
+
+- Invalid references no longer survive image switching, hiding, deletion, missing managed files, or
+  project reload; region selection is available only for a valid visible selected image.
+- The local developer publish script now removes a stale `release-info.json` before overwriting
+  binaries, preventing a reused `dist` directory from reporting an older version or source provenance.
+
 ## 1.0.23t1 - 2026-08-27
 
 ### Added

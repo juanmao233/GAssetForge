@@ -9,6 +9,7 @@ namespace GAssetForge.App.Views;
 
 public partial class ArtWorkspaceView : UserControl
 {
+    private const double MinimumRegionDragScreenDistance = 3d;
     private bool _isPanning;
     private MouseButton _panButton;
     private Point _panStartScreen;
@@ -23,6 +24,18 @@ public partial class ArtWorkspaceView : UserControl
     private double _outputStartY;
     private double _outputStartWidth;
     private double _outputStartHeight;
+    private bool _isSelectingImageRegion;
+    private bool _hasRegionSelectionDrag;
+    private bool _hasValidRegionSelectionPreview;
+    private Point _regionSelectionStartScreen;
+    private Point _regionSelectionStartWorld;
+    private Point _regionSelectionCurrentWorld;
+    private ArtWorkspaceImageItemViewModel? _regionSelectionImage;
+    private bool _hadRegionBeforeDrag;
+    private double _originalRegionX;
+    private double _originalRegionY;
+    private double _originalRegionWidth;
+    private double _originalRegionHeight;
 
     public ArtWorkspaceView()
     {
@@ -40,6 +53,13 @@ public partial class ArtWorkspaceView : UserControl
         }
 
         ArtWorkspaceViewport.Focus();
+        if (_isSelectingImageRegion && e.ChangedButton is MouseButton.Middle or MouseButton.Right)
+        {
+            CancelInteraction(restoreStartValues: true);
+            e.Handled = true;
+            return;
+        }
+
         if (e.ChangedButton == MouseButton.Right && e.ClickCount >= 2)
         {
             CancelInteraction(restoreStartValues: true);
@@ -57,7 +77,11 @@ public partial class ArtWorkspaceView : UserControl
 
         if (e.ChangedButton == MouseButton.Left && !IsInteractiveSource(e.OriginalSource))
         {
-            viewModel.SelectImage(null);
+            if (!viewModel.IsImageRegionSelectToolActive)
+            {
+                viewModel.SelectImage(null);
+            }
+
             e.Handled = true;
         }
     }
@@ -71,7 +95,14 @@ public partial class ArtWorkspaceView : UserControl
         }
 
         viewModel.SelectImage(image);
-        if (!image.IsLocked)
+        if (viewModel.IsImageRegionSelectToolActive)
+        {
+            if (!image.IsMissing)
+            {
+                BeginImageRegionSelection(e.GetPosition(ArtWorkspaceViewport), viewModel);
+            }
+        }
+        else if (!image.IsLocked)
         {
             _movingImage = image;
             _moveStartScreen = e.GetPosition(ArtWorkspaceViewport);
@@ -86,6 +117,7 @@ public partial class ArtWorkspaceView : UserControl
     private void OutputFrame_OnPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
         if (ViewModel is not { } viewModel ||
+            !viewModel.IsSelectMoveToolActive ||
             ReferenceEquals(e.OriginalSource, ArtWorkspaceOutputResizeHandle) ||
             FindAncestor<Border>(e.OriginalSource as DependencyObject, ArtWorkspaceOutputResizeHandle) is not null)
         {
@@ -99,7 +131,7 @@ public partial class ArtWorkspaceView : UserControl
 
     private void OutputResizeHandle_OnPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
-        if (ViewModel is not { } viewModel)
+        if (ViewModel is not { IsSelectMoveToolActive: true } viewModel)
         {
             return;
         }
@@ -157,6 +189,43 @@ public partial class ArtWorkspaceView : UserControl
             return;
         }
 
+        if (_isSelectingImageRegion)
+        {
+            if (!ReferenceEquals(viewModel.SelectedImage, _regionSelectionImage))
+            {
+                ClearInteraction(releaseCapture: true);
+                return;
+            }
+
+            if (e.LeftButton != MouseButtonState.Pressed)
+            {
+                CompleteInteraction();
+                return;
+            }
+
+            _regionSelectionCurrentWorld = ScreenToWorld(screen, viewModel);
+            var screenDelta = screen - _regionSelectionStartScreen;
+            if (!_hasRegionSelectionDrag && screenDelta.Length < MinimumRegionDragScreenDistance)
+            {
+                e.Handled = true;
+                return;
+            }
+
+            _hasRegionSelectionDrag = true;
+            _hasValidRegionSelectionPreview = viewModel.SetSelectedImageRegionFromWorldPoints(
+                _regionSelectionStartWorld.X,
+                _regionSelectionStartWorld.Y,
+                _regionSelectionCurrentWorld.X,
+                _regionSelectionCurrentWorld.Y,
+                commit: false);
+            if (!_hasValidRegionSelectionPreview)
+            {
+                RestoreRegionSelection(viewModel);
+            }
+            e.Handled = true;
+            return;
+        }
+
         if (_outputInteraction != OutputInteraction.None)
         {
             if (e.LeftButton != MouseButtonState.Pressed)
@@ -193,6 +262,7 @@ public partial class ArtWorkspaceView : UserControl
     {
         if ((_isPanning && e.ChangedButton == _panButton) ||
             (_movingImage is not null && e.ChangedButton == MouseButton.Left) ||
+            (_isSelectingImageRegion && e.ChangedButton == MouseButton.Left) ||
             (_outputInteraction != OutputInteraction.None && e.ChangedButton == MouseButton.Left))
         {
             CompleteInteraction();
@@ -205,6 +275,12 @@ public partial class ArtWorkspaceView : UserControl
         var viewModel = ViewModel;
         if (viewModel is null)
         {
+            return;
+        }
+
+        if (_isSelectingImageRegion)
+        {
+            e.Handled = true;
             return;
         }
 
@@ -232,6 +308,14 @@ public partial class ArtWorkspaceView : UserControl
             return;
         }
 
+        if (e.Key == Key.Escape &&
+            ViewModel is { IsImageRegionSelectToolActive: true, HasSelectedImageRegion: true } viewModel)
+        {
+            viewModel.ClearSelectedImageRegion();
+            e.Handled = true;
+            return;
+        }
+
         if (e.Key == Key.Delete &&
             !IsInteractiveSource(Keyboard.FocusedElement) &&
             ViewModel?.RemoveSelectedImageCommand.CanExecute(null) == true)
@@ -245,7 +329,7 @@ public partial class ArtWorkspaceView : UserControl
     {
         if (HasActiveInteraction)
         {
-            CompleteInteraction(releaseCapture: false);
+            CancelInteraction(restoreStartValues: true);
         }
     }
 
@@ -253,7 +337,7 @@ public partial class ArtWorkspaceView : UserControl
     {
         if (HasActiveInteraction)
         {
-            CompleteInteraction();
+            CancelInteraction(restoreStartValues: true);
         }
     }
 
@@ -326,6 +410,31 @@ public partial class ArtWorkspaceView : UserControl
         ArtWorkspaceViewport.CaptureMouse();
     }
 
+    private void BeginImageRegionSelection(Point screen, ArtWorkspaceViewModel viewModel)
+    {
+        _isSelectingImageRegion = true;
+        _hasRegionSelectionDrag = false;
+        _hasValidRegionSelectionPreview = false;
+        _regionSelectionImage = viewModel.SelectedImage;
+        _regionSelectionStartScreen = screen;
+        _regionSelectionStartWorld = ScreenToWorld(screen, viewModel);
+        _regionSelectionCurrentWorld = _regionSelectionStartWorld;
+        if (viewModel.SelectedImageRegion is { } previousRegion)
+        {
+            _hadRegionBeforeDrag = true;
+            _originalRegionX = previousRegion.X;
+            _originalRegionY = previousRegion.Y;
+            _originalRegionWidth = previousRegion.Width;
+            _originalRegionHeight = previousRegion.Height;
+        }
+        else
+        {
+            _hadRegionBeforeDrag = false;
+        }
+
+        ArtWorkspaceViewport.CaptureMouse();
+    }
+
     private void CompleteInteraction(bool releaseCapture = true)
     {
         if (ViewModel is not { } viewModel)
@@ -341,6 +450,25 @@ public partial class ArtWorkspaceView : UserControl
         else if (_movingImage is { } image)
         {
             viewModel.MoveImage(image, image.X, image.Y, commit: true);
+        }
+        else if (_isSelectingImageRegion &&
+                 _hasRegionSelectionDrag &&
+                 _hasValidRegionSelectionPreview &&
+                 ReferenceEquals(viewModel.SelectedImage, _regionSelectionImage))
+        {
+            if (!viewModel.SetSelectedImageRegionFromWorldPoints(
+                _regionSelectionStartWorld.X,
+                _regionSelectionStartWorld.Y,
+                _regionSelectionCurrentWorld.X,
+                _regionSelectionCurrentWorld.Y,
+                commit: true))
+            {
+                RestoreRegionSelection(viewModel);
+            }
+        }
+        else if (_isSelectingImageRegion)
+        {
+            RestoreRegionSelection(viewModel);
         }
         else if (_outputInteraction != OutputInteraction.None)
         {
@@ -367,6 +495,10 @@ public partial class ArtWorkspaceView : UserControl
             {
                 viewModel.MoveImage(image, _moveStartX, _moveStartY, commit: false);
             }
+            else if (_isSelectingImageRegion)
+            {
+                RestoreRegionSelection(viewModel);
+            }
             else if (_outputInteraction != OutputInteraction.None)
             {
                 viewModel.SetOutputFrame(
@@ -385,6 +517,11 @@ public partial class ArtWorkspaceView : UserControl
     {
         _isPanning = false;
         _movingImage = null;
+        _isSelectingImageRegion = false;
+        _hasRegionSelectionDrag = false;
+        _hasValidRegionSelectionPreview = false;
+        _regionSelectionImage = null;
+        _hadRegionBeforeDrag = false;
         _outputInteraction = OutputInteraction.None;
         if (releaseCapture && ArtWorkspaceViewport.IsMouseCaptured)
         {
@@ -392,8 +529,36 @@ public partial class ArtWorkspaceView : UserControl
         }
     }
 
+    private void RestoreRegionSelection(ArtWorkspaceViewModel viewModel)
+    {
+        if (!ReferenceEquals(viewModel.SelectedImage, _regionSelectionImage))
+        {
+            return;
+        }
+
+        if (_hadRegionBeforeDrag)
+        {
+            if (!viewModel.SetSelectedImageRegionNormalized(
+                _originalRegionX,
+                _originalRegionY,
+                _originalRegionWidth,
+                _originalRegionHeight,
+                commit: false))
+            {
+                viewModel.ClearSelectedImageRegion(commit: false);
+            }
+        }
+        else
+        {
+            viewModel.ClearSelectedImageRegion(commit: false);
+        }
+    }
+
     private bool HasActiveInteraction =>
-        _isPanning || _movingImage is not null || _outputInteraction != OutputInteraction.None;
+        _isPanning ||
+        _movingImage is not null ||
+        _isSelectingImageRegion ||
+        _outputInteraction != OutputInteraction.None;
 
     private static Point ScreenToWorld(Point screen, ArtWorkspaceViewModel viewModel) =>
         new(

@@ -90,11 +90,20 @@ Shell 会在一次项目激活中协调项目清单、UI repository、Project Br
 工作区最多承载 128 个活动图片对象，预览按 640 px 最大边解码并使用有界版本缓存，避免合法大型素材把
 WPF 进程推入不可控内存占用。属性页的画布图片列表是选择与可见性的权威入口，因此隐藏对象仍可恢复。
 
+工具栏在默认选择移动和图像框选两种模式间切换。框选模式只对当前有效、可见、受管文件存在的所选图片
+开放；左键拖拽先把屏幕点换算为画布世界点，再围绕图片中心执行旋转逆变换，最终保存为未旋转图片本地
+`0..1` 归一化矩形。选框在图片的旋转视觉树内绘制，因此移动、缩放或旋转图片后仍覆盖同一组源像素；切换、
+隐藏、删除图片或发现文件缺失时会清除无效区域。画布只显示选框，属性与对话摘要只显示图片名称以及
+“整张图片/已框选局部区域”，不向普通用户显示几何数字。
+
 属性页通过 `IArtWorkspaceGenerationGateway` 显示受管 Agent 的不可用、忙碌或“已接入可用”状态；只有正式
 项目、可执行连接和空闲调度器同时满足时，`发送并生成` 才可执行。ViewModel 先冻结用户指令、输出框几何与
-像素尺寸、项目 `Assets` 根，以及所有可见参考图的 SHA-256、位置、尺寸、旋转、透明度和层级。生产 Gateway
-把它们转换为 provider-neutral `art-workspace` 单图任务、项目内 Run、Prompt 和 Manifest，并复用 Shell 唯一的
-Agent 调度器。实时 Agent 文本只更新对话和进度，不作为完成依据；只有 MCP 提交的本地 PNG 经过 Harness
+像素尺寸、项目 `Assets` 根，以及所有可见参考图的 SHA-256、位置、尺寸、旋转、透明度和层级。若提交时存在
+有效所选图片，它会自动成为本轮明确图片指代；局部框选则额外冻结图片本地归一化范围，并从源像素尺寸和
+冻结画布变换派生 `sourcePixelBounds` 与旋转后的 `canvasPolygon`。生产 Gateway 把它们转换为
+provider-neutral `art-workspace` Schema v2 单图任务、项目内 Run、Prompt 和 Manifest，并复用 Shell 唯一的
+Agent 调度器；Prompt 明确把“这张图/这块区域”等措辞绑定到该合同对象，不要求 Agent 重新猜测。实时 Agent
+文本只更新对话和进度，不作为完成依据；只有 MCP 提交的本地 PNG 经过 Harness
 归档、归一化、验证和原子提交并令任务达到 `Completed` 后，ViewModel 才保留 Generated 原件、复制受管预览
 到 `Assets\ArtWorkspace\References`，并按冻结输出框位置与尺寸放入画布。路径逃逸、重解析点和项目切换后的
 迟到结果都会被拒绝。
@@ -537,7 +546,8 @@ Shell 的 UI 编辑命令通过 `GatedCommand` 接到稳定 seam：非 UI 工作
 
 - Project manifest Schema v1：项目 ID、名称、工作流、创建/更新时间及项目级 Tilemap 参数。
 - UI Project Schema v2：documents、layers、Prefab library、editor session 和预留 `workflowGraphs`。
-- Art Workspace Schema v1：画布与视口、输出框、受管图片素材及其摆放、选择状态和创作意图对话。
+- Art Workspace Schema v1：画布与视口、输出框、受管图片素材及其摆放、选择状态、图片本地归一化框选和带
+  坐标隐藏摘要的创作意图对话；新增字段保持可选，因此旧 JSON 仍可读取。
 
 manifest、UI 与 Art Workspace 文件分别回退读取自己的 `.bak`，不能用其中一个文件代替另一个。UI Project Schema v2
 当前包含：

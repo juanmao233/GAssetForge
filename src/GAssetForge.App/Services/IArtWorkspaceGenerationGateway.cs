@@ -1,3 +1,5 @@
+using GAssetForge.Core.Generation;
+
 namespace GAssetForge.App.Services;
 
 public sealed record ArtWorkspaceGenerationOutputFrameSnapshot
@@ -71,6 +73,8 @@ public sealed record ArtWorkspaceGenerationRequest
     public ArtWorkspaceGenerationOutputFrameSnapshot OutputFrame { get; init; } = new();
 
     public ArtWorkspaceGenerationReferenceSnapshot[] VisibleReferences { get; init; } = [];
+
+    public ArtWorkspaceGenerationInstructionReference? InstructionReference { get; init; }
 }
 
 public sealed record ArtWorkspaceGenerationProgress

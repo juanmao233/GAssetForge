@@ -52,6 +52,7 @@ public static class ArtWorkspaceValidator
         }
 
         var imageIds = new HashSet<string>(StringComparer.Ordinal);
+        var imagesById = new Dictionary<string, ArtWorkspaceImageItem>(StringComparer.Ordinal);
         foreach (var image in document.Images)
         {
             ValidateImage(image);
@@ -64,6 +65,8 @@ public static class ArtWorkspaceValidator
             {
                 throw new InvalidDataException($"图片对象 {image.Id} 引用了不存在的素材 {image.AssetId}。");
             }
+
+            imagesById.Add(image.Id, image);
         }
 
         var messageIds = new HashSet<string>(StringComparer.Ordinal);
@@ -80,6 +83,26 @@ public static class ArtWorkspaceValidator
             !imageIds.Contains(document.SelectedImageId))
         {
             throw new InvalidDataException("所选图片 ID 不属于当前工作区。");
+        }
+
+
+        if (document.SelectedImageRegion is { } selectedRegion)
+        {
+            if (string.IsNullOrWhiteSpace(document.SelectedImageId) ||
+                !string.Equals(selectedRegion.ImageId, document.SelectedImageId, StringComparison.Ordinal) ||
+                !imagesById.ContainsKey(selectedRegion.ImageId))
+            {
+                throw new InvalidDataException("框选区域必须绑定当前工作区的所选图片。");
+            }
+
+            try
+            {
+                ArtWorkspaceImageRegionGeometry.ValidateRegion(selectedRegion, selectedRegion.ImageId);
+            }
+            catch (ArgumentException exception)
+            {
+                throw new InvalidDataException($"图片框选区域无效：{exception.Message}", exception);
+            }
         }
     }
 
@@ -190,6 +213,25 @@ public static class ArtWorkspaceValidator
 
         ValidateText(message.Text, "对话内容", 16000, allowEmpty: false);
         ValidateText(message.State, "对话状态", 64, allowEmpty: false);
+        if (!string.IsNullOrWhiteSpace(message.ReferenceImageId))
+        {
+            ValidateIdentifier(message.ReferenceImageId, "对话引用图片 ID");
+            if (!Guid.TryParseExact(message.ReferenceImageId, "N", out _))
+            {
+                throw new InvalidDataException("对话引用图片 ID 必须是 32 位 GUID。");
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(message.ReferenceSummary))
+        {
+            ValidateText(message.ReferenceSummary, "对话引用摘要", 512, allowEmpty: false);
+        }
+
+        if (string.IsNullOrWhiteSpace(message.ReferenceImageId) !=
+            string.IsNullOrWhiteSpace(message.ReferenceSummary))
+        {
+            throw new InvalidDataException("对话图片引用 ID 与可见摘要必须同时存在。");
+        }
     }
 
     private static void ValidateIdentifier(string value, string label) =>

@@ -194,7 +194,8 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
                     OutputPixelHeight = request.OutputFrame.PixelHeight,
                     OutputBackgroundHex = request.OutputFrame.BackgroundHex,
                     OutputRelativeDirectory = request.OutputFrame.OutputRelativeDirectory,
-                    VisibleReferences = constraintReferences
+                    VisibleReferences = constraintReferences,
+                    InstructionReference = request.InstructionReference
                 });
             var workspacePlan = _runWorkspaceService.CreateOutputPlan(
                 runWorkspace,
@@ -717,6 +718,7 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
         var normalizedReferences = (request.VisibleReferences ?? [])
             .Select(reference => ValidateAndNormalizeReference(projectRoot, reference))
             .ToArray();
+        ValidateInstructionReference(request.InstructionReference, normalizedReferences);
         return request with
         {
             ProjectRoot = projectRoot,
@@ -729,6 +731,45 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
             },
             VisibleReferences = normalizedReferences
         };
+    }
+
+    private static void ValidateInstructionReference(
+        ArtWorkspaceGenerationInstructionReference? instructionReference,
+        IReadOnlyCollection<ArtWorkspaceGenerationReferenceSnapshot> references)
+    {
+        if (instructionReference is null)
+        {
+            return;
+        }
+
+        if (!Guid.TryParseExact(instructionReference.ImageId, "N", out _) ||
+            references.All(reference =>
+                !string.Equals(reference.ImageId, instructionReference.ImageId, StringComparison.Ordinal)))
+        {
+            throw new InvalidDataException(
+                "指令所选图片必须属于本次冻结且可见的参考图集合。");
+        }
+
+        if (instructionReference.Region is { } region)
+        {
+            try
+            {
+                GAssetForge.Core.ArtWorkspaces.ArtWorkspaceImageRegionGeometry.ValidateRegion(
+                    new GAssetForge.Core.ArtWorkspaces.ArtWorkspaceImageRegionSelection
+                    {
+                        ImageId = instructionReference.ImageId,
+                        X = region.X,
+                        Y = region.Y,
+                        Width = region.Width,
+                        Height = region.Height
+                    },
+                    instructionReference.ImageId);
+            }
+            catch (ArgumentException exception)
+            {
+                throw new InvalidDataException($"指令框选区域无效：{exception.Message}", exception);
+            }
+        }
     }
 
     private static ArtWorkspaceGenerationReferenceSnapshot ValidateAndNormalizeReference(
@@ -861,14 +902,26 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
         string targetFullPath) =>
         $"已冻结美术工作区指令“{Compact(request.Instruction, 240)}”，" +
         $"目标画幅 {request.OutputFrame.PixelWidth}×{request.OutputFrame.PixelHeight}px，" +
-        $"包含 {request.VisibleReferences.Length} 张可见构图参考；预定产物路径为 {targetFullPath}。";
+        $"包含 {request.VisibleReferences.Length} 张可见构图参考" +
+        BuildInstructionReferenceDescription(request.InstructionReference) +
+        $"；预定产物路径为 {targetFullPath}。";
 
     private static string BuildCompletedDescription(
         ArtWorkspaceGenerationRequest request,
         string targetFullPath) =>
         $"已按美术工作区指令“{Compact(request.Instruction, 240)}”完成单图生成，" +
         $"冻结画幅 {request.OutputFrame.PixelWidth}×{request.OutputFrame.PixelHeight}px，" +
-        $"使用 {request.VisibleReferences.Length} 张可见构图参考；产物位于 {targetFullPath}。";
+        $"使用 {request.VisibleReferences.Length} 张可见构图参考" +
+        BuildInstructionReferenceDescription(request.InstructionReference) +
+        $"；产物位于 {targetFullPath}。";
+
+    private static string BuildInstructionReferenceDescription(
+        ArtWorkspaceGenerationInstructionReference? instructionReference) =>
+        instructionReference is null
+            ? string.Empty
+            : instructionReference.Region is null
+                ? "，并明确冻结了所选图片指代"
+                : "，并明确冻结了所选图片及局部区域指代";
 
     private static string Compact(string value, int maximumLength)
     {

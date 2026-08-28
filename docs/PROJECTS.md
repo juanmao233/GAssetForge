@@ -47,7 +47,8 @@ UI repository、锁定 Project 面板并进入所选业务主视图。
 - `Packages`：为后续包与扩展依赖预留。
 - `gassetforge.project.json`：manifest Schema v1，保存项目身份、名称、工作流、时间戳和 Tilemap 参数。
 - `ui-project.pfui.json`：UI Project Schema v2，保存页面、图层、Prefab 与编辑器会话数据。
-- `ArtWorkspace\art-workspace.v1.json`：Art Workspace Schema v1，保存画布、视口、输出框、图片摆放和创作意图。
+- `ArtWorkspace\art-workspace.v1.json`：Art Workspace Schema v1，保存画布、视口、输出框、图片摆放、当前
+  图片的本地归一化框选和创作意图；框选字段可选，旧版工作区可继续加载。
 
 重命名前创建的项目可能仍使用 `perspective-forge.project.json`。加载器会在 canonical 清单不存在时读取并
 继续保存旧文件名；不会在后台批量重写用户项目。新建项目始终使用 `gassetforge.project.json`。
@@ -66,6 +67,8 @@ Project 面板在项目激活后固定以 `<ProjectRoot>\Assets` 为根，不能
 - manifest、UI 项目和必要目录全部写入并重新验证成功，项目 ID 与名称必须一致。
 - manifest 与 UI 项目的主文件、备份文件均不能是符号链接或目录联接。
 - 美术工作区 JSON 和参考素材必须留在各自受管目录；只接受规范化相对路径，并拒绝目录逃逸和重解析点。
+- 美术工作区框选必须绑定当前所选图片，边界位于该图片未旋转本地空间的 `0..1` 范围；切换、隐藏、删除或
+  缺失图片时不得保留悬空框选。用户对话记录只保存图片名称和整图/局部摘要，不暴露源像素或画布坐标。
 
 创建过程先写入同父目录下的唯一 `.creating` staging 目录，验证后通过 `Directory.Move` 激活最终目录。
 失败时会清理 staging，不覆盖已有目标。
@@ -84,8 +87,10 @@ Project 面板在项目激活后固定以 `<ProjectRoot>\Assets` 为根，不能
 
 “美术工作区制作”是 ContentId 为 `art-workspace` 的独立中央文档，不属于 `WorkflowKind`，因此打开它不会
 改变项目创建时选择的业务模板。主画布和共享属性面板中的对话输入绑定同一个项目级 ViewModel。Agent/MCP
-达到可执行状态后，提交对话会冻结文字、输出框、可见参考图及其哈希/变换和项目 `Assets` 根，创建独立的
-`art-workspace` 单图持久任务，并通过共享 Agent 调度器执行。只有精确冻结目标中的 PNG 通过 Harness 校验并
+达到可执行状态后，提交对话会冻结文字、输出框、可见参考图及其哈希/变换和项目 `Assets` 根；当前有效可见
+选图会自动冻结为本轮整图指代，已有局部框选时同时冻结图片本地归一化范围，并派生源像素边界和旋转后的
+画布多边形。软件据此创建独立的 `art-workspace` 单图持久任务并通过共享 Agent 调度器执行，不让 Agent 猜测
+用户所说的“这张图”或“这块区域”。只有精确冻结目标中的 PNG 通过 Harness 校验并
 完成任务后，才保留 Generated 原件并复制为受管画布预览；项目切换后的迟到结果不会导入新项目。
 
 ## 重启恢复

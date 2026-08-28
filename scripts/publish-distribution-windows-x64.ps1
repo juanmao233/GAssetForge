@@ -18,6 +18,14 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
 $distributionOutputPath = [System.IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Path $distributionOutputPath -Force | Out-Null
 
+# This developer convenience publisher is not the Release Center. Never leave a formal
+# release manifest from an older package beside newly overwritten binaries, because that
+# would falsely report the old version/source provenance for the current executable.
+$staleReleaseInfoPath = Join-Path $distributionOutputPath "release-info.json"
+if (Test-Path -LiteralPath $staleReleaseInfoPath -PathType Leaf) {
+    Remove-Item -LiteralPath $staleReleaseInfoPath -Force
+}
+
 Write-Host "Publishing GAssetForge desktop executable..."
 dotnet publish $desktopProject `
     --configuration Release `

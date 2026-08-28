@@ -15,6 +15,9 @@ perspective, geometry, style, size, and delivery constraints.
 - **Art creation workspace** — the cross-workflow central `LayoutDocument` identified by
   `art-workspace`. It is not a `WorkflowKind`: its large canvas composes managed reference images
   around an output frame, while its Properties module captures the user's creation intent.
+- **Instruction image reference** — the valid visible canvas image selected when an Art Workspace
+  instruction is published. It explicitly binds deictic wording to either the whole image or one
+  image-local normalized region without exposing numeric coordinates in the conversation UI.
 - **Blueprint workspace** — the dockable, project-persisted graph editor for describing Agent,
   Harness tool, condition, and function-collection execution trajectories. Editing graphs are
   validated and frozen into versioned execution plans before a run is published.
@@ -56,9 +59,16 @@ perspective, geometry, style, size, and delivery constraints.
   layout XML stores only shell placement, never canvas images, output geometry, or conversation.
 - Art Workspace imports are managed, cancellable copies; active references are capped and every
   hidden image must remain recoverable from the Properties image list.
+- An Art Workspace local marquee is stored against the selected image in its unrotated normalized
+  `0..1` coordinate space. Moving, scaling, or rotating the canvas object must not change the source
+  pixels it denotes; switching, hiding, deleting, or losing that image must not leave a dangling
+  region reference.
 - An art-workspace instruction may start generation only when a formal project and an executable
   managed Agent connection are active. Publication freezes the intent, output frame, project
-  `Assets` root, and visible reference hashes/transforms into a durable `art-workspace` task.
+  `Assets` root, and visible reference hashes/transforms into a durable `art-workspace` task. The
+  currently selected valid image is also frozen automatically as this turn's explicit instruction
+  reference; a local region additionally freezes normalized bounds, source-pixel bounds, and the
+  rotation-aware canvas polygon, while user-visible conversation text remains coordinate-free.
 - Art Workspace Agent progress is advisory; only a validated PNG atomically delivered to the exact
   frozen target below `Assets/Generated/ArtWorkspace/<batchId>/Final` is a generation result. The
   canvas imports a managed preview copy only after that durable task reaches `Completed`.

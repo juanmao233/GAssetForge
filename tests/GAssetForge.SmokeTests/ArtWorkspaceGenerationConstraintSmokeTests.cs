@@ -30,7 +30,18 @@ internal static class ArtWorkspaceGenerationConstraintSmokeTests
                 OutputPixelHeight = 384,
                 OutputBackgroundHex = "#20242C",
                 OutputRelativeDirectory = "Generated/ArtWorkspace",
-                VisibleReferences = [upper, lower]
+                VisibleReferences = [upper, lower],
+                InstructionReference = new ArtWorkspaceGenerationInstructionReference
+                {
+                    ImageId = upper.ImageId,
+                    Region = new ArtWorkspaceGenerationRegion
+                    {
+                        X = 0.25d,
+                        Y = 0.2d,
+                        Width = 0.5d,
+                        Height = 0.4d
+                    }
+                }
             });
 
         Equal(ArtWorkspaceGenerationConstraintPackageBuilder.WorkflowId, package.WorkflowId,
@@ -76,8 +87,38 @@ internal static class ArtWorkspaceGenerationConstraintSmokeTests
         Near(180d, ReadDouble(first, "rotationDegrees"), 0.000000001d,
             "参考图旋转冻结");
 
+        var instructionReference = workspace["instructionReference"] as JsonObject
+            ?? throw new InvalidOperationException("Art Workspace 约束缺少 instructionReference。");
+        Equal(upper.ImageId, ReadString(instructionReference, "imageId"),
+            "对话图片指代必须冻结到当前所选图");
+        Equal(upper.AssetId, ReadString(instructionReference, "assetId"),
+            "对话图片指代必须同时冻结素材身份");
+        Equal(upper.Sha256, ReadString(instructionReference, "sha256"),
+            "对话图片指代必须自包含冻结 SHA-256");
+        Equal("region", ReadString(instructionReference, "mode"),
+            "局部图片指代必须明确声明 region 模式");
+        var region = instructionReference["region"] as JsonObject
+            ?? throw new InvalidOperationException("Art Workspace 约束缺少局部框选区域。");
+        Equal("image-local-normalized-unrotated", ReadString(region, "coordinateSpace"),
+            "区域坐标空间必须稳定绑定未旋转图片本地空间");
+        Near(0.25d, ReadDouble(region, "x"), 0.000000001d, "区域归一化 X");
+        Near(0.4d, ReadDouble(region, "height"), 0.000000001d, "区域归一化高度");
+        var sourcePixels = region["sourcePixelBounds"] as JsonObject
+            ?? throw new InvalidOperationException("Art Workspace 区域缺少源像素范围。");
+        Equal(128, ReadInt(sourcePixels, "x"), "区域源像素 X");
+        Equal(102, ReadInt(sourcePixels, "y"), "区域源像素 Y 应向外取整");
+        Equal(256, ReadInt(sourcePixels, "width"), "区域源像素宽度");
+        Equal(206, ReadInt(sourcePixels, "height"), "区域源像素高度应覆盖完整归一化范围");
+        var polygon = region["canvasPolygon"] as JsonArray
+            ?? throw new InvalidOperationException("Art Workspace 区域缺少冻结画布多边形。");
+        Equal(4, polygon.Count, "旋转图片局部区域必须冻结四个画布角点");
+        True(package.Prompt.Contains("这块区域", StringComparison.Ordinal) &&
+             package.Prompt.Contains(upper.Name, StringComparison.Ordinal),
+            "生成提示应明确用户局部指代绑定到哪张图片");
+
         True(package.Rules.Any(rule => rule.Key == "art-workspace.output.exact-size") &&
              package.Rules.Any(rule => rule.Key == "art-workspace.references.composition") &&
+             package.Rules.Any(rule => rule.Key == "art-workspace.instruction-reference.identity") &&
              package.Rules.Any(rule => rule.Key == "art-workspace.output-frame.snapshot"),
             "Art Workspace 应冻结尺寸、构图参考和输出框规则");
         GenerationInputValidator.ValidateConstraintPackage(package);
@@ -131,6 +172,46 @@ internal static class ArtWorkspaceGenerationConstraintSmokeTests
                     ]
                 }),
             "Art Workspace 不得冻结重复参考图 ID");
+        var onlyReference = CreateReference("唯一参考", 0, 0d, 0d, 1d);
+        Throws<ArgumentException>(
+            () => ArtWorkspaceGenerationConstraintPackageBuilder.Build(
+                new ArtWorkspaceGenerationConstraintInput
+                {
+                    RequestId = Guid.NewGuid().ToString("N"),
+                    Instruction = "非法图片指代",
+                    OutputFrameName = "输出框",
+                    OutputFrameWidth = 512d,
+                    OutputFrameHeight = 512d,
+                    VisibleReferences = [onlyReference],
+                    InstructionReference = new ArtWorkspaceGenerationInstructionReference
+                    {
+                        ImageId = Guid.NewGuid().ToString("N")
+                    }
+                }),
+            "对话图片指代不得指向本次冻结参考图之外的对象");
+        Throws<ArgumentException>(
+            () => ArtWorkspaceGenerationConstraintPackageBuilder.Build(
+                new ArtWorkspaceGenerationConstraintInput
+                {
+                    RequestId = Guid.NewGuid().ToString("N"),
+                    Instruction = "非法越界区域",
+                    OutputFrameName = "输出框",
+                    OutputFrameWidth = 512d,
+                    OutputFrameHeight = 512d,
+                    VisibleReferences = [onlyReference],
+                    InstructionReference = new ArtWorkspaceGenerationInstructionReference
+                    {
+                        ImageId = onlyReference.ImageId,
+                        Region = new ArtWorkspaceGenerationRegion
+                        {
+                            X = 0.8d,
+                            Y = 0.2d,
+                            Width = 0.4d,
+                            Height = 0.4d
+                        }
+                    }
+                }),
+            "对话局部区域不得越出所选图片边界");
     }
 
     private static ArtWorkspaceGenerationReference CreateReference(
