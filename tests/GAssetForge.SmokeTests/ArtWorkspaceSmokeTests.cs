@@ -322,10 +322,16 @@ internal static class ArtWorkspaceSmokeTests
         True(sizeViewModel.Activate(sizeProject.Paths.RootDirectory),
             "序列化大小测试应先激活正式项目");
         sizeViewModel.ConfigureGenerationGateway(new StubGenerationGateway());
-        var largeMessage = new string('界', 16000);
+        var largeMessage = new string(
+            '界',
+            ArtWorkspaceInstructionSegmentSemantics.MaximumSemanticLength -
+            ArtWorkspaceInstructionSegmentSemantics.ImageReferenceSemanticLength);
         for (var index = 0; index < 350; index++)
         {
-            sizeViewModel.Conversation.Add(CreateConversationMessage(index, largeMessage));
+            sizeViewModel.Conversation.Add(CreateConversationMessage(
+                index,
+                largeMessage,
+                includeInlineReference: true));
         }
 
         sizeViewModel.InstructionDraft = "不得令工作区 JSON 超过 16 MiB";
@@ -602,7 +608,14 @@ internal static class ArtWorkspaceSmokeTests
             viewModel.OutputRelativeDirectory = "Assets/Generated/ArtWorkspace/Characters";
             ArtWorkspaceCreationRequestedEventArgs? capturedRequest = null;
             viewModel.CreationRequested += (_, request) => capturedRequest = request;
-            viewModel.InstructionDraft = projectAInstruction;
+            var explicitReference = viewModel.InsertSelectedImageReference()
+                ?? throw new ArtWorkspaceSmokeTestException("所选图片应可创建显式内联引用 token");
+            True(viewModel.ReplaceInstructionDraftSegments(
+                    [
+                        ArtWorkspaceInstructionDraftSegment.CreateText(projectAInstruction),
+                        explicitReference
+                    ]),
+                "旧工作区主流程应显式插入所选图片 token，而不是提交时隐式附加当前选择");
             True(viewModel.SubmitInstructionCommand.CanExecute(null),
                 "非空创作指令应可提交到本地工作区");
             viewModel.SubmitInstructionCommand.Execute(null);
@@ -615,10 +628,12 @@ internal static class ArtWorkspaceSmokeTests
                 "创作指令应先作为本地对话记录持久化");
             True(viewModel.Conversation.Any(message =>
                     message.IsUser &&
-                    message.HasReferenceSummary &&
-                    message.ReferenceSummary.Contains(first.Name, StringComparison.Ordinal) &&
-                    message.ReferenceSummary.Contains("局部区域", StringComparison.Ordinal)),
-                "用户对话记录应显示坐标无关的冻结图片/区域引用摘要");
+                    message.HasStructuredSegments &&
+                    message.Segments.Any(segment =>
+                        segment.IsImageReference &&
+                        segment.ReferenceText.Contains(first.Name, StringComparison.Ordinal) &&
+                        segment.ReferenceText.Contains("局部框选", StringComparison.Ordinal))),
+                "用户对话记录应按插入位置持久化坐标无关的图片/区域 token");
             True(viewModel.Conversation.Any(message =>
                     message.IsAgent && message.State == "failed"),
                 "测试网关失败时应把原因写入可见 Agent 对话，而不是停留在等待适配器状态");
@@ -751,7 +766,15 @@ internal static class ArtWorkspaceSmokeTests
             });
         };
 
-        viewModel.InstructionDraft = "创建一枚轴对齐的蓝色游戏徽章。";
+        var selectedReferenceToken = viewModel.InsertSelectedImageReference()
+            ?? throw new ArtWorkspaceSmokeTestException("生成测试应能冻结所选图片局部 token");
+        True(viewModel.ReplaceInstructionDraftSegments(
+                [
+                    ArtWorkspaceInstructionDraftSegment.CreateText("创建一枚轴对齐的蓝色游戏徽章，并参考"),
+                    selectedReferenceToken,
+                    ArtWorkspaceInstructionDraftSegment.CreateText("中的局部造型。")
+                ]),
+            "生成测试应在对话中的明确位置插入图片 token");
         True(viewModel.SubmitInstructionCommand.CanExecute(null),
             "正式项目和可用 Agent 下发送并生成应可执行");
         viewModel.SubmitInstructionCommand.Execute(null);
@@ -769,14 +792,21 @@ internal static class ArtWorkspaceSmokeTests
         Equal(512, capturedRequest.OutputFrame.PixelWidth, "冻结请求输出像素宽度");
         Equal(384, capturedRequest.OutputFrame.PixelHeight, "冻结请求输出像素高度");
         Equal(1, capturedRequest.VisibleReferences.Length, "冻结请求应只包含当前可见参考图");
-        True(capturedRequest.InstructionReference is not null,
-            "冻结请求应独立携带当前所选图片指代");
-        Equal(selectedReference.Id, capturedRequest.InstructionReference!.ImageId,
-            "冻结请求所选图片 ID");
-        Near(0.125d, capturedRequest.InstructionReference.Region!.X,
-            "冻结请求局部区域 X");
-        Near(0.5d, capturedRequest.InstructionReference.Region.Height,
-            "冻结请求局部区域高度");
+        True(capturedRequest.InstructionReference is null,
+            "新版内联 token 请求不得同时写入会覆盖顺序的旧单图片指代字段");
+        var frozenInlineReference = capturedRequest.InstructionSegments.Single(segment =>
+            string.Equals(
+                segment.Kind,
+                ArtWorkspaceGenerationInstructionSegmentKinds.ImageReference,
+                StringComparison.Ordinal));
+        Equal(selectedReference.Id, frozenInlineReference.ImageId,
+            "冻结请求内联 token 所选图片 ID");
+        Equal(selectedReferenceToken.TokenId, frozenInlineReference.TokenId,
+            "冻结请求应保留编辑器 token 身份");
+        Near(0.125d, frozenInlineReference.Region!.X,
+            "冻结请求内联 token 局部区域 X");
+        Near(0.5d, frozenInlineReference.Region.Height,
+            "冻结请求内联 token 局部区域高度");
         True(Path.IsPathRooted(capturedRequest.VisibleReferences[0].AbsolutePath),
             "冻结参考图必须使用绝对受管路径");
         True(File.Exists(finalPath), "导入画布后必须保留 Generated 正式原件");
@@ -1193,14 +1223,33 @@ internal static class ArtWorkspaceSmokeTests
 
     private static ArtWorkspaceConversationMessageViewModel CreateConversationMessage(
         int index,
-        string text) =>
+        string text,
+        bool includeInlineReference = false) =>
         new(new ArtWorkspaceConversationMessage
         {
             Id = $"capacity-{index:D4}-{Guid.NewGuid():N}",
             Role = ArtWorkspaceMessageRole.User,
             Text = text,
             CreatedAtUtc = DateTimeOffset.UtcNow,
-            State = "captured"
+            State = "captured",
+            Segments = includeInlineReference
+                ?
+                [
+                    new ArtWorkspaceConversationSegment
+                    {
+                        Kind = ArtWorkspaceConversationSegmentKinds.Text,
+                        Text = text
+                    },
+                    new ArtWorkspaceConversationSegment
+                    {
+                        Kind = ArtWorkspaceConversationSegmentKinds.ImageReference,
+                        TokenId = Guid.NewGuid().ToString("N"),
+                        ImageId = Guid.NewGuid().ToString("N"),
+                        ImageName = "容量测试图片",
+                        DisplayLabel = "A"
+                    }
+                ]
+                : []
         });
 
     private static StackPanel FindBottomUiStatusPanel(MainWindow window)

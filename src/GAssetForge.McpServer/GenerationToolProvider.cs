@@ -459,10 +459,13 @@ internal sealed class GenerationToolProvider(
         var targetDivisor = GreatestCommonDivisor(output.Width, output.Height);
         var cliSize = ResolveCliSize(output.Width, output.Height);
         var styleNode = task.Constraints.Parameters?["style"] as JsonObject;
-        var referenceSourcePaths = await ResolveStyleReferenceSourcePathsAsync(
-                styleNode,
-                cancellationToken)
+        var delivery = ReadDeliveryOrThrow(task.Constraints)
+            ?? throw new InvalidDataException("图片生成合同缺少 parameters.delivery。");
+        var regionEdit = await ResolveRegionEditContractAsync(task, delivery, cancellationToken)
             .ConfigureAwait(false);
+        var referenceSourcePaths = regionEdit is null
+            ? await ResolveStyleReferenceSourcePathsAsync(styleNode, cancellationToken).ConfigureAwait(false)
+            : [regionEdit.BaseImagePath];
         return new
         {
             prompt = task.Constraints.Prompt,
@@ -488,8 +491,74 @@ internal sealed class GenerationToolProvider(
                 description = ReadOptionalString(styleNode, "description"),
                 prompt = ReadOptionalString(styleNode, "prompt"),
                 referenceSourcePaths
-            }
+            },
+            regionEdit = regionEdit is null
+                ? null
+                : new
+                {
+                    operationMode = regionEdit.Contract.OperationMode,
+                    baseImagePath = regionEdit.BaseImagePath,
+                    maskPath = regionEdit.MaskPath,
+                    preserveOutsideMask = regionEdit.Contract.PreserveOutsideMask,
+                    sourcePixelBounds = regionEdit.Contract.SourcePixelBounds,
+                    historyReferencePolicy = regionEdit.Contract.HistoryReferencePolicy
+                }
         };
+    }
+
+    private async Task<ResolvedRegionEditContract?> ResolveRegionEditContractAsync(
+        GenerationTask task,
+        GenerationDeliveryPlan delivery,
+        CancellationToken cancellationToken)
+    {
+        if (!ArtWorkspaceRegionEditContractComposer.HasDeclaredContract(task.Constraints))
+        {
+            return null;
+        }
+
+        if (!ArtWorkspaceRegionEditContractComposer.TryRead(task.Constraints, out var contract) ||
+            contract is null)
+        {
+            throw new InvalidDataException(
+                "生成任务声明了损坏或不受支持的 Art Workspace region-edit 合同，已拒绝降级为整图生成。");
+        }
+
+        var baseImagePath = contextResolver.ResolveDeliveryAssetPath(
+                contract.BaseImagePath,
+                delivery.AssetRoot,
+                requireExistingFile: true,
+                "region-edit authoritative base")
+            .FullPath;
+        var maskPath = contextResolver.ResolveDeliveryAssetPath(
+                contract.MaskPath,
+                delivery.AssetRoot,
+                requireExistingFile: true,
+                "region-edit mask")
+            .FullPath;
+        var actualBaseSha256 = await ComputeSha256Async(baseImagePath, cancellationToken)
+            .ConfigureAwait(false);
+        if (!string.Equals(
+                actualBaseSha256,
+                contract.BaseImageSha256,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                "region-edit authoritative base 内容与冻结 SHA-256 不一致，已拒绝继续编辑。");
+        }
+
+
+        var actualMaskSha256 = await ComputeSha256Async(maskPath, cancellationToken)
+            .ConfigureAwait(false);
+        if (!string.Equals(
+                actualMaskSha256,
+                contract.MaskSha256,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                "region-edit mask 内容与冻结 SHA-256 不一致，已拒绝继续编辑。");
+        }
+
+        return new ResolvedRegionEditContract(contract, baseImagePath, maskPath);
     }
 
     private async Task<string[]> ResolveStyleReferenceSourcePathsAsync(
@@ -621,7 +690,7 @@ internal sealed class GenerationToolProvider(
         }
     }
 
-    private static (string Size, bool PreservesExactAspectRatio) ResolveCliSize(int width, int height)
+    internal static (string Size, bool PreservesExactAspectRatio) ResolveCliSize(int width, int height)
     {
         const long minimumPixels = 655_360L;
         const long maximumPixels = 8_294_400L;
@@ -652,11 +721,84 @@ internal sealed class GenerationToolProvider(
             return ($"{candidateWidth}x{candidateHeight}", true);
         }
 
-        return width == height
-            ? ("1024x1024", false)
-            : width > height
-                ? ("1536x1024", false)
-                : ("1024x1536", false);
+        return ResolveNearestFlexibleCliSize(
+            width,
+            height,
+            minimumPixels,
+            maximumPixels,
+            maximumEdge);
+    }
+
+    private static (string Size, bool PreservesExactAspectRatio) ResolveNearestFlexibleCliSize(
+        int width,
+        int height,
+        long minimumPixels,
+        long maximumPixels,
+        int maximumEdge)
+    {
+        const int alignment = 16;
+        const int searchRadius = 12;
+        var originalPixels = (double)width * height;
+        var targetPixels = Math.Clamp(originalPixels, minimumPixels, maximumPixels);
+        var scale = Math.Sqrt(targetPixels / originalPixels);
+        var desiredWidth = Math.Clamp(width * scale, alignment, maximumEdge);
+        var desiredHeight = Math.Clamp(height * scale, alignment, maximumEdge);
+        var centerWidthUnits = Math.Max(1, (int)Math.Round(desiredWidth / alignment));
+        var centerHeightUnits = Math.Max(1, (int)Math.Round(desiredHeight / alignment));
+        var expectedAspect = width / (double)height;
+        var requireNoDownscale = width <= maximumEdge &&
+                                 height <= maximumEdge &&
+                                 originalPixels <= maximumPixels;
+        var bestScore = double.PositiveInfinity;
+        var bestWidth = 0;
+        var bestHeight = 0;
+
+        for (var widthUnits = Math.Max(1, centerWidthUnits - searchRadius);
+             widthUnits <= Math.Min(maximumEdge / alignment, centerWidthUnits + searchRadius);
+             widthUnits++)
+        {
+            var candidateWidth = widthUnits * alignment;
+            for (var heightUnits = Math.Max(1, centerHeightUnits - searchRadius);
+                 heightUnits <= Math.Min(maximumEdge / alignment, centerHeightUnits + searchRadius);
+                 heightUnits++)
+            {
+                var candidateHeight = heightUnits * alignment;
+                var candidatePixels = (long)candidateWidth * candidateHeight;
+                if (candidatePixels < minimumPixels || candidatePixels > maximumPixels ||
+                    (long)Math.Max(candidateWidth, candidateHeight) >
+                    3L * Math.Min(candidateWidth, candidateHeight) ||
+                    (requireNoDownscale &&
+                     (candidateWidth < width || candidateHeight < height)))
+                {
+                    continue;
+                }
+
+                var aspectError = Math.Abs(Math.Log(
+                    (candidateWidth / (double)candidateHeight) / expectedAspect));
+                var areaError = Math.Abs(Math.Log(candidatePixels / targetPixels));
+                var score = aspectError * 10d + areaError;
+                if (score >= bestScore)
+                {
+                    continue;
+                }
+
+                bestScore = score;
+                bestWidth = candidateWidth;
+                bestHeight = candidateHeight;
+            }
+        }
+
+        if (bestWidth == 0 || bestHeight == 0)
+        {
+            return width == height
+                ? ("1024x1024", false)
+                : width > height
+                    ? ("1536x1024", false)
+                    : ("1024x1536", false);
+        }
+
+        var exactAspect = (long)bestWidth * height == (long)bestHeight * width;
+        return ($"{bestWidth}x{bestHeight}", exactAspect);
     }
 
     private static int GreatestCommonDivisor(int left, int right)
@@ -912,10 +1054,14 @@ internal sealed class GenerationToolProvider(
         var fallbackPromptPath = Path.Combine(
             Path.GetDirectoryName(promptPlan.FullPath)!,
             $"{Path.GetFileNameWithoutExtension(promptPlan.FullPath)}.imagegen-cli.txt");
-        var referenceSourcePaths = await ResolveStyleReferenceSourcePathsAsync(
-                task.Constraints.Parameters?["style"] as JsonObject,
-                cancellationToken)
+        var regionEdit = await ResolveRegionEditContractAsync(task, delivery, cancellationToken)
             .ConfigureAwait(false);
+        var referenceSourcePaths = regionEdit is null
+            ? await ResolveStyleReferenceSourcePathsAsync(
+                    task.Constraints.Parameters?["style"] as JsonObject,
+                    cancellationToken)
+                .ConfigureAwait(false)
+            : [regionEdit.BaseImagePath];
         var fallbackRequest = new ImageGenerationCliFallbackRequest(
             task.Id,
             agentId,
@@ -926,7 +1072,11 @@ internal sealed class GenerationToolProvider(
                     task.Constraints.Output.Width,
                     task.Constraints.Output.Height)
                 .Size,
-            recommendedSourcePath);
+            recommendedSourcePath,
+            regionEdit?.Contract.OperationMode ?? "generate",
+            regionEdit?.BaseImagePath,
+            regionEdit?.MaskPath,
+            regionEdit?.Contract.PreserveOutsideMask ?? false);
 
         ImageGenerationCliFallbackResult fallback;
         using (var measurement = GenerationRunJournal.Measure(
@@ -1036,6 +1186,17 @@ internal sealed class GenerationToolProvider(
         catch (TilemapGeometryValidationException exception)
         {
             return await RecordRetryableGeometryFailureAsync(
+                    task,
+                    delivery,
+                    agentId,
+                    outputIndex,
+                    exception,
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (ArtWorkspaceRegionEditValidationException exception)
+        {
+            return await RecordRetryableRegionEditFailureAsync(
                     task,
                     delivery,
                     agentId,
@@ -1290,6 +1451,95 @@ internal sealed class GenerationToolProvider(
         };
     }
 
+    private async Task<object> RecordRetryableRegionEditFailureAsync(
+        GenerationTask task,
+        GenerationDeliveryPlan delivery,
+        string agentId,
+        int outputIndex,
+        ArtWorkspaceRegionEditValidationException exception,
+        CancellationToken cancellationToken)
+    {
+        var message =
+            $"output_region_edit_validation_failed: " +
+            $"{ArtWorkspaceRegionEditValidationException.ErrorCode}; {exception.Message}";
+        var failed = await taskStore.FailAsync(
+                task.Id,
+                agentId,
+                new GenerationTaskFailure
+                {
+                    Message = message,
+                    Code = "output_region_edit_validation_failed",
+                    SubCode = ArtWorkspaceRegionEditValidationException.ErrorCode,
+                    Stage = "output.region_edit_validation",
+                    Retryable = true
+                },
+                cancellationToken)
+            .ConfigureAwait(false);
+        var remainingAttempts = failed.RetryLineage is { } lineage
+            ? Math.Max(0, lineage.MaxAttempts - lineage.AttemptNumber)
+            : 0;
+        GenerationRunJournal.Append(
+            delivery,
+            new GenerationRunStageEvent
+            {
+                BatchId = failed.BatchId,
+                TaskId = failed.Id,
+                OutputIndex = outputIndex,
+                Stage = "output.region_edit_validation",
+                Status = "retryable_warning",
+                EndedAtUtc = failed.FailedAtUtc,
+                AgentId = agentId,
+                ObservedPath = exception.Diagnostics.CandidatePath,
+                ErrorCode = ArtWorkspaceRegionEditValidationException.ErrorCode,
+                Message = exception.Message
+            });
+        GenerationRunJournal.Append(
+            delivery,
+            new GenerationRunStageEvent
+            {
+                BatchId = failed.BatchId,
+                TaskId = failed.Id,
+                OutputIndex = outputIndex,
+                Stage = "task.fail",
+                Status = remainingAttempts > 0 ? "retryable" : "manual_intervention",
+                EndedAtUtc = failed.FailedAtUtc,
+                AgentId = agentId,
+                ObservedPath = exception.Diagnostics.DifferenceReportPath,
+                ErrorCode = "output_region_edit_validation_failed",
+                Message = message
+            });
+        return new
+        {
+            task = failed,
+            outcome = "retryable_validation_failure",
+            warning = true,
+            message =
+                "图片已生成、导入并按 mask 形成安全合成中间产物，但模型在允许区域外发生大面积重绘；" +
+                "任务未登记 Completed，桌面端可按重试策略继续。",
+            failure = new
+            {
+                code = "output_region_edit_validation_failed",
+                subCode = ArtWorkspaceRegionEditValidationException.ErrorCode,
+                stage = "output.region_edit_validation",
+                retryable = true,
+                remainingAttempts,
+                diagnostics = exception.Diagnostics
+            },
+            artifacts = new
+            {
+                modelOutputPaths = delivery.Workspace?.ModelOutputPaths ?? [],
+                normalizedPaths = delivery.StagingPaths,
+                processedPaths = delivery.Workspace?.ProcessedPaths ?? [],
+                targetPaths = delivery.TargetPaths,
+                exception.Diagnostics.BaseImagePath,
+                exception.Diagnostics.MaskPath,
+                exception.Diagnostics.CompositePath,
+                exception.Diagnostics.DifferenceReportPath,
+                exception.Diagnostics.DifferencePreviewPath
+            }
+        };
+    }
+
     private static GenerationGeometryDiagnostics ToJournalDiagnostics(
         TilemapGeometryDiagnostics diagnostics) =>
         new()
@@ -1373,6 +1623,11 @@ internal sealed class GenerationToolProvider(
 
         return true;
     }
+
+    private sealed record ResolvedRegionEditContract(
+        ArtWorkspaceRegionEditContract Contract,
+        string BaseImagePath,
+        string MaskPath);
 
     private static void EnsureClaimOwnershipForProcessing(GenerationTask task, string agentId)
     {

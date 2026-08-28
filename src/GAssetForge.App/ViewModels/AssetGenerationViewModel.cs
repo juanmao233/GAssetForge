@@ -1720,6 +1720,12 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                     itemId,
                     suggestedBaseName);
                 var retryConstraints = BuildAutomaticRetryConstraints(parent, attemptNumber);
+                retryConstraints = await _runWorkspaceService.PrepareArtWorkspaceRegionEditRetryAsync(
+                        runWorkspace,
+                        itemId,
+                        retryConstraints,
+                        previousDelivery)
+                    .ConfigureAwait(true);
                 retryConstraints = MaterialGenerationConstraintComposer.ReplaceDelivery(
                     retryConstraints,
                     new GenerationDeliveryPlan
@@ -1727,7 +1733,9 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                         AssetRoot = previousDelivery.AssetRoot,
                         OutputDirectory = finalOutputDirectory,
                         TargetPaths = [targetPath],
-                        StagingPaths = [normalizedPath],
+                        StagingPaths = previousDelivery.StagingPaths.Length > 0
+                            ? [normalizedPath]
+                            : [],
                         SuggestedBaseName = suggestedBaseName,
                         Workspace = workspacePlan
                     });
@@ -4949,12 +4957,18 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             .Trim('/')
             .Split('/', StringSplitOptions.RemoveEmptyEntries)
             .ToList();
-        if (segments.Count >= 3 &&
-            string.Equals(segments[^3], outputFolderName, StringComparison.OrdinalIgnoreCase) &&
-            Guid.TryParseExact(segments[^2], "N", out _) &&
+        var batchSegmentIndex = segments.Count - 2;
+        var containsWorkflowFolder = batchSegmentIndex > 0 && segments
+            .Take(batchSegmentIndex)
+            .Any(segment => string.Equals(
+                segment,
+                outputFolderName,
+                StringComparison.OrdinalIgnoreCase));
+        if (containsWorkflowFolder &&
+            Guid.TryParseExact(segments[batchSegmentIndex], "N", out _) &&
             string.Equals(segments[^1], "Final", StringComparison.OrdinalIgnoreCase))
         {
-            segments[^2] = retryBatchId;
+            segments[batchSegmentIndex] = retryBatchId;
             return string.Join('/', segments);
         }
 
@@ -4968,6 +4982,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
     {
         TilemapConstraintPackageBuilder.WorkflowId => "Tilemap",
         IconDesignConstraintPackageBuilder.WorkflowId => "Icon",
+        ArtWorkspaceGenerationConstraintPackageBuilder.WorkflowId => "ArtWorkspace",
         _ => "GeneratedAsset"
     };
 
@@ -4975,6 +4990,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
     {
         TilemapConstraintPackageBuilder.WorkflowId => "tilemap",
         IconDesignConstraintPackageBuilder.WorkflowId => "icon",
+        ArtWorkspaceGenerationConstraintPackageBuilder.WorkflowId => "art_workspace",
         _ => "asset"
     };
 

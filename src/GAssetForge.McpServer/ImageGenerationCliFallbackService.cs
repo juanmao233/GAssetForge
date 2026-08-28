@@ -1,9 +1,11 @@
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
+using SixLabors.ImageSharp.Processing;
 
 namespace GAssetForge.McpServer;
 
@@ -21,7 +23,11 @@ internal sealed record ImageGenerationCliFallbackRequest(
     string PromptFilePath,
     IReadOnlyList<string> ReferenceSourcePaths,
     string CliSize,
-    string RecommendedSourcePath);
+    string RecommendedSourcePath,
+    string OperationMode = "generate",
+    string? BaseImagePath = null,
+    string? MaskPath = null,
+    bool PreserveOutsideMask = false);
 
 internal sealed record ImageGenerationCliFallbackResult(
     string SourcePath,
@@ -181,6 +187,7 @@ internal sealed class ImageGenerationCliFallbackService : IImageGenerationCliFal
             try
             {
                 EnsureUsablePng(normalized.RecommendedSourcePath, "既有 recommendedSourcePath");
+                EnsureRegionEditRecommendedOutputSize(normalized);
                 return new ImageGenerationCliFallbackResult(
                     normalized.RecommendedSourcePath,
                     "未调用（已有有效 PNG）",
@@ -196,10 +203,34 @@ internal sealed class ImageGenerationCliFallbackService : IImageGenerationCliFal
         }
 
         await EnsureFrozenPromptFileAsync(normalized, cancellationToken).ConfigureAwait(false);
+        var executionRequest = await PrepareRegionEditApiInputsAsync(normalized, cancellationToken)
+            .ConfigureAwait(false);
+        if (!PathsEqual(executionRequest.CliOutputPath, normalized.RecommendedSourcePath) &&
+            File.Exists(executionRequest.CliOutputPath))
+        {
+            try
+            {
+                EnsureUsablePng(executionRequest.CliOutputPath, "既有 region-edit API raw");
+                await FinalizeRegionEditOutputAsync(executionRequest, cancellationToken)
+                    .ConfigureAwait(false);
+                EnsureUsablePng(normalized.RecommendedSourcePath, "恢复的 region-edit 可提交输出");
+                EnsureRegionEditRecommendedOutputSize(normalized);
+                return new ImageGenerationCliFallbackResult(
+                    normalized.RecommendedSourcePath,
+                    "未调用（已恢复 full API raw）",
+                    string.Empty,
+                    "检测到本任务完整的 Image API raw；已按冻结 transform 无插值裁切并恢复可提交 PNG。",
+                    AlreadyExisted: true);
+            }
+            catch (ImageGenerationCliFallbackException)
+            {
+                _ = QuarantineInvalidOutputForRetry(executionRequest.CliOutputPath);
+            }
+        }
+
         var probe = await _probe.ProbeAsync(cancellationToken).ConfigureAwait(false);
         ValidateProbeResult(probe);
-
-        var arguments = BuildArguments(normalized, probe);
+        var arguments = BuildArguments(executionRequest, probe);
         var environment = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
         foreach (var variable in probe.ForwardedEnvironmentVariables)
         {
@@ -245,7 +276,10 @@ internal sealed class ImageGenerationCliFallbackService : IImageGenerationCliFal
                 $"图片 CLI 兜底失败（task {ShortId(normalized.TaskId)}，{reason}）：{detail}");
         }
 
-        EnsureUsablePng(normalized.RecommendedSourcePath, "image_gen.py 输出");
+        EnsureUsablePng(executionRequest.CliOutputPath, "image_gen.py 输出");
+        await FinalizeRegionEditOutputAsync(executionRequest, cancellationToken).ConfigureAwait(false);
+        EnsureUsablePng(normalized.RecommendedSourcePath, "image_gen.py 可提交输出");
+        EnsureRegionEditRecommendedOutputSize(normalized);
         return new ImageGenerationCliFallbackResult(
             normalized.RecommendedSourcePath,
             probe.PythonCommand.DisplayText,
@@ -338,6 +372,42 @@ internal sealed class ImageGenerationCliFallbackService : IImageGenerationCliFal
             }
         }
 
+        var operationMode = RequireText(request.OperationMode, nameof(request.OperationMode), 32);
+        string? baseImagePath = null;
+        string? maskPath = null;
+        if (string.Equals(
+                operationMode,
+                GAssetForge.Core.Generation.ArtWorkspaceRegionEditContract.RegionEditOperationMode,
+                StringComparison.Ordinal))
+        {
+            if (!request.PreserveOutsideMask)
+            {
+                throw new InvalidDataException(
+                    "region-edit CLI fallback 必须保留 mask 外像素，不能降级为整图生成。");
+            }
+
+            baseImagePath = NormalizeAbsolutePath(request.BaseImagePath, nameof(request.BaseImagePath));
+            maskPath = NormalizeAbsolutePath(request.MaskPath, nameof(request.MaskPath));
+            if (references.Length != 1 || !PathsEqual(references[0], baseImagePath))
+            {
+                throw new InvalidDataException(
+                    "region-edit CLI fallback 必须且只能把 authoritative base 作为唯一参考图片。");
+            }
+
+            EnsureExistingRegularPng(baseImagePath, "region-edit authoritative base");
+            EnsureExistingRegularPng(maskPath, "region-edit mask");
+            EnsureCompatibleRegionMask(baseImagePath, maskPath);
+            if (string.Equals(cliSize, "auto", StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException(
+                    "region-edit CLI fallback 必须冻结明确的 WIDTHxHEIGHT API 画布，不能使用 auto。");
+            }
+        }
+        else if (!string.Equals(operationMode, "generate", StringComparison.Ordinal))
+        {
+            throw new InvalidDataException($"不支持的图片 CLI fallback operationMode：{operationMode}");
+        }
+
         var outputDirectory = Path.GetDirectoryName(sourcePath)
             ?? throw new InvalidDataException("recommendedSourcePath 缺少父目录。");
         if (!Directory.Exists(outputDirectory))
@@ -352,7 +422,13 @@ internal sealed class ImageGenerationCliFallbackService : IImageGenerationCliFal
             promptFilePath,
             references,
             cliSize,
-            sourcePath);
+            sourcePath,
+            operationMode,
+            baseImagePath,
+            maskPath,
+            request.PreserveOutsideMask,
+            sourcePath,
+            null);
     }
 
     private static async Task EnsureFrozenPromptFileAsync(
@@ -407,7 +483,19 @@ internal sealed class ImageGenerationCliFallbackService : IImageGenerationCliFal
         };
         arguments.AddRange(probe.PythonCommand.PrefixArguments);
         arguments.Add(probe.ImageGenScriptPath);
-        arguments.Add(request.ReferenceSourcePaths.Count == 0 ? "generate" : "edit");
+        var isRegionEdit = string.Equals(
+            request.OperationMode,
+            GAssetForge.Core.Generation.ArtWorkspaceRegionEditContract.RegionEditOperationMode,
+            StringComparison.Ordinal);
+        arguments.Add(isRegionEdit || request.ReferenceSourcePaths.Count > 0 ? "edit" : "generate");
+        if (isRegionEdit)
+        {
+            arguments.Add("--image");
+            arguments.Add(request.BaseImagePath!);
+            arguments.Add("--mask");
+            arguments.Add(request.MaskPath!);
+        }
+
         arguments.Add("--prompt-file");
         arguments.Add(request.PromptFilePath);
         arguments.Add("--size");
@@ -417,16 +505,275 @@ internal sealed class ImageGenerationCliFallbackService : IImageGenerationCliFal
         arguments.Add("--n");
         arguments.Add("1");
         arguments.Add("--no-augment");
-        foreach (var reference in request.ReferenceSourcePaths)
+        foreach (var reference in isRegionEdit ? [] : request.ReferenceSourcePaths)
         {
             arguments.Add("--image");
             arguments.Add(reference);
         }
 
         arguments.Add("--out");
-        arguments.Add(request.RecommendedSourcePath);
+        arguments.Add(request.CliOutputPath);
         return arguments;
     }
+
+    private static async Task<NormalizedRequest> PrepareRegionEditApiInputsAsync(
+        NormalizedRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (!string.Equals(
+                request.OperationMode,
+                GAssetForge.Core.Generation.ArtWorkspaceRegionEditContract.RegionEditOperationMode,
+                StringComparison.Ordinal))
+        {
+            return request;
+        }
+
+        var (targetWidth, targetHeight) = ParseExplicitCliSize(request.CliSize);
+        using var baseImage = Image.Load<Rgba32>(request.BaseImagePath!);
+        using var mask = Image.Load<Rgba32>(request.MaskPath!);
+        if (targetWidth == baseImage.Width && targetHeight == baseImage.Height)
+        {
+            return request with { CliOutputPath = request.RecommendedSourcePath };
+        }
+
+        if (targetWidth < baseImage.Width || targetHeight < baseImage.Height)
+        {
+            throw new ImageGenerationCliFallbackException(
+                $"region-edit API 画布 {targetWidth}x{targetHeight} 小于 authoritative base " +
+                $"{baseImage.Width}x{baseImage.Height}；为避免缩放破坏 mask 坐标，已拒绝生成。");
+        }
+
+        var directory = Path.GetDirectoryName(request.BaseImagePath!)
+            ?? throw new InvalidDataException("region-edit authoritative base 缺少父目录。");
+        var apiBasePath = Path.Combine(directory, $"api-input-base-{targetWidth}x{targetHeight}.png");
+        var apiMaskPath = Path.Combine(directory, $"api-input-mask-{targetWidth}x{targetHeight}.png");
+        var apiRawOutputPath = Path.Combine(directory, $"api-model-raw-{targetWidth}x{targetHeight}.png");
+        var transformPath = Path.Combine(directory, "api-canvas-transform.v1.json");
+        var offsetX = (targetWidth - baseImage.Width) / 2;
+        var offsetY = (targetHeight - baseImage.Height) / 2;
+        using var paddedBase = new Image<Rgba32>(targetWidth, targetHeight, new Rgba32(0, 0, 0, 0));
+        using var paddedMask = new Image<Rgba32>(
+            targetWidth,
+            targetHeight,
+            new Rgba32(255, 255, 255, 255));
+        for (var y = 0; y < baseImage.Height; y++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            for (var x = 0; x < baseImage.Width; x++)
+            {
+                paddedBase[x + offsetX, y + offsetY] = baseImage[x, y];
+                paddedMask[x + offsetX, y + offsetY] = mask[x, y];
+            }
+        }
+
+        await SavePngAtomicAsync(paddedBase, apiBasePath, cancellationToken).ConfigureAwait(false);
+        await SavePngAtomicAsync(paddedMask, apiMaskPath, cancellationToken).ConfigureAwait(false);
+        var transform = new RegionEditCanvasTransform(
+            baseImage.Width,
+            baseImage.Height,
+            targetWidth,
+            targetHeight,
+            offsetX,
+            offsetY,
+            apiBasePath,
+            apiMaskPath,
+            apiRawOutputPath,
+            request.RecommendedSourcePath,
+            transformPath);
+        await WriteJsonAtomicAsync(transform, transformPath, cancellationToken).ConfigureAwait(false);
+        return request with
+        {
+            BaseImagePath = apiBasePath,
+            MaskPath = apiMaskPath,
+            CliOutputPath = apiRawOutputPath,
+            RegionEditTransform = transform
+        };
+    }
+
+    private static void EnsureRegionEditRecommendedOutputSize(NormalizedRequest request)
+    {
+        if (!string.Equals(
+                request.OperationMode,
+                GAssetForge.Core.Generation.ArtWorkspaceRegionEditContract.RegionEditOperationMode,
+                StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        using var baseImage = Image.Load<Rgba32>(request.BaseImagePath!);
+        using var output = Image.Load<Rgba32>(request.RecommendedSourcePath);
+        if (output.Width != baseImage.Width || output.Height != baseImage.Height)
+        {
+            throw new ImageGenerationCliFallbackException(
+                $"region-edit 可提交输出尺寸必须等于 authoritative base " +
+                $"{baseImage.Width}x{baseImage.Height}，实际为 {output.Width}x{output.Height}。");
+        }
+    }
+
+    private static async Task FinalizeRegionEditOutputAsync(
+        NormalizedRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request.RegionEditTransform is not { } transform)
+        {
+            if (!PathsEqual(request.CliOutputPath, request.RecommendedSourcePath))
+            {
+                throw new InvalidDataException("region-edit 无变换合同但 CLI 输出路径与提交路径不一致。");
+            }
+
+            return;
+        }
+
+        using var raw = Image.Load<Rgba32>(request.CliOutputPath);
+        if (raw.Width != transform.ApiWidth || raw.Height != transform.ApiHeight)
+        {
+            throw new ImageGenerationCliFallbackException(
+                $"region-edit API raw 输出尺寸必须是 {transform.ApiWidth}x{transform.ApiHeight}，" +
+                $"实际为 {raw.Width}x{raw.Height}；full raw 已保留用于诊断。");
+        }
+
+        if (transform.OffsetX < 0 || transform.OffsetY < 0 ||
+            transform.OffsetX > raw.Width - transform.BaseWidth ||
+            transform.OffsetY > raw.Height - transform.BaseHeight)
+        {
+            throw new InvalidDataException("region-edit API 画布裁切变换越界。");
+        }
+
+        using var cropped = raw.Clone(context => context.Crop(new Rectangle(
+            transform.OffsetX,
+            transform.OffsetY,
+            transform.BaseWidth,
+            transform.BaseHeight)));
+        await SavePngAtomicAsync(cropped, request.RecommendedSourcePath, cancellationToken)
+            .ConfigureAwait(false);
+    }
+
+    private static (int Width, int Height) ParseExplicitCliSize(string value)
+    {
+        var separator = value.IndexOf('x');
+        if (separator <= 0 ||
+            !int.TryParse(value.AsSpan(0, separator), out var width) ||
+            !int.TryParse(value.AsSpan(separator + 1), out var height) ||
+            width <= 0 || height <= 0)
+        {
+            throw new InvalidDataException($"region-edit CLI 画布尺寸无效：{value}");
+        }
+
+        return (width, height);
+    }
+
+    private static async Task SavePngAtomicAsync(
+        Image<Rgba32> image,
+        string targetPath,
+        CancellationToken cancellationToken)
+    {
+        var temporaryPath = $"{targetPath}.{Guid.NewGuid():N}.tmp.png";
+        try
+        {
+            await image.SaveAsPngAsync(temporaryPath, cancellationToken).ConfigureAwait(false);
+            File.Move(temporaryPath, targetPath, overwrite: true);
+        }
+        finally
+        {
+            TryDelete(temporaryPath);
+        }
+    }
+
+    private static async Task WriteJsonAtomicAsync<T>(
+        T value,
+        string targetPath,
+        CancellationToken cancellationToken)
+    {
+        var temporaryPath = $"{targetPath}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            await using (var stream = new FileStream(
+                             temporaryPath,
+                             FileMode.CreateNew,
+                             FileAccess.Write,
+                             FileShare.None,
+                             64 * 1024,
+                             FileOptions.Asynchronous | FileOptions.WriteThrough))
+            {
+                await JsonSerializer.SerializeAsync(stream, value, cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+                await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            File.Move(temporaryPath, targetPath, overwrite: true);
+        }
+        finally
+        {
+            TryDelete(temporaryPath);
+        }
+    }
+
+    private static void EnsureExistingRegularPng(string path, string label)
+    {
+        if (!File.Exists(path))
+        {
+            throw new FileNotFoundException($"{label} 不存在。", path);
+        }
+
+        if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidDataException($"{label} 不能是符号链接或重解析点：{path}");
+        }
+
+        if (!string.Equals(Path.GetExtension(path), ".png", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException($"{label} 必须是 PNG：{path}");
+        }
+
+        EnsureUsablePng(path, label);
+    }
+
+    private static void EnsureCompatibleRegionMask(string baseImagePath, string maskPath)
+    {
+        using var baseImage = Image.Load<Rgba32>(baseImagePath);
+        using var mask = Image.Load<Rgba32>(maskPath);
+        if (baseImage.Width != mask.Width || baseImage.Height != mask.Height)
+        {
+            throw new InvalidDataException(
+                "region-edit mask 必须与 authoritative base 具有完全相同的像素尺寸。");
+        }
+
+        var hasEditablePixels = false;
+        var hasPreservedPixels = false;
+        mask.ProcessPixelRows(accessor =>
+        {
+            for (var y = 0; y < mask.Height; y++)
+            {
+                var row = accessor.GetRowSpan(y);
+                foreach (var pixel in row)
+                {
+                    if (pixel.A == byte.MinValue)
+                    {
+                        hasEditablePixels = true;
+                    }
+                    else if (pixel.A == byte.MaxValue)
+                    {
+                        hasPreservedPixels = true;
+                    }
+                    else
+                    {
+                        throw new InvalidDataException(
+                            "region-edit mask 只能使用 0/255 Alpha 区分编辑区与保留区。");
+                    }
+                }
+            }
+        });
+        if (!hasEditablePixels || !hasPreservedPixels)
+        {
+            throw new InvalidDataException(
+                "region-edit mask 必须同时包含透明可编辑区和不透明保留区。");
+        }
+    }
+
+    private static bool PathsEqual(string left, string right) => string.Equals(
+        Path.GetFullPath(left),
+        Path.GetFullPath(right),
+        OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal);
 
     private static void ValidateProbeResult(ImageGenerationCliFallbackProbeResult probe)
     {
@@ -607,7 +954,26 @@ internal sealed class ImageGenerationCliFallbackService : IImageGenerationCliFal
         string PromptFilePath,
         IReadOnlyList<string> ReferenceSourcePaths,
         string CliSize,
-        string RecommendedSourcePath);
+        string RecommendedSourcePath,
+        string OperationMode,
+        string? BaseImagePath,
+        string? MaskPath,
+        bool PreserveOutsideMask,
+        string CliOutputPath,
+        RegionEditCanvasTransform? RegionEditTransform);
+
+    private sealed record RegionEditCanvasTransform(
+        int BaseWidth,
+        int BaseHeight,
+        int ApiWidth,
+        int ApiHeight,
+        int OffsetX,
+        int OffsetY,
+        string ApiBasePath,
+        string ApiMaskPath,
+        string ApiRawOutputPath,
+        string RecommendedSourcePath,
+        string TransformPath);
 }
 
 internal sealed class ImageGenerationCliFallbackProbe : IImageGenerationCliFallbackProbe

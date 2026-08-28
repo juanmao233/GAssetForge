@@ -44,11 +44,13 @@ UI repository、锁定 Project 面板并进入所选业务主视图。
 - `Assets\ArtWorkspace\References`：美术工作区导入参考图的受管副本；工作区 JSON 不引用项目外绝对路径。
 - `Assets\Generated`：AI 生成内容的默认交付目录。
 - `Assets\Generated\ArtWorkspace\<batchId>\Final`：美术工作区 Agent 生成的冻结最终交付目录；模型原图和确定性中间步骤仍保留在同项目的 GAssetForge Run 中。
+- `Assets\Generated\GAssetForge\Runs\<batchId>\25-region-edit\<itemId>`：局部编辑的唯一基准图、Alpha mask、区域预览、独立合同、安全 composite 与选区外差异报告；该目录由软件创建，Agent 不得改写合同或选择历史图片。
 - `Packages`：为后续包与扩展依赖预留。
 - `gassetforge.project.json`：manifest Schema v1，保存项目身份、名称、工作流、时间戳和 Tilemap 参数。
 - `ui-project.pfui.json`：UI Project Schema v2，保存页面、图层、Prefab 与编辑器会话数据。
 - `ArtWorkspace\art-workspace.v1.json`：Art Workspace Schema v1，保存画布、视口、输出框、图片摆放、当前
-  图片的本地归一化框选和创作意图；框选字段可选，旧版工作区可继续加载。
+  图片的本地归一化框选，以及由有序文字和图片 token 构成的创作意图。每个 token 冻结插入时的图片名称和
+  整图/局部范围；segments 与框选字段均保持可选，旧版纯文本或单图片摘要工作区可继续加载。
 
 重命名前创建的项目可能仍使用 `perspective-forge.project.json`。加载器会在 canonical 清单不存在时读取并
 继续保存旧文件名；不会在后台批量重写用户项目。新建项目始终使用 `gassetforge.project.json`。
@@ -67,8 +69,10 @@ Project 面板在项目激活后固定以 `<ProjectRoot>\Assets` 为根，不能
 - manifest、UI 项目和必要目录全部写入并重新验证成功，项目 ID 与名称必须一致。
 - manifest 与 UI 项目的主文件、备份文件均不能是符号链接或目录联接。
 - 美术工作区 JSON 和参考素材必须留在各自受管目录；只接受规范化相对路径，并拒绝目录逃逸和重解析点。
-- 美术工作区框选必须绑定当前所选图片，边界位于该图片未旋转本地空间的 `0..1` 范围；切换、隐藏、删除或
-  缺失图片时不得保留悬空框选。用户对话记录只保存图片名称和整图/局部摘要，不暴露源像素或画布坐标。
+- 美术工作区框选必须绑定当前所选图片，边界位于该图片未旋转本地空间的 `0..1` 范围。插入对话 token 时
+  独立冻结当时的整图或局部范围；切换当前选图不得改写已有 token，而隐藏、删除、修改或缺失图片必须令
+  引用 fail-closed 并阻止提交。用户对话记录以有序 segments 保存文字、图片名称和整图/局部摘要，不暴露
+  受管路径、ID、哈希、源像素或画布坐标；缺少 segments 的旧 JSON 仍回退读取纯文本字段。
 
 创建过程先写入同父目录下的唯一 `.creating` staging 目录，验证后通过 `Directory.Move` 激活最终目录。
 失败时会清理 staging，不覆盖已有目标。
@@ -86,11 +90,17 @@ Project 面板在项目激活后固定以 `<ProjectRoot>\Assets` 为根，不能
 把旧任务改投到新项目。
 
 “美术工作区制作”是 ContentId 为 `art-workspace` 的独立中央文档，不属于 `WorkflowKind`，因此打开它不会
-改变项目创建时选择的业务模板。主画布和共享属性面板中的对话输入绑定同一个项目级 ViewModel。Agent/MCP
-达到可执行状态后，提交对话会冻结文字、输出框、可见参考图及其哈希/变换和项目 `Assets` 根；当前有效可见
-选图会自动冻结为本轮整图指代，已有局部框选时同时冻结图片本地归一化范围，并派生源像素边界和旋转后的
-画布多边形。软件据此创建独立的 `art-workspace` 单图持久任务并通过共享 Agent 调度器执行，不让 Agent 猜测
-用户所说的“这张图”或“这块区域”。只有精确冻结目标中的 PNG 通过 Harness 校验并
+改变项目创建时选择的业务模板。主画布和共享属性面板中的对话输入绑定同一个项目级 ViewModel。用户可在
+光标处依次插入 A/B/C 等图片 token，并用两侧文字分别指定护甲、发型、角色等职责；每个 token 在插入时冻结
+当前图片及整图/局部框选，同图可重复引用且之后的选择变化不会改写它。Agent/MCP 达到可执行状态后，提交
+对话会冻结有序 text/image segments、输出框、可见参考图及其哈希/变换和项目 `Assets` 根；每个局部 token
+还派生源像素边界和旋转后的画布多边形。软件据此创建 Schema v3 `art-workspace` 单图持久任务并通过共享
+Agent 调度器执行，不让 Agent 猜测任一“这张图”对应的素材或局部。失效 token 会阻止发布，不会改绑当前
+选图。若指令只有一个局部图片 token，软件会建立 `region-edit`：该 token 图片是唯一 authoritative base，
+历史画布版本排除，base/mask 均冻结 SHA-256，输出画幅必须与 base 像素尺寸一致；最终由 Harness 强制合成，
+mask 外像素必须完全保留，越界整图重绘只产生带中间产物的可重试失败。旧纯文本 JSON 和旧单
+`InstructionReference` 合同继续兼容读取。只有精确冻结目标中的 PNG 通过
+Harness 校验并
 完成任务后，才保留 Generated 原件并复制为受管画布预览；项目切换后的迟到结果不会导入新项目。
 
 ## 重启恢复

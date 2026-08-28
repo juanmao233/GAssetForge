@@ -213,6 +213,7 @@ public static class ArtWorkspaceValidator
 
         ValidateText(message.Text, "对话内容", 16000, allowEmpty: false);
         ValidateText(message.State, "对话状态", 64, allowEmpty: false);
+        ValidateConversationSegments(message.Segments);
         if (!string.IsNullOrWhiteSpace(message.ReferenceImageId))
         {
             ValidateIdentifier(message.ReferenceImageId, "对话引用图片 ID");
@@ -231,6 +232,108 @@ public static class ArtWorkspaceValidator
             string.IsNullOrWhiteSpace(message.ReferenceSummary))
         {
             throw new InvalidDataException("对话图片引用 ID 与可见摘要必须同时存在。");
+        }
+    }
+
+    private static void ValidateConversationSegments(
+        IReadOnlyCollection<ArtWorkspaceConversationSegment>? segments)
+    {
+        if (segments is null)
+        {
+            throw new InvalidDataException("对话有序片段集合不能为空。 ");
+        }
+
+        if (segments.Count == 0)
+        {
+            return;
+        }
+
+        if (segments.Count > 256)
+        {
+            throw new InvalidDataException("单条对话最多保留 256 个有序片段。 ");
+        }
+
+        var tokenIds = new HashSet<string>(StringComparer.Ordinal);
+        var textLength = 0;
+        var imageReferenceCount = 0;
+        var hasSemanticContent = false;
+        foreach (var segment in segments)
+        {
+            if (segment is null)
+            {
+                throw new InvalidDataException("对话有序片段不能包含空项。 ");
+            }
+
+            if (string.Equals(
+                    segment.Kind,
+                    ArtWorkspaceConversationSegmentKinds.Text,
+                    StringComparison.Ordinal))
+            {
+                ValidateText(segment.Text, "对话文字片段", 16000, allowEmpty: true);
+                if (!string.IsNullOrEmpty(segment.TokenId) ||
+                    !string.IsNullOrEmpty(segment.ImageId) ||
+                    !string.IsNullOrEmpty(segment.ImageName) ||
+                    !string.IsNullOrEmpty(segment.DisplayLabel) ||
+                    segment.Region is not null)
+                {
+                    throw new InvalidDataException("对话文字片段不能携带图片引用字段。 ");
+                }
+
+                textLength = checked(textLength + segment.Text.Length);
+                hasSemanticContent |= !string.IsNullOrWhiteSpace(segment.Text);
+                continue;
+            }
+
+            if (!string.Equals(
+                    segment.Kind,
+                    ArtWorkspaceConversationSegmentKinds.ImageReference,
+                    StringComparison.Ordinal))
+            {
+                throw new InvalidDataException($"未知的对话有序片段类型：{segment.Kind}。 ");
+            }
+
+            if (!string.IsNullOrEmpty(segment.Text) ||
+                !Guid.TryParseExact(segment.TokenId, "N", out _) ||
+                !Guid.TryParseExact(segment.ImageId, "N", out _) ||
+                !tokenIds.Add(segment.TokenId))
+            {
+                throw new InvalidDataException("对话图片 token 的内容、tokenId 或 imageId 无效。 ");
+            }
+
+            ValidateText(segment.ImageName, "对话引用图片名称", 260, allowEmpty: false);
+            ValidateText(segment.DisplayLabel, "对话引用显示标签", 16, allowEmpty: false);
+            if (segment.Region is { } region)
+            {
+                try
+                {
+                    ArtWorkspaceImageRegionGeometry.ValidateRegion(region, segment.ImageId);
+                }
+                catch (ArgumentException exception)
+                {
+                    throw new InvalidDataException(
+                        $"对话图片 token 的冻结区域无效：{exception.Message}",
+                        exception);
+                }
+            }
+
+            imageReferenceCount++;
+            if (imageReferenceCount > ArtWorkspaceInstructionSegmentSemantics.MaximumImageReferenceCount)
+            {
+                throw new InvalidDataException(
+                    $"单条对话最多保留 {ArtWorkspaceInstructionSegmentSemantics.MaximumImageReferenceCount} 个图片引用。 ");
+            }
+
+            hasSemanticContent = true;
+        }
+
+        var semanticLength = ArtWorkspaceInstructionSegmentSemantics.MeasureSemanticLength(
+            textLength,
+            imageReferenceCount);
+        if (!hasSemanticContent ||
+            semanticLength > ArtWorkspaceInstructionSegmentSemantics.MaximumSemanticLength)
+        {
+            throw new InvalidDataException(
+                $"对话有序片段为空或语义长度超过 {ArtWorkspaceInstructionSegmentSemantics.MaximumSemanticLength}。 ");
         }
     }
 

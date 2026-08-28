@@ -428,6 +428,14 @@ public sealed class CodexExecTransport : IAgentSessionTransport
                                 break;
                             case "turn.started":
                                 turnId = ReadString(root, "turn_id") ?? ReadString(root, "turnId") ?? turnId;
+                                if (!string.IsNullOrWhiteSpace(turnId))
+                                {
+                                    lock (_stateLock)
+                                    {
+                                        _activeTurnId = turnId;
+                                    }
+                                }
+
                                 break;
                             case "turn.completed":
                                 status = "completed";

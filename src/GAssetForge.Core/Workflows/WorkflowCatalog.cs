@@ -10,7 +10,7 @@ public static class WorkflowCatalog
             "面向卡面结构、插画、文字区与批量变体的独立业务工作区。", "#E77EB3", false),
         new(WorkflowKind.ParallelPerspective, "parallel", "平行透视角物体制作", "物体资产",
             "面向固定平行透视角物体资产、角度规范与批量校验的独立业务工作区。", "#E2AB63", false),
-        new(WorkflowKind.UiDesign, "ui", "页面 UI 设计工具", "界面资产",
+        new(WorkflowKind.UiDesign, "ui", "页面UI制作", "界面资产",
             "原生 WPF 页面编辑器，包含画布、图层、属性和 Prefab 资源。", "#65ADF2", true),
         new(WorkflowKind.Test, "test", "测试模板", "参考原型",
             "保留原 HTML 三套视觉原型作为迁移参考，不再作为桌面主线运行时。", "#9678FF", false)

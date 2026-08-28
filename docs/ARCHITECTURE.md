@@ -97,13 +97,30 @@ WPF 进程推入不可控内存占用。属性页的画布图片列表是选择�
 “整张图片/已框选局部区域”，不向普通用户显示几何数字。
 
 属性页通过 `IArtWorkspaceGenerationGateway` 显示受管 Agent 的不可用、忙碌或“已接入可用”状态；只有正式
-项目、可执行连接和空闲调度器同时满足时，`发送并生成` 才可执行。ViewModel 先冻结用户指令、输出框几何与
-像素尺寸、项目 `Assets` 根，以及所有可见参考图的 SHA-256、位置、尺寸、旋转、透明度和层级。若提交时存在
-有效所选图片，它会自动成为本轮明确图片指代；局部框选则额外冻结图片本地归一化范围，并从源像素尺寸和
-冻结画布变换派生 `sourcePixelBounds` 与旋转后的 `canvasPolygon`。生产 Gateway 把它们转换为
-provider-neutral `art-workspace` Schema v2 单图任务、项目内 Run、Prompt 和 Manifest，并复用 Shell 唯一的
-Agent 调度器；Prompt 明确把“这张图/这块区域”等措辞绑定到该合同对象，不要求 Agent 重新猜测。实时 Agent
-文本只更新对话和进度，不作为完成依据；只有 MCP 提交的本地 PNG 经过 Harness
+项目、可执行连接和空闲调度器同时满足时，`发送并生成` 才可执行。对话编辑器使用有序文本片段与内联图片
+token；`插入所选图片` 在当前光标处插入一个独立 token，并立即冻结当时的图片身份以及整图或局部框选，
+所以用户可以明确写出 A 图护甲、B 图发型、C 图角色，同图也能以不同局部重复插入。之后切换画布选择或修改
+框选不会改变既有 token；token 对应图片被隐藏、删除、修改、丢失或越出受管边界时提交 fail-closed。
+
+ViewModel 发布时保留 text/image token 的原始顺序，同时冻结输出框几何与像素尺寸、项目 `Assets` 根，以及
+所有可见参考图的 SHA-256、位置、尺寸、旋转、透明度和层级。每个图片 token 解析为独立引用；局部框选额外
+冻结图片本地归一化范围，并从源像素尺寸和冻结画布变换派生 `sourcePixelBounds` 与旋转后的
+`canvasPolygon`。生产 Gateway 把它们转换为 provider-neutral `art-workspace` Schema v3 单图任务、项目内
+Run、Prompt 和 Manifest，并通过 `instructionSegments` 与 `instructionReferences` 向 Agent 传递邻接文本和
+精确映射。界面 chip 与历史消息只显示名称和整图/局部状态，不暴露路径、ID、哈希或坐标。旧工作区 JSON
+缺少 segments 时仍按纯文本加载，Builder 也继续读取旧版单 `InstructionReference`，但新请求只写有序结构。
+
+当指令中只有一个图片 token 且它冻结了局部区域时，Gateway 会把任务升级为显式 `region-edit`，而不是把
+框选当作普通 Prompt 提示。该图片的当前冻结快照成为唯一 authoritative base，所有历史完整图片从模型输入
+中排除；输出像素尺寸必须与 base 完全一致。Run 的 `25-region-edit/<itemId>` 由软件预先写入 base、透明编辑/
+不透明保留的 API mask、区域预览和 `contract.v1.json`，并冻结 base/mask SHA-256。Agent 调度直接调用 Harness
+CLI edit，不先执行一次整图 ImageGen；fallback 固定使用唯一 `--image`、`--mask` 与
+默认 `gpt-image-2` 对图片输入固有使用高保真模式，因此不传其明确拒绝的 `input-fidelity` 参数。任意 base 尺寸先以整数 `scale=1` padding 到合法 API 画布，full raw 按冻结 offset 无插值裁切回 base 尺寸；无法容纳时 fail-closed。提交链先归档可提交候选，再统计 mask 外显著变化；低幅漂移由软件强制合成消除，过大
+整图重绘保留 composite、差异 PNG/JSON 并返回可重试校验失败。成功 Final 的 mask 外像素必须逐字节等于 base。
+每个自动重做 child 会在自己的 Run 中重新物化同一 SHA-256 的 base 与 mask，并获得独立的 API raw、
+composite 和差异诊断路径；父尝试的缓存文件只能用于审计，不能作为后继尝试的现成模型结果。
+
+实时 Agent 文本只更新对话和进度，不作为完成依据；只有 MCP 提交的本地 PNG 经过 Harness
 归档、归一化、验证和原子提交并令任务达到 `Completed` 后，ViewModel 才保留 Generated 原件、复制受管预览
 到 `Assets\ArtWorkspace\References`，并按冻结输出框位置与尺寸放入画布。路径逃逸、重解析点和项目切换后的
 迟到结果都会被拒绝。
@@ -376,6 +393,7 @@ Assets/Generated/GAssetForge/Runs/<batchId>/
   00-manifest/run.v1.json
   10-style-reference/
   20-prompts/
+  25-region-edit/<itemId>/{authoritative-base,api-mask,region-preview,contract,api-input-*,api-model-raw-*,api-canvas-transform,composite,outside-mask-difference}.*
   30-model-output/<itemId>/*.model.png
   35-normalized-input/<itemId>/*.normalized.png
   40-background-removed/<itemId>/*.transparent.png
@@ -546,8 +564,9 @@ Shell 的 UI 编辑命令通过 `GatedCommand` 接到稳定 seam：非 UI 工作
 
 - Project manifest Schema v1：项目 ID、名称、工作流、创建/更新时间及项目级 Tilemap 参数。
 - UI Project Schema v2：documents、layers、Prefab library、editor session 和预留 `workflowGraphs`。
-- Art Workspace Schema v1：画布与视口、输出框、受管图片素材及其摆放、选择状态、图片本地归一化框选和带
-  坐标隐藏摘要的创作意图对话；新增字段保持可选，因此旧 JSON 仍可读取。
+- Art Workspace Schema v1：画布与视口、输出框、受管图片素材及其摆放、选择状态、图片本地归一化框选和
+  有序 text/image 对话 segments；图片 token 保存插入时冻结的名称、整图/局部摘要和局部范围，普通 UI 不显示
+  坐标。`Segments` 保持可选，旧 JSON 的纯 `Text`、`ReferenceImageId` / `ReferenceSummary` 仍可读取。
 
 manifest、UI 与 Art Workspace 文件分别回退读取自己的 `.bak`，不能用其中一个文件代替另一个。UI Project Schema v2
 当前包含：

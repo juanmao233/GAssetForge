@@ -171,14 +171,23 @@ codex exec resume --json ... <threadId> -
 
 美术工作区也复用同一套 Codex Runtime、MCP Server、八工具白名单和单一 Agent 调度器，但使用独立
 `art-workspace` workflow。属性页显示“Agent 已接入可用”后，`发送并生成` 会创建一个冻结单图任务：用户
-指令、输出框像素尺寸与画布几何、项目 `Assets` 根、最终目录及当前可见参考图的哈希和变换均写入约束合同。
-当前有效可见选图会自动写入 Schema v2 的 `parameters.artWorkspace.instructionReference`，作为本轮“这张图”
-等措辞的唯一明确指代；若用户在图像框选工具中选择局部，合同还包含
+指令的有序 text/image token、输出框像素尺寸与画布几何、项目 `Assets` 根、最终目录及当前可见参考图的哈希
+和变换均写入约束合同。用户可在光标处依次插入 A/B/C 图片，并用 token 两侧文字分别绑定护甲、发型、角色等
+职责；每个 token 在插入时独立冻结整图或当时的局部框选，同图可用不同区域重复插入，之后切换当前选图不会
+改写已有含义。
+
+Schema v3 使用 `parameters.artWorkspace.instructionSegments` 保留文字与图片 token 的精确原始顺序，并用
+`instructionReferences` 提供每个 token 的解析结果。局部引用包含
 `coordinateSpace=image-local-normalized-unrotated` 的 `x/y/width/height`、从原图尺寸派生的
-`sourcePixelBounds`，以及结合图片位置、显示尺寸和旋转得到的 `canvasPolygon`。图片/资产 ID、名称、受管
-相对路径和 SHA-256-bearing 可见参考快照一起被冻结。用户对话 UI 只显示名称与整图/局部状态，不显示这些
-数字；Prompt 明确要求 Agent 使用合同目标，不得重新猜测其它参考图。Agent 必须按普通新合同调用
-`claim_generation_task → imagegen/image_gen.py → submit_generation_output`；
+`sourcePixelBounds`，以及结合图片位置、显示尺寸和旋转得到的 `canvasPolygon`；图片/资产 ID、名称、受管
+快照和 SHA-256-bearing 可见参考一起被冻结。用户对话 UI 只显示名称与整图/局部状态，不显示路径、ID、
+哈希或几何数字；Prompt 明确要求 Agent 按 segments 顺序和相邻文字理解每个 token，不得重新猜测其它参考图。
+token 对应图片被隐藏、删除、修改、缺失或越出受管边界时，发布 fail-closed。缺少 segments 的旧请求仍可从
+纯 `instruction` 与单 `instructionReference` 重建，但新请求不再依赖自动附加“提交时当前选图”。Agent 必须
+按普通新合同调用 `claim_generation_task → imagegen/image_gen.py → submit_generation_output`。唯一图片 token
+带局部区域时则进入独立的 `region-edit` 分支：claim 返回 `imageGeneration.regionEdit`，Agent 必须直接调用
+`run_image_delivery_fallback`，由 Harness 使用唯一 authoritative base、冻结 Alpha mask 和
+调用 Images Edit API；默认 `gpt-image-2` 对图片输入固有使用高保真模式，因此不会传入其明确拒绝的 `input-fidelity` 参数。非 16px 对齐的 authoritative base 与 mask 会先以整数 `scale=1` 居中 padding 到合法 API 画布，保留 full raw 和 transform JSON，再按同一 offset 无插值裁切回原始像素尺寸。历史画布版本不会进入 `--image`，也不会先重复执行整图 ImageGen。
 无背景剔除的完整画面允许 `stagingPaths=[]`，Harness 会从 `30-model-output` 派生 `35-normalized-input`，保留
 processed 审计副本并原子提交到 `Assets/Generated/ArtWorkspace/<batchId>/Final`。UI 只在持久任务完成且精确
 冻结目标存在后把图片复制为受管画布预览；Agent 文本或可视图片结果本身不算交付。
@@ -294,6 +303,7 @@ task ID，不能省略 task ID 去领取其他待办。成功返回退出码 `0`
   00-manifest/run.v1.json
   10-style-reference/
   20-prompts/
+  25-region-edit/<itemId>/{authoritative-base,api-mask,region-preview,contract,api-input-*,api-model-raw-*,api-canvas-transform,composite,outside-mask-difference}.*
   30-model-output/<itemId>/*.model.png
   35-normalized-input/<itemId>/*.normalized.png
   40-background-removed/<itemId>/*.transparent.png
@@ -479,12 +489,19 @@ GAssetForge.McpServer.exe
    自行读取冻结提示、画幅、规则与参考图，使用绝对 Python/`py -3` 和官方 `image_gen.py`，以 `--prompt-file`、
    `--size`、`--output-format png`、`--n 1`、`--no-augment`、`--out <recommendedSourcePath>` 确定性落盘；有参考图
    时使用 `edit` 并重复 `--image`。Agent 不再运行 Python、uv 或自行拼装命令。
+   对 `imageGeneration.regionEdit.operationMode=region-edit` 的任务不执行第 2 步，而是立即走本步；此时 CLI
+   只允许一个 authoritative `--image`，并且必须同时传 `--mask`；默认 `gpt-image-2` 固有使用高保真图片输入，不额外传 `input-fidelity`。
 4. 软件归档源图、归一化冻结画布、补齐第一道纯色底、执行可选背景剔除并验证最终 Tilemap/PNG 合同。校验
    通过时原子写入 `delivery.targetPaths[0]`，并自动把任务登记为 `Completed`。
 5. 若图片已经生成和导入、但可恢复的 Tilemap 几何校验未通过，`submit_generation_output` 会把本次尝试记录
    为 `Failed/retryable`，保留所有已落盘中间物，并以普通工具结果返回
    `outcome=retryable_validation_failure`。Agent 只记录 warning 并继续同批其它 task，不得再次调用
    `fail_generation_task`，也不得把它包装成 `image_delivery_fallback_failed`。
+   局部编辑同样使用该普通结果：模型在 mask 外发生大面积变化时，错误码为
+   `output_region_edit_validation_failed`，原图、归一化图、安全 composite 与差异报告均保留，任务不会
+   登记 `Completed`；允许范围内的结果由软件强制合成，Final 的 mask 外像素必须与 base 完全一致。
+   自动重做必须在新 Run 下重新绑定 base/mask/API raw/composite/差异报告路径，不能命中上一轮失败尝试的
+   `api-model-raw` 缓存；未启用背景剔除的局部编辑继续保持空 `stagingPaths`。
 6. 只有 ImageGen、Harness 兜底或提交工具真正返回 MCP tool error 时才调用 `fail_generation_task`，并保留
    准确错误；单项失败不阻塞同批其它 task ID。
 

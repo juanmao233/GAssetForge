@@ -1,8 +1,12 @@
 using GAssetForge.App.Infrastructure;
 using GAssetForge.App.ViewModels;
+using System.Collections;
+using System.Collections.Specialized;
+using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Threading;
 
 namespace GAssetForge.App.Views;
 
@@ -11,13 +15,152 @@ public partial class CanvasDocumentView : UserControl
     private FrameworkElement? _dragSource;
     private Point _dragStart;
     private bool _moveTransactionOpen;
+    private INotifyCollectionChanged? _observedConversation;
+    private readonly HashSet<INotifyPropertyChanged> _observedConversationMessages = [];
 
     public CanvasDocumentView()
     {
         InitializeComponent();
+        Loaded += CanvasDocumentView_OnLoaded;
+        Unloaded += CanvasDocumentView_OnUnloaded;
+        DataContextChanged += CanvasDocumentView_OnDataContextChanged;
     }
 
     private EditorWorkspaceViewModel? Workspace => DataContext as EditorWorkspaceViewModel;
+
+    private void CanvasDocumentView_OnLoaded(object sender, RoutedEventArgs e)
+    {
+        ObservePageUiConversation();
+    }
+
+    private void CanvasDocumentView_OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        StopObservingPageUiConversation();
+    }
+
+    private void CanvasDocumentView_OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
+    {
+        if (!IsLoaded)
+        {
+            return;
+        }
+
+        Dispatcher.BeginInvoke(DispatcherPriority.DataBind, new Action(ObservePageUiConversation));
+    }
+
+    private void ObservePageUiConversation()
+    {
+        StopObservingPageUiConversation();
+
+        if (PageUiConversationList.ItemsSource is not { } itemsSource)
+        {
+            return;
+        }
+
+        if (itemsSource is INotifyCollectionChanged observableCollection)
+        {
+            _observedConversation = observableCollection;
+            _observedConversation.CollectionChanged += PageUiConversation_OnCollectionChanged;
+        }
+
+        ObserveConversationMessages(itemsSource);
+        ScrollPageUiConversationToEnd();
+    }
+
+    private void StopObservingPageUiConversation()
+    {
+        if (_observedConversation is not null)
+        {
+            _observedConversation.CollectionChanged -= PageUiConversation_OnCollectionChanged;
+            _observedConversation = null;
+        }
+
+        foreach (var message in _observedConversationMessages)
+        {
+            message.PropertyChanged -= PageUiConversationMessage_OnPropertyChanged;
+        }
+
+        _observedConversationMessages.Clear();
+    }
+
+    private void PageUiConversation_OnCollectionChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        if (e.Action == NotifyCollectionChangedAction.Reset)
+        {
+            foreach (var message in _observedConversationMessages)
+            {
+                message.PropertyChanged -= PageUiConversationMessage_OnPropertyChanged;
+            }
+
+            _observedConversationMessages.Clear();
+            if (PageUiConversationList.ItemsSource is { } itemsSource)
+            {
+                ObserveConversationMessages(itemsSource);
+            }
+        }
+        else
+        {
+            if (e.OldItems is not null)
+            {
+                foreach (var message in e.OldItems.OfType<INotifyPropertyChanged>())
+                {
+                    message.PropertyChanged -= PageUiConversationMessage_OnPropertyChanged;
+                    _observedConversationMessages.Remove(message);
+                }
+            }
+
+            if (e.NewItems is not null)
+            {
+                ObserveConversationMessages(e.NewItems);
+            }
+        }
+
+        ScrollPageUiConversationToEnd();
+    }
+
+    private void ObserveConversationMessages(IEnumerable messages)
+    {
+        foreach (var message in messages.OfType<INotifyPropertyChanged>())
+        {
+            if (_observedConversationMessages.Add(message))
+            {
+                message.PropertyChanged += PageUiConversationMessage_OnPropertyChanged;
+            }
+        }
+    }
+
+    private void PageUiConversationMessage_OnPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        ScrollPageUiConversationToEnd();
+    }
+
+    private void ScrollPageUiConversationToEnd()
+    {
+        Dispatcher.BeginInvoke(
+            DispatcherPriority.Loaded,
+            new Action(() => PageUiConversationScrollViewer.ScrollToEnd()));
+    }
+
+    private void PageUiInstructionTextBox_OnPreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if (e.Key != Key.Enter || (Keyboard.Modifiers & ModifierKeys.Control) == 0)
+        {
+            return;
+        }
+
+        PageUiInstructionTextBox
+            .GetBindingExpression(TextBox.TextProperty)
+            ?.UpdateSource();
+
+        var command = PageUiSubmitInstructionButton.Command;
+        var parameter = PageUiSubmitInstructionButton.CommandParameter;
+        if (command?.CanExecute(parameter) == true)
+        {
+            command.Execute(parameter);
+        }
+
+        e.Handled = true;
+    }
 
     private void CanvasSurface_OnPreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {

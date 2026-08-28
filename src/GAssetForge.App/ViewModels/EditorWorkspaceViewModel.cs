@@ -3,6 +3,7 @@ using GAssetForge.App.Services;
 using GAssetForge.Core.Projects;
 using System.Collections.ObjectModel;
 using System.IO;
+using System.Text;
 using System.Text.Json;
 using System.Windows.Input;
 using System.Windows.Threading;
@@ -17,12 +18,19 @@ public sealed class EditorWorkspaceViewModel : ObservableObject
     private readonly DispatcherTimer _autosaveTimer;
     private readonly RelayCommand _undoCommand;
     private readonly RelayCommand _redoCommand;
+    private readonly AsyncRelayCommand _submitPageUiInstructionCommand;
+    private readonly Dispatcher _dispatcher;
     private UiProjectModel _project;
+    private IPageUiAgentConversationGateway? _pageUiAgentConversationGateway;
+    private PageUiAgentConversationState? _pageUiAgentState;
+    private CancellationTokenSource? _pageUiTurnCancellation;
+    private long _pageUiProjectEpoch;
+    private bool _isSubmittingPageUiInstruction;
     private LayerViewModel? _selectedLayer;
     private EditorTool _activeTool;
     private bool _isDirty;
     private string _saveStateText = "已加载";
-    private string _statusText = "UI 编辑器已就绪";
+    private string _statusText = "页面UI制作已就绪";
     private string? _dragBeforeJson;
     private string? _dragLayerId;
     private double _dragOriginX;
@@ -38,6 +46,7 @@ public sealed class EditorWorkspaceViewModel : ObservableObject
         _repository = repository;
         _dialogs = dialogs;
         _history = history;
+        _dispatcher = Dispatcher.CurrentDispatcher;
         _project = repository.LoadOrCreate();
         _activeTool = string.Equals(_project.EditorSession.ActiveTool, "text", StringComparison.OrdinalIgnoreCase)
             ? EditorTool.Text
@@ -66,6 +75,10 @@ public sealed class EditorWorkspaceViewModel : ObservableObject
         ZoomInCommand = new RelayCommand(() => Zoom = Math.Min(1.5, Zoom + 0.1));
         ZoomOutCommand = new RelayCommand(() => Zoom = Math.Max(0.25, Zoom - 0.1));
         ResetZoomCommand = new RelayCommand(() => Zoom = 0.5);
+        _submitPageUiInstructionCommand = new AsyncRelayCommand(
+            SubmitPageUiInstructionAsync,
+            CanSubmitPageUiInstruction);
+        SubmitPageUiInstructionCommand = _submitPageUiInstructionCommand;
 
         _autosaveTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(650) };
         _autosaveTimer.Tick += (_, _) =>
@@ -75,6 +88,10 @@ public sealed class EditorWorkspaceViewModel : ObservableObject
         };
 
         RefreshAll();
+        if (FinalizeTransientPageUiMessages("上次页面 UI Agent 会话在完成前中断，请重新发送指令。"))
+        {
+            ScheduleSessionSave();
+        }
         SaveStateText = _repository.LastRecoverySource switch
         {
             "backup" => "已从备份恢复",
@@ -87,6 +104,7 @@ public sealed class EditorWorkspaceViewModel : ObservableObject
     public ObservableCollection<LayerViewModel> CanvasLayers { get; } = [];
     public ObservableCollection<ProjectFolderViewModel> ProjectFolders { get; } = [];
     public ObservableCollection<PrefabViewModel> Prefabs { get; } = [];
+    public ObservableCollection<PageUiConversationMessageViewModel> PageUiConversation { get; } = [];
 
     public ICommand SelectToolCommand { get; }
     public ICommand NewLayerCommand { get; }
@@ -101,6 +119,7 @@ public sealed class EditorWorkspaceViewModel : ObservableObject
     public ICommand ZoomInCommand { get; }
     public ICommand ZoomOutCommand { get; }
     public ICommand ResetZoomCommand { get; }
+    public ICommand SubmitPageUiInstructionCommand { get; }
 
     public UiProjectModel Project => _project;
     public string? ProjectRoot => _repository.ProjectRoot;
@@ -115,6 +134,39 @@ public sealed class EditorWorkspaceViewModel : ObservableObject
     public string ActiveFolderName => _project.Library.FoldersById.TryGetValue(_project.Library.ActiveFolderId, out var folder) ? folder.Name : "Assets";
     public string PrefabCountText => $"{Prefabs.Count} 个预制体";
     public string ZoomText => $"{Zoom * 100:0}%";
+    public bool IsPageUiAgentConnected => _pageUiAgentState?.IsConnected == true;
+    public bool IsPageUiAgentBusy => _isSubmittingPageUiInstruction || _pageUiAgentState?.IsBusy == true;
+    public string PageUiAgentStatusText => _pageUiAgentState?.StatusText ?? "Agent 尚未接入";
+    public string PageUiAgentStatusDetail => _pageUiAgentState?.StatusDetail ??
+                                                   "请先在“视图 > MCP Agent 接入”中启动并连接 Agent。";
+    public string PageUiAgentDisplayName => _pageUiAgentState?.AgentDisplayName ?? "Agent";
+
+    public string PageUiInstructionDraft
+    {
+        get => _project.EditorSession.AgentInstructionDraft ?? string.Empty;
+        set
+        {
+            var normalized = value ?? string.Empty;
+            if (normalized.Length > ProjectValidator.MaximumAgentInstructionDraftLength)
+            {
+                normalized = normalized[..ProjectValidator.MaximumAgentInstructionDraftLength];
+            }
+
+            if (string.Equals(_project.EditorSession.AgentInstructionDraft, normalized, StringComparison.Ordinal))
+            {
+                return;
+            }
+
+            _project.EditorSession.AgentInstructionDraft = normalized;
+            OnPropertyChanged();
+            OnPropertyChanged(nameof(PageUiInstructionCharacterCountText));
+            _submitPageUiInstructionCommand.RaiseCanExecuteChanged();
+            ScheduleSessionSave();
+        }
+    }
+
+    public string PageUiInstructionCharacterCountText =>
+        $"{PageUiInstructionDraft.Length:N0} / {ProjectValidator.MaximumAgentInstructionDraftLength:N0}";
 
     public LayerViewModel? SelectedLayer
     {
@@ -204,6 +256,25 @@ public sealed class EditorWorkspaceViewModel : ObservableObject
     {
         get => _statusText;
         private set => SetProperty(ref _statusText, value);
+    }
+
+    public void ConfigurePageUiAgentConversationGateway(IPageUiAgentConversationGateway gateway)
+    {
+        ArgumentNullException.ThrowIfNull(gateway);
+        if (ReferenceEquals(_pageUiAgentConversationGateway, gateway))
+        {
+            RefreshPageUiAgentState();
+            return;
+        }
+
+        if (_pageUiAgentConversationGateway is not null)
+        {
+            _pageUiAgentConversationGateway.StateChanged -= OnPageUiAgentGatewayStateChanged;
+        }
+
+        _pageUiAgentConversationGateway = gateway;
+        _pageUiAgentConversationGateway.StateChanged += OnPageUiAgentGatewayStateChanged;
+        RefreshPageUiAgentState();
     }
 
     public void SelectLayer(string layerId)
@@ -464,12 +535,16 @@ public sealed class EditorWorkspaceViewModel : ObservableObject
         }
     }
 
-    public void PrepareForProjectSwitch() => SaveCurrentProjectForSwitch();
+    public void PrepareForProjectSwitch()
+    {
+        CancelActivePageUiTurn("项目切换已取消本轮页面 UI Agent 对话。");
+        SaveCurrentProjectForSwitch();
+    }
 
     public void SwitchProject(string projectRoot)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(projectRoot);
-        SaveCurrentProjectForSwitch();
+        PrepareForProjectSwitch();
         SwitchProjectCore(projectRoot);
     }
 
@@ -528,6 +603,10 @@ public sealed class EditorWorkspaceViewModel : ObservableObject
         _hasPendingSessionSave = false;
         IsDirty = false;
         RefreshAll();
+        if (FinalizeTransientPageUiMessages("上次页面 UI Agent 会话在完成前中断，请重新发送指令。"))
+        {
+            ScheduleSessionSave();
+        }
         RaiseHistoryState();
         OnPropertyChanged(nameof(ProjectRoot));
         OnPropertyChanged(nameof(ProjectFilePath));
@@ -542,9 +621,300 @@ public sealed class EditorWorkspaceViewModel : ObservableObject
 
     public void Shutdown()
     {
+        CancelActivePageUiTurn("应用关闭已取消本轮页面 UI Agent 对话。");
+        if (_pageUiAgentConversationGateway is not null)
+        {
+            _pageUiAgentConversationGateway.StateChanged -= OnPageUiAgentGatewayStateChanged;
+        }
+
         if (IsDirty || _hasPendingSessionSave)
         {
             SaveImmediately();
+        }
+    }
+
+    private bool CanSubmitPageUiInstruction() =>
+        _pageUiAgentConversationGateway is not null &&
+        IsPageUiAgentConnected &&
+        !IsPageUiAgentBusy &&
+        !string.IsNullOrWhiteSpace(PageUiInstructionDraft);
+
+    private async Task SubmitPageUiInstructionAsync()
+    {
+        var gateway = _pageUiAgentConversationGateway;
+        var instruction = PageUiInstructionDraft.Trim();
+        if (gateway is null || !CanSubmitPageUiInstruction() || instruction.Length == 0)
+        {
+            RefreshPageUiAgentState();
+            return;
+        }
+
+        _isSubmittingPageUiInstruction = true;
+        RaisePageUiAgentStateProperties();
+
+        var userMessage = CreatePageUiConversationMessage("user", instruction, "completed");
+        var agentMessageModel = CreatePageUiConversationMessage("agent", "正在等待 Agent 回复…", "pending");
+        AddPageUiConversationMessage(userMessage);
+        AddPageUiConversationMessage(agentMessageModel);
+        var turnProjectEpoch = _pageUiProjectEpoch;
+        var agentMessageId = agentMessageModel.Id;
+        var turnCancellation = new CancellationTokenSource();
+        _pageUiTurnCancellation = turnCancellation;
+        PageUiInstructionDraft = string.Empty;
+        ScheduleSessionSave();
+
+        try
+        {
+            var prompt = BuildPageUiAgentPrompt(instruction);
+            var result = await gateway.RunTurnAsync(
+                prompt,
+                text => UpdateStreamingAgentMessage(turnProjectEpoch, agentMessageId, text),
+                turnCancellation.Token);
+
+            if (result.Succeeded)
+            {
+                var completedText = !string.IsNullOrWhiteSpace(result.AgentText)
+                    ? result.AgentText.Trim()
+                    : "Agent 已完成本轮分析，但未返回可显示的文字内容。";
+                UpdatePageUiAgentMessage(
+                    turnProjectEpoch,
+                    agentMessageId,
+                    completedText,
+                    "completed");
+            }
+            else
+            {
+                UpdatePageUiAgentMessage(
+                    turnProjectEpoch,
+                    agentMessageId,
+                    string.IsNullOrWhiteSpace(result.ErrorMessage)
+                        ? "Agent 本轮未能完成，请检查连接状态后重试。"
+                        : result.ErrorMessage.Trim(),
+                    "failed");
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            UpdatePageUiAgentMessage(
+                turnProjectEpoch,
+                agentMessageId,
+                "页面 UI Agent 会话已取消。",
+                "failed");
+        }
+        catch (Exception exception)
+        {
+            UpdatePageUiAgentMessage(
+                turnProjectEpoch,
+                agentMessageId,
+                $"Agent 会话失败：{exception.Message}",
+                "failed");
+        }
+        finally
+        {
+            RunOnDispatcher(() =>
+            {
+                if (ReferenceEquals(_pageUiTurnCancellation, turnCancellation))
+                {
+                    _pageUiTurnCancellation = null;
+                }
+
+                _isSubmittingPageUiInstruction = false;
+                RefreshPageUiAgentState();
+            });
+            turnCancellation.Dispose();
+        }
+    }
+
+    private void UpdateStreamingAgentMessage(
+        long projectEpoch,
+        string messageId,
+        string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return;
+        }
+
+        UpdatePageUiAgentMessage(projectEpoch, messageId, text.Trim(), "streaming");
+    }
+
+    private void UpdatePageUiAgentMessage(
+        long projectEpoch,
+        string messageId,
+        string text,
+        string state) =>
+        RunOnDispatcher(() =>
+        {
+            if (projectEpoch != _pageUiProjectEpoch)
+            {
+                return;
+            }
+
+            var model = _project.EditorSession.AgentConversation.FirstOrDefault(message =>
+                string.Equals(message.Id, messageId, StringComparison.Ordinal));
+            if (model is null)
+            {
+                return;
+            }
+
+            var normalizedText = LimitPageUiMessageText(text);
+            var viewModel = PageUiConversation.FirstOrDefault(message =>
+                string.Equals(message.Id, messageId, StringComparison.Ordinal));
+            if (viewModel is not null)
+            {
+                viewModel.Text = normalizedText;
+                viewModel.State = state;
+            }
+            else
+            {
+                model.Text = normalizedText;
+                model.State = state;
+                RefreshPageUiConversation();
+            }
+
+            ScheduleSessionSave();
+        });
+
+    private void CancelActivePageUiTurn(string reason)
+    {
+        _pageUiProjectEpoch++;
+        if (FinalizeTransientPageUiMessages(reason))
+        {
+            _hasPendingSessionSave = true;
+        }
+
+        try
+        {
+            _pageUiTurnCancellation?.Cancel();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+    }
+
+    private bool FinalizeTransientPageUiMessages(string reason)
+    {
+        var changed = false;
+        var normalizedReason = LimitPageUiMessageText(reason);
+        foreach (var message in _project.EditorSession.AgentConversation)
+        {
+            if (!string.Equals(message.State, "pending", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(message.State, "streaming", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            message.Text = normalizedReason;
+            message.State = "failed";
+            changed = true;
+        }
+
+        if (changed)
+        {
+            RefreshPageUiConversation();
+        }
+
+        return changed;
+    }
+
+    private string BuildPageUiAgentPrompt(string instruction)
+    {
+        var document = ActiveDocument;
+        var layerSummary = document.LayersById.Values
+            .OrderBy(layer => layer.Name, StringComparer.CurrentCultureIgnoreCase)
+            .Take(80)
+            .Select(layer =>
+                $"- {layer.Name} | 类型={layer.Kind}/{layer.Component?.Type ?? "none"} | " +
+                $"位置=({layer.Transform?.X:0.#},{layer.Transform?.Y:0.#}) | " +
+                $"尺寸={layer.Transform?.Width:0.#}×{layer.Transform?.Height:0.#}");
+
+        var prompt = new StringBuilder()
+            .AppendLine("你正在协助 GAssetForge 的“页面UI制作”工作区。")
+            .AppendLine("本阶段只分析当前 UI 并给出清晰、可执行的设计或布局建议；不要编辑项目文件，不要调用工具，也不要声称已修改画布。")
+            .AppendLine("请使用中文回答，优先说明建议调整的图层、布局、尺寸、层级和视觉理由。")
+            .AppendLine()
+            .AppendLine($"当前文档：{document.Name}")
+            .AppendLine($"画布：{document.Canvas.Width:0.#} × {document.Canvas.Height:0.#}，背景 {document.Canvas.Background}")
+            .AppendLine($"当前选择：{SelectedLayer?.Name ?? "无"}")
+            .AppendLine("当前图层摘要：")
+            .AppendLine(string.Join(Environment.NewLine, layerSummary))
+            .AppendLine()
+            .AppendLine("用户指令：")
+            .AppendLine(instruction)
+            .ToString();
+
+        return prompt;
+    }
+
+    private UiAgentConversationMessageModel CreatePageUiConversationMessage(
+        string role,
+        string text,
+        string state) => new()
+        {
+            Id = Guid.NewGuid().ToString("N"),
+            Role = role,
+            Text = LimitPageUiMessageText(text),
+            State = state,
+            CreatedAt = DateTimeOffset.Now
+        };
+
+    private PageUiConversationMessageViewModel AddPageUiConversationMessage(
+        UiAgentConversationMessageModel message)
+    {
+        _project.EditorSession.AgentConversation ??= [];
+        _project.EditorSession.AgentConversation.Add(message);
+        var viewModel = new PageUiConversationMessageViewModel(message);
+        PageUiConversation.Add(viewModel);
+        while (_project.EditorSession.AgentConversation.Count > ProjectValidator.MaximumAgentConversationMessages)
+        {
+            _project.EditorSession.AgentConversation.RemoveAt(0);
+            if (PageUiConversation.Count > 0)
+            {
+                PageUiConversation.RemoveAt(0);
+            }
+        }
+
+        return viewModel;
+    }
+
+    private static string LimitPageUiMessageText(string text) =>
+        text.Length <= ProjectValidator.MaximumAgentConversationMessageLength
+            ? text
+            : text[..ProjectValidator.MaximumAgentConversationMessageLength];
+
+    private void OnPageUiAgentGatewayStateChanged(object? sender, EventArgs e) =>
+        RunOnDispatcher(RefreshPageUiAgentState);
+
+    private void RefreshPageUiAgentState()
+    {
+        _pageUiAgentState = _pageUiAgentConversationGateway?.GetState();
+        RaisePageUiAgentStateProperties();
+    }
+
+    private void RaisePageUiAgentStateProperties()
+    {
+        OnPropertyChanged(nameof(IsPageUiAgentConnected));
+        OnPropertyChanged(nameof(IsPageUiAgentBusy));
+        OnPropertyChanged(nameof(PageUiAgentStatusText));
+        OnPropertyChanged(nameof(PageUiAgentStatusDetail));
+        OnPropertyChanged(nameof(PageUiAgentDisplayName));
+        _submitPageUiInstructionCommand.RaiseCanExecuteChanged();
+    }
+
+    private void RunOnDispatcher(Action action)
+    {
+        if (_dispatcher.HasShutdownStarted || _dispatcher.HasShutdownFinished)
+        {
+            return;
+        }
+
+        if (_dispatcher.CheckAccess())
+        {
+            action();
+        }
+        else
+        {
+            _dispatcher.Invoke(action);
         }
     }
 
@@ -669,7 +1039,9 @@ public sealed class EditorWorkspaceViewModel : ObservableObject
             return;
         }
 
+        var conversationSession = CapturePageUiConversationSession();
         _project = _history.Undo(_project);
+        RestorePageUiConversationSession(conversationSession);
         RefreshAll();
         MarkDirty("撤销");
         RaiseHistoryState();
@@ -682,7 +1054,9 @@ public sealed class EditorWorkspaceViewModel : ObservableObject
             return;
         }
 
+        var conversationSession = CapturePageUiConversationSession();
         _project = _history.Redo(_project);
+        RestorePageUiConversationSession(conversationSession);
         RefreshAll();
         MarkDirty("重做");
         RaiseHistoryState();
@@ -699,6 +1073,7 @@ public sealed class EditorWorkspaceViewModel : ObservableObject
         try
         {
             var importedProject = _repository.Import(path);
+            CancelActivePageUiTurn("导入项目已取消本轮页面 UI Agent 对话。");
             _history.Record(_project);
             _project = importedProject;
             RefreshAll();
@@ -788,6 +1163,8 @@ public sealed class EditorWorkspaceViewModel : ObservableObject
 
     private void RefreshAll()
     {
+        _project.EditorSession.AgentInstructionDraft ??= string.Empty;
+        _project.EditorSession.AgentConversation ??= [];
         var selectedId = _project.EditorSession.SelectedLayerId;
         var viewModels = ActiveDocument.LayersById.Values.ToDictionary(
             layer => layer.Id,
@@ -850,6 +1227,7 @@ public sealed class EditorWorkspaceViewModel : ObservableObject
         _activeTool = string.Equals(_project.EditorSession.ActiveTool, "text", StringComparison.OrdinalIgnoreCase)
             ? EditorTool.Text
             : EditorTool.Move;
+        RefreshPageUiConversation();
 
         OnPropertyChanged(nameof(Project));
         OnPropertyChanged(nameof(ActiveDocument));
@@ -861,7 +1239,43 @@ public sealed class EditorWorkspaceViewModel : ObservableObject
         OnPropertyChanged(nameof(LayerCountText));
         OnPropertyChanged(nameof(ActiveTool));
         OnPropertyChanged(nameof(ActiveToolLabel));
+        OnPropertyChanged(nameof(PageUiInstructionDraft));
+        OnPropertyChanged(nameof(PageUiInstructionCharacterCountText));
+        _submitPageUiInstructionCommand.RaiseCanExecuteChanged();
     }
+
+    private void RefreshPageUiConversation()
+    {
+        PageUiConversation.Clear();
+        foreach (var message in _project.EditorSession.AgentConversation
+                     .TakeLast(ProjectValidator.MaximumAgentConversationMessages))
+        {
+            PageUiConversation.Add(new PageUiConversationMessageViewModel(message));
+        }
+    }
+
+    private PageUiConversationSessionSnapshot CapturePageUiConversationSession() => new(
+        PageUiInstructionDraft,
+        _project.EditorSession.AgentConversation
+            .Select(message => new UiAgentConversationMessageModel
+            {
+                Id = message.Id,
+                Role = message.Role,
+                Text = message.Text,
+                State = message.State,
+                CreatedAt = message.CreatedAt
+            })
+            .ToList());
+
+    private void RestorePageUiConversationSession(PageUiConversationSessionSnapshot snapshot)
+    {
+        _project.EditorSession.AgentInstructionDraft = snapshot.Draft;
+        _project.EditorSession.AgentConversation = snapshot.Messages;
+    }
+
+    private sealed record PageUiConversationSessionSnapshot(
+        string Draft,
+        List<UiAgentConversationMessageModel> Messages);
 
     private void RefreshProjectLibrary()
     {

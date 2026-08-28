@@ -166,6 +166,12 @@ HTTP 默认端口为 `43120`，`--expected-agent` 支持 `codex` 与 `opencode`�
 `40-background-removed` 和冻结的最终 `targetPaths`，并自动完成任务登记。Assets 根作为输出位置时，正式结果分别
 位于 `Generated/Tilemap/<batchId>/Final` 或 `Generated/Icon/<batchId>/Final`。
 
+Art Workspace 的单区域 token 使用显式 `region-edit` 合同。`claim_generation_task` 返回唯一 base、mask、
+像素范围和保留策略；Agent 直接调用 `run_image_delivery_fallback`，Harness 固定执行
+`image_gen.py edit --image <base> --mask <mask>`；默认 `gpt-image-2` 对图片输入固有使用高保真模式，不能额外传入其明确拒绝的 `input-fidelity` 参数。不先调用普通整图 ImageGen，也不传入
+历史画布图片。提交服务会归档模型原图、生成 mask 外差异诊断并用 base 强制合成；Final 的保留区必须逐像素
+相同。大面积越界重绘返回 `output_region_edit_validation_failed` 的可重试普通结果，不登记 Completed。
+
 若图片已生成、导入和完成中间处理，但 90°/0° Tilemap 前景主体几何未通过，
 `submit_generation_output` 不抛 MCP tool error，而是正常返回
 `outcome=retryable_validation_failure`。外层错误码固定为 `output_geometry_validation_failed`，子码区分

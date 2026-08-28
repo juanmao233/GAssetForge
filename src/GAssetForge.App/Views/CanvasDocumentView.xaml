@@ -250,137 +250,403 @@
     </UserControl.Resources>
 
     <Grid Background="{DynamicResource App.CanvasBackgroundBrush}">
-        <Grid.RowDefinitions>
-            <RowDefinition Height="*" />
-        </Grid.RowDefinitions>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="320" MinWidth="240" MaxWidth="520" />
+            <ColumnDefinition Width="5" />
+            <ColumnDefinition Width="*" MinWidth="180" />
+        </Grid.ColumnDefinitions>
 
-        <ScrollViewer x:Name="CanvasScrollViewer"
-                      HorizontalScrollBarVisibility="Auto"
-                      VerticalScrollBarVisibility="Auto"
-                      CanContentScroll="False"
-                      PreviewMouseWheel="CanvasScrollViewer_OnPreviewMouseWheel">
-            <Grid Margin="72">
-                <Border Width="{Binding CanvasWidth}"
-                        Height="{Binding CanvasHeight}"
-                        HorizontalAlignment="Center"
-                        VerticalAlignment="Center"
-                        Background="{Binding CanvasBackground, Converter={StaticResource StringToBrushConverter}, ConverterParameter=#11151B}"
-                        BorderBrush="#526174"
+        <Border x:Name="PageUiConversationPanel"
+                Grid.Column="0"
+                Padding="14"
+                Background="{DynamicResource App.SurfaceBrush}"
+                BorderBrush="{DynamicResource App.BorderBrush}"
+                BorderThickness="0,0,1,0">
+            <Grid>
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                </Grid.RowDefinitions>
+
+                <StackPanel>
+                    <TextBlock Foreground="{DynamicResource App.TextPrimaryBrush}"
+                               FontSize="16"
+                               FontWeight="SemiBold"
+                               Text="页面UI制作" />
+                    <TextBlock Margin="0,4,0,0"
+                               Foreground="{DynamicResource App.TextMutedBrush}"
+                               FontSize="10"
+                               Text="Agent 对话"
+                               TextWrapping="Wrap" />
+                </StackPanel>
+
+                <Border Grid.Row="1"
+                        Margin="0,12,0,10"
+                        Padding="9,7"
+                        Background="{DynamicResource App.InputBackgroundBrush}"
                         BorderThickness="1"
-                        SnapsToDevicePixels="True">
-                    <Border.LayoutTransform>
-                        <ScaleTransform ScaleX="{Binding Zoom}" ScaleY="{Binding Zoom}" />
-                    </Border.LayoutTransform>
-                    <Grid x:Name="CanvasSurface"
-                          Width="{Binding CanvasWidth}"
-                          Height="{Binding CanvasHeight}"
-                          Background="Transparent"
-                          ClipToBounds="True"
-                          AllowDrop="True"
-                          PreviewMouseLeftButtonDown="CanvasSurface_OnPreviewMouseLeftButtonDown"
-                          PreviewDragOver="CanvasSurface_OnPreviewDragOver"
-                          Drop="CanvasSurface_OnDrop">
-                        <ItemsControl ItemsSource="{Binding CanvasLayers}"
-                                      Width="{Binding CanvasWidth}"
-                                      Height="{Binding CanvasHeight}"
-                                      HorizontalAlignment="Left"
-                                      VerticalAlignment="Top">
-                            <ItemsControl.ItemsPanel>
-                                <ItemsPanelTemplate>
-                                    <Canvas IsItemsHost="True" />
-                                </ItemsPanelTemplate>
-                            </ItemsControl.ItemsPanel>
-                            <ItemsControl.ItemContainerStyle>
-                                <Style TargetType="ContentPresenter">
-                                    <Setter Property="Canvas.Left" Value="{Binding X}" />
-                                    <Setter Property="Canvas.Top" Value="{Binding Y}" />
-                                    <Setter Property="Width" Value="{Binding Width}" />
-                                    <Setter Property="Height" Value="{Binding Height}" />
-                                    <Setter Property="Panel.ZIndex" Value="{Binding ZIndex}" />
-                                    <Setter Property="Opacity" Value="{Binding EffectiveOpacity}" />
-                                    <Setter Property="Visibility"
-                                            Value="{Binding EffectiveVisibility, Converter={StaticResource BooleanToVisibilityConverter}}" />
-                                    <Setter Property="RenderTransformOrigin" Value="0.5,0.5" />
-                                    <Setter Property="RenderTransform">
-                                        <Setter.Value>
-                                            <RotateTransform Angle="{Binding Model.Transform.Rotation}" />
-                                        </Setter.Value>
-                                    </Setter>
-                                </Style>
-                            </ItemsControl.ItemContainerStyle>
+                        CornerRadius="5">
+                    <Border.Style>
+                        <Style TargetType="Border">
+                            <Setter Property="BorderBrush" Value="{DynamicResource App.BorderBrush}" />
+                            <Style.Triggers>
+                                <DataTrigger Binding="{Binding IsPageUiAgentConnected}" Value="True">
+                                    <Setter Property="BorderBrush" Value="{DynamicResource App.SuccessBrush}" />
+                                </DataTrigger>
+                                <DataTrigger Binding="{Binding IsPageUiAgentBusy}" Value="True">
+                                    <Setter Property="BorderBrush" Value="{DynamicResource App.WarningBrush}" />
+                                </DataTrigger>
+                            </Style.Triggers>
+                        </Style>
+                    </Border.Style>
+                    <Grid>
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <StackPanel>
+                            <TextBlock Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                       FontSize="10"
+                                       FontWeight="SemiBold"
+                                       Text="{Binding PageUiAgentStatusText}"
+                                       TextTrimming="CharacterEllipsis" />
+                            <TextBlock Margin="0,3,0,0"
+                                       Foreground="{DynamicResource App.TextMutedBrush}"
+                                       FontSize="9"
+                                       Text="{Binding PageUiAgentStatusDetail}"
+                                       TextTrimming="CharacterEllipsis"
+                                       ToolTip="{Binding PageUiAgentStatusDetail}" />
+                        </StackPanel>
+                        <ProgressBar Grid.Column="1"
+                                     Width="34"
+                                     Height="4"
+                                     Margin="8,0,0,0"
+                                     IsIndeterminate="True"
+                                     Visibility="{Binding IsPageUiAgentBusy, Converter={StaticResource BooleanToVisibilityConverter}}"
+                                     VerticalAlignment="Center" />
+                    </Grid>
+                </Border>
+
+                <Border Grid.Row="2"
+                        MinHeight="100"
+                        Padding="7"
+                        Background="{DynamicResource App.InputBackgroundBrush}"
+                        BorderBrush="{DynamicResource App.BorderBrush}"
+                        BorderThickness="1"
+                        CornerRadius="5">
+                    <ScrollViewer x:Name="PageUiConversationScrollViewer"
+                                  HorizontalScrollBarVisibility="Disabled"
+                                  VerticalScrollBarVisibility="Auto">
+                        <ItemsControl x:Name="PageUiConversationList"
+                                      ItemsSource="{Binding PageUiConversation}">
                             <ItemsControl.ItemTemplate>
                                 <DataTemplate>
-                                    <Border x:Name="LayerHitTarget"
-                                            Background="Transparent"
-                                            BorderBrush="Transparent"
-                                            BorderThickness="2"
-                                            CornerRadius="{Binding Radius, Converter={StaticResource DoubleToCornerRadiusConverter}}"
-                                            Cursor="SizeAll"
-                                            PreviewMouseLeftButtonDown="Layer_OnPreviewMouseLeftButtonDown"
-                                            PreviewMouseMove="Layer_OnPreviewMouseMove"
-                                            PreviewMouseLeftButtonUp="Layer_OnPreviewMouseLeftButtonUp"
-                                            LostMouseCapture="Layer_OnLostMouseCapture">
-                                        <ContentControl Content="{Binding}" Margin="-1">
-                                            <ContentControl.Style>
-                                                <Style TargetType="ContentControl">
-                                                    <Setter Property="ContentTemplate" Value="{StaticResource GenericTemplate}" />
-                                                    <Style.Triggers>
-                                                        <DataTrigger Binding="{Binding IsText}" Value="True">
-                                                            <Setter Property="ContentTemplate" Value="{StaticResource TextTemplate}" />
-                                                        </DataTrigger>
-                                                        <DataTrigger Binding="{Binding ComponentType}" Value="page">
-                                                            <Setter Property="ContentTemplate" Value="{StaticResource PageTemplate}" />
-                                                        </DataTrigger>
-                                                        <DataTrigger Binding="{Binding ComponentType}" Value="topbar">
-                                                            <Setter Property="ContentTemplate" Value="{StaticResource TopBarTemplate}" />
-                                                        </DataTrigger>
-                                                        <DataTrigger Binding="{Binding ComponentType}" Value="title">
-                                                            <Setter Property="ContentTemplate" Value="{StaticResource TitleTemplate}" />
-                                                        </DataTrigger>
-                                                        <DataTrigger Binding="{Binding ComponentType}" Value="card">
-                                                            <Setter Property="ContentTemplate" Value="{StaticResource CardTemplate}" />
-                                                        </DataTrigger>
-                                                        <DataTrigger Binding="{Binding ComponentType}" Value="button">
-                                                            <Setter Property="ContentTemplate" Value="{StaticResource ButtonTemplate}" />
-                                                        </DataTrigger>
-                                                        <DataTrigger Binding="{Binding ComponentType}" Value="status">
-                                                            <Setter Property="ContentTemplate" Value="{StaticResource StatusTemplate}" />
-                                                        </DataTrigger>
-                                                        <DataTrigger Binding="{Binding ComponentType}" Value="bottomnav">
-                                                            <Setter Property="ContentTemplate" Value="{StaticResource BottomNavTemplate}" />
-                                                        </DataTrigger>
-                                                        <DataTrigger Binding="{Binding ComponentType}" Value="input">
-                                                            <Setter Property="ContentTemplate" Value="{StaticResource InputTemplate}" />
-                                                        </DataTrigger>
-                                                        <DataTrigger Binding="{Binding ComponentType}" Value="panel">
-                                                            <Setter Property="ContentTemplate" Value="{StaticResource PanelTemplate}" />
-                                                        </DataTrigger>
-                                                        <DataTrigger Binding="{Binding ComponentType}" Value="slider">
-                                                            <Setter Property="ContentTemplate" Value="{StaticResource SliderTemplate}" />
-                                                        </DataTrigger>
-                                                        <DataTrigger Binding="{Binding ComponentType}" Value="toggle">
-                                                            <Setter Property="ContentTemplate" Value="{StaticResource ToggleTemplate}" />
-                                                        </DataTrigger>
-                                                    </Style.Triggers>
-                                                </Style>
-                                            </ContentControl.Style>
-                                        </ContentControl>
+                                    <Border x:Name="PageUiConversationBubble"
+                                            MaxWidth="300"
+                                            Margin="0,3"
+                                            Padding="9,7"
+                                            BorderThickness="1"
+                                            CornerRadius="6">
+                                        <StackPanel>
+                                            <DockPanel LastChildFill="True">
+                                                <TextBlock DockPanel.Dock="Right"
+                                                           Margin="8,0,0,0"
+                                                           Foreground="{DynamicResource App.TextMutedBrush}"
+                                                           FontSize="8"
+                                                           Text="{Binding CreatedAtText}" />
+                                                <TextBlock Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                                           FontSize="9"
+                                                           FontWeight="SemiBold"
+                                                           Text="{Binding RoleLabel}" />
+                                            </DockPanel>
+                                            <TextBlock Margin="0,4,0,0"
+                                                       Foreground="{DynamicResource App.TextPrimaryBrush}"
+                                                       FontSize="11"
+                                                       Text="{Binding Text}"
+                                                       TextWrapping="Wrap" />
+                                            <TextBlock Margin="0,5,0,0"
+                                                       Foreground="{DynamicResource App.TextMutedBrush}"
+                                                       FontSize="8"
+                                                       Text="{Binding StateText}"
+                                                       TextWrapping="Wrap" />
+                                        </StackPanel>
+                                        <Border.Style>
+                                            <Style TargetType="Border">
+                                                <Setter Property="HorizontalAlignment" Value="Left" />
+                                                <Setter Property="Background" Value="{DynamicResource App.SurfaceRaisedBrush}" />
+                                                <Setter Property="BorderBrush" Value="{DynamicResource App.BorderBrush}" />
+                                                <Style.Triggers>
+                                                    <DataTrigger Binding="{Binding IsUser}" Value="True">
+                                                        <Setter Property="HorizontalAlignment" Value="Right" />
+                                                        <Setter Property="Background" Value="{DynamicResource App.SelectionBrush}" />
+                                                        <Setter Property="BorderBrush" Value="{DynamicResource App.AccentBrush}" />
+                                                    </DataTrigger>
+                                                    <DataTrigger Binding="{Binding IsAgent}" Value="True">
+                                                        <Setter Property="BorderBrush" Value="{DynamicResource App.SuccessBrush}" />
+                                                    </DataTrigger>
+                                                </Style.Triggers>
+                                            </Style>
+                                        </Border.Style>
                                     </Border>
-                                    <DataTemplate.Triggers>
-                                        <DataTrigger Binding="{Binding IsSelected}" Value="True">
-                                            <Setter TargetName="LayerHitTarget" Property="BorderBrush"
-                                                    Value="{DynamicResource App.SelectionBrush}" />
-                                        </DataTrigger>
-                                        <DataTrigger Binding="{Binding EffectiveLocked}" Value="True">
-                                            <Setter TargetName="LayerHitTarget" Property="Cursor" Value="Arrow" />
-                                        </DataTrigger>
-                                    </DataTemplate.Triggers>
                                 </DataTemplate>
                             </ItemsControl.ItemTemplate>
                         </ItemsControl>
-                    </Grid>
+                    </ScrollViewer>
                 </Border>
+
+                <TextBox x:Name="PageUiInstructionTextBox"
+                         Grid.Row="3"
+                         MinHeight="100"
+                         MaxHeight="220"
+                         Margin="0,10,0,0"
+                         Padding="9,7"
+                         AcceptsReturn="True"
+                         AcceptsTab="False"
+                         Background="{DynamicResource App.InputBackgroundBrush}"
+                         BorderBrush="{DynamicResource App.BorderBrush}"
+                         Foreground="{DynamicResource App.TextPrimaryBrush}"
+                         FontFamily="Microsoft YaHei UI"
+                         FontSize="11"
+                         MaxLength="4000"
+                         SpellCheck.IsEnabled="False"
+                         Text="{Binding PageUiInstructionDraft, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         TextWrapping="Wrap"
+                         VerticalScrollBarVisibility="Auto"
+                         PreviewKeyDown="PageUiInstructionTextBox_OnPreviewKeyDown" />
+
+                <Grid Grid.Row="4" Margin="0,9,0,0">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+                    <Button x:Name="PageUiSubmitInstructionButton"
+                            HorizontalAlignment="Stretch"
+                            Padding="12,7"
+                            Command="{Binding SubmitPageUiInstructionCommand}">
+                        <Button.Style>
+                            <Style TargetType="Button" BasedOn="{StaticResource App.ButtonStyle}">
+                                <Setter Property="Content" Value="发送给 Agent" />
+                                <Style.Triggers>
+                                    <DataTrigger Binding="{Binding IsPageUiAgentBusy}" Value="True">
+                                        <Setter Property="Content" Value="Agent 正在处理…" />
+                                    </DataTrigger>
+                                </Style.Triggers>
+                            </Style>
+                        </Button.Style>
+                    </Button>
+                    <Grid Grid.Row="1" Margin="0,7,0,0">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBlock Foreground="{DynamicResource App.TextMutedBrush}"
+                                   FontSize="9"
+                                   Text="Ctrl+Enter 提交。当前阶段 Agent 返回设计建议，不会直接改写画布。"
+                                   TextWrapping="Wrap" />
+                        <TextBlock Grid.Column="1"
+                                   Margin="8,0,0,0"
+                                   Foreground="{DynamicResource App.TextMutedBrush}"
+                                   FontSize="9"
+                                   Text="{Binding PageUiInstructionCharacterCountText}"
+                                   VerticalAlignment="Top" />
+                    </Grid>
+                </Grid>
             </Grid>
-        </ScrollViewer>
+        </Border>
+
+        <GridSplitter Grid.Column="1"
+                      Width="5"
+                      HorizontalAlignment="Stretch"
+                      VerticalAlignment="Stretch"
+                      Background="{DynamicResource App.BorderBrush}"
+                      ResizeBehavior="PreviousAndNext"
+                      ResizeDirection="Columns"
+                      ShowsPreview="True" />
+
+        <Grid x:Name="PageUiCanvasPanel"
+              Grid.Column="2"
+              Background="{DynamicResource App.CanvasBackgroundBrush}">
+            <Grid.RowDefinitions>
+                <RowDefinition Height="38" />
+                <RowDefinition Height="*" />
+            </Grid.RowDefinitions>
+
+            <Border Grid.Row="0"
+                    Padding="12,0"
+                    Background="{DynamicResource App.SurfaceRaisedBrush}"
+                    BorderBrush="{DynamicResource App.BorderBrush}"
+                    BorderThickness="0,0,0,1">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="Auto" />
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+                    <TextBlock Foreground="{DynamicResource App.TextPrimaryBrush}"
+                               FontSize="12"
+                               FontWeight="SemiBold"
+                               Text="画布"
+                               VerticalAlignment="Center" />
+                    <TextBlock Grid.Column="1"
+                               Margin="12,0"
+                               Foreground="{DynamicResource App.TextMutedBrush}"
+                               FontSize="10"
+                               Text="{Binding DocumentTitle}"
+                               TextTrimming="CharacterEllipsis"
+                               VerticalAlignment="Center" />
+                    <StackPanel Grid.Column="2"
+                                Orientation="Horizontal"
+                                VerticalAlignment="Center">
+                        <TextBlock Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                   FontSize="10"
+                                   Text="{Binding CanvasWidth, StringFormat={}{0:0}}" />
+                        <TextBlock Margin="3,0"
+                                   Foreground="{DynamicResource App.TextMutedBrush}"
+                                   FontSize="10"
+                                   Text="×" />
+                        <TextBlock Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                   FontSize="10"
+                                   Text="{Binding CanvasHeight, StringFormat={}{0:0}}" />
+                        <TextBlock Margin="10,0,0,0"
+                                   Foreground="{DynamicResource App.AccentBrush}"
+                                   FontSize="10"
+                                   Text="{Binding ZoomText}" />
+                    </StackPanel>
+                </Grid>
+            </Border>
+
+            <ScrollViewer x:Name="CanvasScrollViewer"
+                          Grid.Row="1"
+                          HorizontalScrollBarVisibility="Auto"
+                          VerticalScrollBarVisibility="Auto"
+                          CanContentScroll="False"
+                          PreviewMouseWheel="CanvasScrollViewer_OnPreviewMouseWheel">
+                <Grid Margin="72">
+                    <Border Width="{Binding CanvasWidth}"
+                            Height="{Binding CanvasHeight}"
+                            HorizontalAlignment="Center"
+                            VerticalAlignment="Center"
+                            Background="{Binding CanvasBackground, Converter={StaticResource StringToBrushConverter}, ConverterParameter=#11151B}"
+                            BorderBrush="#526174"
+                            BorderThickness="1"
+                            SnapsToDevicePixels="True">
+                        <Border.LayoutTransform>
+                            <ScaleTransform ScaleX="{Binding Zoom}" ScaleY="{Binding Zoom}" />
+                        </Border.LayoutTransform>
+                        <Grid x:Name="CanvasSurface"
+                              Width="{Binding CanvasWidth}"
+                              Height="{Binding CanvasHeight}"
+                              Background="Transparent"
+                              ClipToBounds="True"
+                              AllowDrop="True"
+                              PreviewMouseLeftButtonDown="CanvasSurface_OnPreviewMouseLeftButtonDown"
+                              PreviewDragOver="CanvasSurface_OnPreviewDragOver"
+                              Drop="CanvasSurface_OnDrop">
+                            <ItemsControl ItemsSource="{Binding CanvasLayers}"
+                                          Width="{Binding CanvasWidth}"
+                                          Height="{Binding CanvasHeight}"
+                                          HorizontalAlignment="Left"
+                                          VerticalAlignment="Top">
+                                <ItemsControl.ItemsPanel>
+                                    <ItemsPanelTemplate>
+                                        <Canvas IsItemsHost="True" />
+                                    </ItemsPanelTemplate>
+                                </ItemsControl.ItemsPanel>
+                                <ItemsControl.ItemContainerStyle>
+                                    <Style TargetType="ContentPresenter">
+                                        <Setter Property="Canvas.Left" Value="{Binding X}" />
+                                        <Setter Property="Canvas.Top" Value="{Binding Y}" />
+                                        <Setter Property="Width" Value="{Binding Width}" />
+                                        <Setter Property="Height" Value="{Binding Height}" />
+                                        <Setter Property="Panel.ZIndex" Value="{Binding ZIndex}" />
+                                        <Setter Property="Opacity" Value="{Binding EffectiveOpacity}" />
+                                        <Setter Property="Visibility"
+                                                Value="{Binding EffectiveVisibility, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                                        <Setter Property="RenderTransformOrigin" Value="0.5,0.5" />
+                                        <Setter Property="RenderTransform">
+                                            <Setter.Value>
+                                                <RotateTransform Angle="{Binding Model.Transform.Rotation}" />
+                                            </Setter.Value>
+                                        </Setter>
+                                    </Style>
+                                </ItemsControl.ItemContainerStyle>
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate>
+                                        <Border x:Name="LayerHitTarget"
+                                                Background="Transparent"
+                                                BorderBrush="Transparent"
+                                                BorderThickness="2"
+                                                CornerRadius="{Binding Radius, Converter={StaticResource DoubleToCornerRadiusConverter}}"
+                                                Cursor="SizeAll"
+                                                PreviewMouseLeftButtonDown="Layer_OnPreviewMouseLeftButtonDown"
+                                                PreviewMouseMove="Layer_OnPreviewMouseMove"
+                                                PreviewMouseLeftButtonUp="Layer_OnPreviewMouseLeftButtonUp"
+                                                LostMouseCapture="Layer_OnLostMouseCapture">
+                                            <ContentControl Content="{Binding}" Margin="-1">
+                                                <ContentControl.Style>
+                                                    <Style TargetType="ContentControl">
+                                                        <Setter Property="ContentTemplate" Value="{StaticResource GenericTemplate}" />
+                                                        <Style.Triggers>
+                                                            <DataTrigger Binding="{Binding IsText}" Value="True">
+                                                                <Setter Property="ContentTemplate" Value="{StaticResource TextTemplate}" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding ComponentType}" Value="page">
+                                                                <Setter Property="ContentTemplate" Value="{StaticResource PageTemplate}" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding ComponentType}" Value="topbar">
+                                                                <Setter Property="ContentTemplate" Value="{StaticResource TopBarTemplate}" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding ComponentType}" Value="title">
+                                                                <Setter Property="ContentTemplate" Value="{StaticResource TitleTemplate}" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding ComponentType}" Value="card">
+                                                                <Setter Property="ContentTemplate" Value="{StaticResource CardTemplate}" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding ComponentType}" Value="button">
+                                                                <Setter Property="ContentTemplate" Value="{StaticResource ButtonTemplate}" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding ComponentType}" Value="status">
+                                                                <Setter Property="ContentTemplate" Value="{StaticResource StatusTemplate}" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding ComponentType}" Value="bottomnav">
+                                                                <Setter Property="ContentTemplate" Value="{StaticResource BottomNavTemplate}" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding ComponentType}" Value="input">
+                                                                <Setter Property="ContentTemplate" Value="{StaticResource InputTemplate}" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding ComponentType}" Value="panel">
+                                                                <Setter Property="ContentTemplate" Value="{StaticResource PanelTemplate}" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding ComponentType}" Value="slider">
+                                                                <Setter Property="ContentTemplate" Value="{StaticResource SliderTemplate}" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding ComponentType}" Value="toggle">
+                                                                <Setter Property="ContentTemplate" Value="{StaticResource ToggleTemplate}" />
+                                                            </DataTrigger>
+                                                        </Style.Triggers>
+                                                    </Style>
+                                                </ContentControl.Style>
+                                            </ContentControl>
+                                        </Border>
+                                        <DataTemplate.Triggers>
+                                            <DataTrigger Binding="{Binding IsSelected}" Value="True">
+                                                <Setter TargetName="LayerHitTarget" Property="BorderBrush"
+                                                        Value="{DynamicResource App.SelectionBrush}" />
+                                            </DataTrigger>
+                                            <DataTrigger Binding="{Binding EffectiveLocked}" Value="True">
+                                                <Setter TargetName="LayerHitTarget" Property="Cursor" Value="Arrow" />
+                                            </DataTrigger>
+                                        </DataTemplate.Triggers>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </Grid>
+                    </Border>
+                </Grid>
+            </ScrollViewer>
+        </Grid>
     </Grid>
 </UserControl>

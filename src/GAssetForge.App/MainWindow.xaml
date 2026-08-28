@@ -293,7 +293,7 @@
             </MenuItem>
             <MenuItem x:Name="ViewMenu" Header="视图(_V)" SubmenuOpened="ViewMenu_OnSubmenuOpened">
                 <MenuItem x:Name="ShowUiWorkspaceMenuItem"
-                          Header="页面 UI 设计工具"
+                          Header="页面UI制作"
                           IsCheckable="True"
                           Command="{Binding TogglePanelCommand}"
                           CommandParameter="ui-canvas" />

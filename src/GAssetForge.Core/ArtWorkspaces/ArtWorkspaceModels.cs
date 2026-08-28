@@ -7,6 +7,41 @@ public enum ArtWorkspaceMessageRole
     Agent
 }
 
+public static class ArtWorkspaceConversationSegmentKinds
+{
+    public const string Text = "text";
+
+    public const string ImageReference = "image-reference";
+}
+
+/// <summary>
+/// Shared size accounting for inline image chips. A chip has a non-zero semantic cost so callers
+/// cannot bypass the instruction limit by replacing arbitrary text with thousands of references.
+/// </summary>
+public static class ArtWorkspaceInstructionSegmentSemantics
+{
+    public const int MaximumSemanticLength = 16_000;
+
+    public const int ImageReferenceSemanticLength = 32;
+
+    public const int MaximumImageReferenceCount = 64;
+
+    public static int MeasureSemanticLength(int textLength, int imageReferenceCount)
+    {
+        if (textLength < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(textLength));
+        }
+
+        if (imageReferenceCount < 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(imageReferenceCount));
+        }
+
+        return checked(textLength + imageReferenceCount * ImageReferenceSemanticLength);
+    }
+}
+
 public sealed class ArtWorkspaceDocument
 {
     public int SchemaVersion { get; set; } = ArtWorkspaceJson.CurrentSchemaVersion;
@@ -144,6 +179,13 @@ public sealed class ArtWorkspaceConversationMessage
 
     public string State { get; set; } = "captured";
 
+    /// <summary>
+    /// Structured, ordered user instruction content. Older workspace JSON omits this property and
+    /// safely falls back to <see cref="Text"/>. Image names and labels are frozen for coordinate-
+    /// free history display even if the canvas image is renamed or removed later.
+    /// </summary>
+    public List<ArtWorkspaceConversationSegment> Segments { get; set; } = [];
+
     public string? ReferenceImageId { get; set; }
 
     /// <summary>
@@ -151,6 +193,23 @@ public sealed class ArtWorkspaceConversationMessage
     /// Historical conversation remains readable even if the canvas object is later removed.
     /// </summary>
     public string? ReferenceSummary { get; set; }
+}
+
+public sealed class ArtWorkspaceConversationSegment
+{
+    public string Kind { get; set; } = ArtWorkspaceConversationSegmentKinds.Text;
+
+    public string Text { get; set; } = string.Empty;
+
+    public string TokenId { get; set; } = string.Empty;
+
+    public string ImageId { get; set; } = string.Empty;
+
+    public string ImageName { get; set; } = string.Empty;
+
+    public string DisplayLabel { get; set; } = string.Empty;
+
+    public ArtWorkspaceImageRegionSelection? Region { get; set; }
 }
 
 public static class ArtWorkspaceDocumentFactory

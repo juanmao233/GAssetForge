@@ -68,8 +68,15 @@ internal static class Program
             Console.WriteLine("PASS  Icon 生成步骤冻结画幅、相机、镜头、投影与背景处理合同");
             ArtWorkspaceGenerationConstraintSmokeTests.Run();
             Console.WriteLine("PASS  美术工作区生成合同冻结指令、输出框和有序画布参考");
+            ArtWorkspaceRegionEditRegressionSmokeTests.RunAllAsync(_temporaryRoot)
+                .GetAwaiter().GetResult();
+            Console.WriteLine("PASS  美术工作区局部编辑冻结唯一基准、Mask、CLI edit 合同并强制保留选区外像素");
             ArtWorkspaceInstructionReferenceUiSmokeTests.Run(_temporaryRoot);
             Console.WriteLine("PASS  美术工作区图片指代、旋转局部框选与停靠工具/属性绑定安全可用");
+            ArtWorkspaceInlineInstructionSmokeTests.Run(_temporaryRoot);
+            Console.WriteLine("PASS  美术工作区对话可按光标顺序插入多图片 token，并冻结局部区域、持久化历史与严格预算");
+            PageUiCreationSmokeTests.Run(_temporaryRoot);
+            Console.WriteLine("PASS  页面UI制作显示名、稳定工作流身份、左对话右画布、Agent 提交与对话持久化可用");
             ProductIdentityCompatibilitySmokeTests.Run();
             Console.WriteLine("PASS  GAssetForge 新标识与旧数据、项目、MCP 和调度身份兼容");
             ReleaseVersionConsistencySmokeTests.RunAsync(_temporaryRoot).GetAwaiter().GetResult();

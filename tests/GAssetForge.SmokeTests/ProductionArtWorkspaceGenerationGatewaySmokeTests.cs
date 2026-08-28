@@ -38,7 +38,7 @@ internal static class ProductionArtWorkspaceGenerationGatewaySmokeTests
             fixture.Paths,
             fixture.Store,
             agentConnection,
-            (batchId, taskIds) =>
+            (batchId, taskIds, _) =>
             {
                 enqueueObserved.TrySetResult((batchId, taskIds.Single()));
                 return GenerationBatchDispatchEnqueueResult.QueueStopped;
@@ -94,7 +94,7 @@ internal static class ProductionArtWorkspaceGenerationGatewaySmokeTests
             fixture.Paths,
             fixture.Store,
             agentConnection,
-            (batchId, taskIds) =>
+            (batchId, taskIds, _) =>
             {
                 enqueueObserved.TrySetResult((batchId, taskIds.Single()));
                 return GenerationBatchDispatchEnqueueResult.Enqueued;
@@ -208,7 +208,7 @@ internal static class ProductionArtWorkspaceGenerationGatewaySmokeTests
             fixture.Paths,
             fixture.Store,
             agentConnection,
-            (_, _) =>
+            (_, _, _) =>
             {
                 enqueueObserved.TrySetResult(true);
                 return GenerationBatchDispatchEnqueueResult.Enqueued;

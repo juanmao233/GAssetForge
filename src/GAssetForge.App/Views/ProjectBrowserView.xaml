@@ -399,7 +399,7 @@
 
             <TabItem Header="内置 Prefabs"
                      IsEnabled="{Binding IsPrefabLibraryAvailable}"
-                     ToolTip="仅页面 UI 设计工作流可实例化内置 Prefab"
+                     ToolTip="仅页面UI制作工作流可实例化内置 Prefab"
                      Style="{StaticResource ProjectTabItemStyle}">
                 <Grid DataContext="{Binding EditorWorkspace}"
                       Background="{DynamicResource App.SurfaceBrush}">

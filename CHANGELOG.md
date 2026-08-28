@@ -5,6 +5,101 @@ development track; versioning policy will be finalized before the first public r
 
 ## Unreleased
 
+## 1.0.26t1 - 2026-08-28
+
+### Added
+
+- Added a resizable Agent conversation panel to the left side of the renamed `页面UI制作`
+  workspace. It shows the shared managed Agent state, accepts multiline instructions, supports
+  `Ctrl+Enter`, displays the user/Agent history, and keeps the existing UI canvas on the right.
+- Added a dedicated Page UI conversation gateway that reuses the Shell-owned Codex/MCP session,
+  serializes requests through the existing Agent turn lifecycle, and filters replies by the exact
+  returned thread and turn identity.
+- Added project-local persistence for the current Page UI instruction draft and the latest 100
+  conversation messages, with bounded validation and compatibility with existing Schema v2 UI
+  project files.
+
+### Changed
+
+- Renamed the visible `页面 UI 设计工具` workflow and View-menu entry to `页面UI制作` while keeping
+  `WorkflowKind.UiDesign`, workflow key `ui`, AvalonDock ContentId `ui-canvas`, and the existing
+  `ui-project.pfui.json` storage contract unchanged.
+- Moved the current UI document name and canvas dimensions into a compact header above the canvas,
+  while retaining existing text creation, layer dragging, Prefab drop, and Ctrl+wheel zoom behavior.
+- Page UI Agent prompts now freeze the active document, canvas size/background, selected layer, and
+  a bounded layer summary. This first interaction stage returns design guidance and deliberately does
+  not claim to modify the canvas or project files.
+
+### Fixed
+
+- Page UI Agent replies now resolve the current persisted message by its stable identity, so normal
+  canvas edits, Undo/Redo, refreshes, and project switches cannot leave a detached reply or persist a
+  stale `pending`/`streaming` state.
+- Codex Exec fallback now follows the authoritative Turn identity reported by `turn.started`, keeping
+  later Agent message events aligned with the completed Turn instead of discarding valid reply text.
+
+## 1.0.25t1 - 2026-08-28
+
+> This test version was not published separately; all changes listed below are delivered with
+> `1.0.26t1`.
+
+### Added
+
+- Replaced the Art Workspace's single per-message image attachment with an ordered rich instruction
+  made from text and inline image-reference tokens. Users can now compose requests such as
+  “use image A's armor, image B's hairstyle, and image C's character” while preserving the exact
+  text/token order seen by the Agent.
+- Added cursor-position insertion for the currently selected canvas image. Every token receives an
+  independent identity and freezes the whole image or its current local marquee at insertion time,
+  so later selection changes do not rewrite earlier references and the same image may be inserted
+  repeatedly with different regions.
+- Added a first-class Art Workspace `region-edit` contract with an authoritative current-image
+  identity, base and mask SHA-256 values, exact source-pixel bounds, history-reference exclusion,
+  and a mandatory preserve-outside-mask policy.
+- Added project-local region-edit audit artifacts under each generation Run: immutable base PNG,
+  API Alpha mask, region preview, standalone contract, safe composite, outside-mask difference PNG,
+  and structured difference JSON.
+
+### Changed
+
+- Advanced the Art Workspace constraint contract to Schema v3 with ordered `instructionSegments`
+  and resolved `instructionReferences`. The Prompt and JSON contract retain each token's adjacent
+  text, managed snapshot, SHA-256, image/asset identity, source-pixel bounds, normalized region, and
+  rotation-aware canvas polygon without exposing paths, IDs, or coordinates in the conversation UI.
+- Conversation history now persists ordered segments. Existing plain-text workspace JSON and legacy
+  single `InstructionReference` generation requests remain readable through compatibility fallback;
+  newly published requests use the ordered segment contract.
+- A single frozen image-region instruction now bypasses ordinary whole-image ImageGen dispatch and
+  calls the managed `image_gen.py edit` path directly with exactly one `--image` and the frozen
+  `--mask`. The default `gpt-image-2` already uses high-fidelity image inputs, so the Harness
+  no longer passes the unsupported `--input-fidelity` option. Historical canvas versions are no
+  longer supplied as equal edit inputs.
+- Region-edit tasks use three frozen attempts by default. The authoritative base and output frame
+  must have identical pixel dimensions; mismatches fail closed rather than resizing preserved pixels.
+- Arbitrary base sizes such as 955×1014 now use an integer, centered prepared API canvas. The Harness
+  preserves prepared base/mask, full API raw, and transform JSON, then crops by the frozen offset with
+  no interpolation before submission; unsupported downscaling fails closed.
+
+### Fixed
+
+- Inline image tokens fail closed when their frozen image is hidden, deleted, missing, changed, or no
+  longer a valid managed reference. Submission no longer silently retargets an old token to whichever
+  image happens to be selected later.
+- Fixed Art Workspace local selections being treated as prompt-only hints, which allowed both eyes
+  or the entire character to be repainted and could restore colors from older canvas versions.
+- GAssetForge now archives the raw model result, measures significant changes outside the mask,
+  rejects large whole-image redraws as retryable validation failures, and deterministically
+  composites accepted edits so every final pixel outside the mask exactly matches the current base.
+- `run_image_delivery_fallback`, normal submission, and manual Agent recovery now share the same
+  region-edit contract instead of losing base/mask context or misclassifying validation failures as
+  Runtime or image-delivery errors.
+- Region-edit automatic retries now rebind authoritative base, mask, API raw, composite, and
+  difference diagnostics into the new attempt Run. A failed image can no longer be reused as the
+  next attempt merely because its old cache path still exists; retry delivery also preserves an
+  empty staging list when background removal is disabled. Retryable transient Image API/CLI delivery
+  failures now schedule the next child immediately, while permanent failures remain terminal; resumed
+  retries also keep their final output under the child `Generated/ArtWorkspace/<batch>/Final` path.
+
 ## 1.0.24t1 - 2026-08-28
 
 ### Added

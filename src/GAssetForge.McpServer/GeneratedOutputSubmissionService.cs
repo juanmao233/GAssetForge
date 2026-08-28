@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Security.Cryptography;
+using System.Text.Json;
 using GAssetForge.Core.Generation;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.PixelFormats;
@@ -17,6 +18,31 @@ internal sealed record GeneratedOutputSubmissionResult(
     string SourceSha256,
     bool SourceResized,
     GeneratedOutputProcessingResult Processing);
+
+internal sealed record ArtWorkspaceRegionEditDiagnostics(
+    string BaseImagePath,
+    string MaskPath,
+    string CandidatePath,
+    string CompositePath,
+    string DifferenceReportPath,
+    string DifferencePreviewPath,
+    int EditablePixelCount,
+    int PreservedPixelCount,
+    int SignificantOutsideChangedPixels,
+    double SignificantOutsideChangedPercent,
+    double MaximumAllowedPercent,
+    int SignificantChannelDelta,
+    bool Passed);
+
+internal sealed class ArtWorkspaceRegionEditValidationException(
+    string message,
+    ArtWorkspaceRegionEditDiagnostics diagnostics)
+    : InvalidOperationException(message)
+{
+    internal const string ErrorCode = "art_workspace_region_edit_outside_mask_changed";
+
+    internal ArtWorkspaceRegionEditDiagnostics Diagnostics { get; } = diagnostics;
+}
 
 /// <summary>
 /// Imports an image-model return into the frozen project workspace and executes every deterministic
@@ -56,6 +82,15 @@ internal sealed class GeneratedOutputSubmissionService(
         }
 
         var output = task.Constraints.Output;
+        ArtWorkspaceRegionEditContract? regionEditContract = null;
+        if (!ArtWorkspaceRegionEditContractComposer.TryRead(
+                task.Constraints,
+                out regionEditContract) &&
+            ArtWorkspaceRegionEditContractComposer.HasDeclaredContract(task.Constraints))
+        {
+            throw new InvalidDataException("任务声明了损坏或不受支持的美术工作区局部编辑合同。");
+        }
+
         var hasBackgroundRemoval = output.BackgroundRemoval is not null;
         if (outputIndex < 0 || outputIndex >= output.Count ||
             workspace.ModelOutputPaths.Length != output.Count ||
@@ -131,10 +166,13 @@ internal sealed class GeneratedOutputSubmissionService(
                         modelOutput.FullPath,
                         normalized.FullPath,
                         output,
+                        preserveNormalizedCoordinates: regionEditContract is not null,
                         cancellationToken)
                     .ConfigureAwait(false);
                 measurement.Complete(
-                    resized
+                    regionEditContract is not null
+                        ? "局部编辑候选已由 Harness 无插值恢复为 authoritative base 精确像素尺寸。"
+                        : resized
                         ? "软件已按冻结画布 contain-fit 并补齐精确首道底色。"
                         : "模型原图尺寸已匹配；软件仍完成了不透明底色与边框归一化。",
                     normalized.RelativePath);
@@ -158,7 +196,18 @@ internal sealed class GeneratedOutputSubmissionService(
         {
             try
             {
-                processing = hasBackgroundRemoval
+                processing = regionEditContract is not null
+                    ? await CommitRegionEditOutputAsync(
+                            task,
+                            delivery,
+                            workspace,
+                            regionEditContract,
+                            normalized,
+                            target,
+                            outputIndex,
+                            cancellationToken)
+                        .ConfigureAwait(false)
+                    : hasBackgroundRemoval
                     ? await postProcessor.ProcessAsync(
                             task,
                             delivery,
@@ -180,6 +229,11 @@ internal sealed class GeneratedOutputSubmissionService(
             catch (TilemapGeometryValidationException exception)
             {
                 measurement.Fail(exception, exception.ErrorCode);
+                throw;
+            }
+            catch (ArtWorkspaceRegionEditValidationException exception)
+            {
+                measurement.Fail(exception, ArtWorkspaceRegionEditValidationException.ErrorCode);
                 throw;
             }
             catch (Exception exception)
@@ -292,6 +346,393 @@ internal sealed class GeneratedOutputSubmissionService(
             : $"{directory}/{normalizedFileName}";
         return GenerationInputValidator.NormalizeRelativeAssetPath(
             $"{rootPath}/35-normalized-input/{childPath}");
+    }
+
+    private async Task<GeneratedOutputProcessingResult> CommitRegionEditOutputAsync(
+        GenerationTask task,
+        GenerationDeliveryPlan delivery,
+        GenerationRunWorkspacePlan workspace,
+        ArtWorkspaceRegionEditContract contract,
+        ValidatedAssetPath normalized,
+        ValidatedAssetPath target,
+        int outputIndex,
+        CancellationToken cancellationToken)
+    {
+        if (task.Constraints.Output.BackgroundRemoval is not null)
+        {
+            throw new InvalidDataException("局部像素编辑不能与背景剔除首道工序同时启用。");
+        }
+
+        var baseImage = contextResolver.ResolveDeliveryAssetPath(
+            contract.BaseImagePath,
+            delivery.AssetRoot,
+            requireExistingFile: true,
+            "局部编辑 authoritative base");
+        var mask = contextResolver.ResolveDeliveryAssetPath(
+            contract.MaskPath,
+            delivery.AssetRoot,
+            requireExistingFile: true,
+            "局部编辑 Alpha mask");
+        var composite = contextResolver.ResolveDeliveryAssetPath(
+            contract.CompositePath,
+            delivery.AssetRoot,
+            requireExistingFile: false,
+            "局部编辑强制合成产物");
+        var differenceReport = contextResolver.ResolveDeliveryAssetPath(
+            contract.DifferenceReportPath,
+            delivery.AssetRoot,
+            requireExistingFile: false,
+            "局部编辑选区外差异报告");
+        var differencePreview = contextResolver.ResolveDeliveryAssetPath(
+            contract.DifferencePreviewPath,
+            delivery.AssetRoot,
+            requireExistingFile: false,
+            "局部编辑选区外差异预览");
+        var processed = contextResolver.ResolveDeliveryAssetPath(
+            workspace.ProcessedPaths[outputIndex],
+            delivery.AssetRoot,
+            requireExistingFile: false,
+            "软件处理后局部编辑产物");
+
+        var actualBaseSha256 = await ComputeSha256Async(baseImage.FullPath, cancellationToken)
+            .ConfigureAwait(false);
+        if (!string.Equals(
+                actualBaseSha256,
+                contract.BaseImageSha256,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                "局部编辑 authoritative base 与冻结 SHA-256 不一致，已拒绝继续合成。");
+        }
+
+
+        var actualMaskSha256 = await ComputeSha256Async(mask.FullPath, cancellationToken)
+            .ConfigureAwait(false);
+        if (!string.Equals(actualMaskSha256, contract.MaskSha256, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException(
+                "局部编辑 mask 与冻结 SHA-256 不一致，已拒绝继续合成。");
+        }
+
+        if (File.Exists(target.FullPath))
+        {
+            GeneratedAssetValidator.Validate(target.FullPath, task.Constraints);
+            await EnsureOutsideMaskMatchesBaseAsync(
+                    baseImage.FullPath,
+                    mask.FullPath,
+                    target.FullPath,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return new GeneratedOutputProcessingResult(
+                outputIndex,
+                normalized.RelativePath,
+                File.Exists(processed.FullPath) ? processed.RelativePath : null,
+                target.RelativePath,
+                Processed: false,
+                AlreadyFinal: true,
+                Skipped: true,
+                ReplacedExistingTarget: false,
+                StagingDeleted: false,
+                "局部编辑最终目标已经存在，并已验证 mask 外逐像素等于 authoritative base。",
+                null);
+        }
+
+        ArtWorkspaceRegionEditDiagnostics diagnostics;
+        using (var measurement = GenerationRunJournal.Measure(
+                   delivery,
+                   task,
+                   "art_workspace.region_edit.compose",
+                   task.ClaimedBy,
+                   outputIndex,
+                   composite.RelativePath,
+                   normalized.RelativePath))
+        {
+            try
+            {
+                diagnostics = await AnalyzeAndCompositeRegionEditAsync(
+                        baseImage.FullPath,
+                        mask.FullPath,
+                        normalized.FullPath,
+                        composite.FullPath,
+                        differenceReport.FullPath,
+                        differencePreview.FullPath,
+                        contract.MaximumOutsideMaskChangedPercent,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (!diagnostics.Passed)
+                {
+                    throw new ArtWorkspaceRegionEditValidationException(
+                        $"局部编辑模型结果在 mask 外有 " +
+                        $"{diagnostics.SignificantOutsideChangedPixels}/{diagnostics.PreservedPixelCount} " +
+                        $"个显著变化像素（{diagnostics.SignificantOutsideChangedPercent:0.###}%），" +
+                        $"超过允许的 {diagnostics.MaximumAllowedPercent:0.###}%；" +
+                        "模型原图、归一化图、Mask 与差异报告均已保留，任务不得登记 Completed。",
+                        diagnostics);
+                }
+
+                measurement.Complete(
+                    $"局部编辑已强制合成；mask 外显著变化 " +
+                    $"{diagnostics.SignificantOutsideChangedPixels}/{diagnostics.PreservedPixelCount} " +
+                    $"({diagnostics.SignificantOutsideChangedPercent:0.###}%)，最终将逐像素恢复 base。",
+                    composite.RelativePath);
+            }
+            catch (ArtWorkspaceRegionEditValidationException exception)
+            {
+                measurement.Fail(exception, ArtWorkspaceRegionEditValidationException.ErrorCode);
+                throw;
+            }
+            catch (Exception exception)
+            {
+                measurement.Fail(exception);
+                throw;
+            }
+        }
+
+        GeneratedAssetValidator.Validate(composite.FullPath, task.Constraints);
+        await CopyArtifactIfAbsentOrEqualAsync(
+                composite.FullPath,
+                processed.FullPath,
+                cancellationToken)
+            .ConfigureAwait(false);
+        GeneratedAssetValidator.Validate(processed.FullPath, task.Constraints);
+        await CopyArtifactIfAbsentOrEqualAsync(
+                processed.FullPath,
+                target.FullPath,
+                cancellationToken)
+            .ConfigureAwait(false);
+        GeneratedAssetValidator.Validate(target.FullPath, task.Constraints);
+        await EnsureOutsideMaskMatchesBaseAsync(
+                baseImage.FullPath,
+                mask.FullPath,
+                target.FullPath,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return new GeneratedOutputProcessingResult(
+            outputIndex,
+            normalized.RelativePath,
+            processed.RelativePath,
+            target.RelativePath,
+            Processed: true,
+            AlreadyFinal: false,
+            Skipped: false,
+            ReplacedExistingTarget: false,
+            StagingDeleted: false,
+            "软件已按真实 Alpha mask 强制合成局部编辑结果；mask 外像素逐像素保留 authoritative base。",
+            null);
+    }
+
+    private static async Task<ArtWorkspaceRegionEditDiagnostics> AnalyzeAndCompositeRegionEditAsync(
+        string baseImagePath,
+        string maskPath,
+        string candidatePath,
+        string compositePath,
+        string differenceReportPath,
+        string differencePreviewPath,
+        double maximumOutsideMaskChangedPercent,
+        CancellationToken cancellationToken)
+    {
+        const int significantChannelDelta = 32;
+        var diagnostics = await Task.Run(() =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            using var baseline = Image.Load<Rgba32>(baseImagePath);
+            using var mask = Image.Load<Rgba32>(maskPath);
+            using var candidate = Image.Load<Rgba32>(candidatePath);
+            if (mask.Width != baseline.Width || mask.Height != baseline.Height ||
+                candidate.Width != baseline.Width || candidate.Height != baseline.Height)
+            {
+                throw new InvalidDataException(
+                    "局部编辑 base、mask 与归一化模型图必须具有完全相同的像素尺寸。");
+            }
+
+            using var composite = baseline.Clone();
+            using var differencePreview = new Image<Rgba32>(
+                baseline.Width,
+                baseline.Height,
+                new Rgba32(0, 0, 0, 0));
+            var editablePixels = 0;
+            var preservedPixels = 0;
+            var significantOutsideChanges = 0;
+            var hasEditablePixels = false;
+            var hasPreservedPixels = false;
+            for (var y = 0; y < baseline.Height; y++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                for (var x = 0; x < baseline.Width; x++)
+                {
+                    var alpha = mask[x, y].A;
+                    if (alpha is not (byte.MinValue or byte.MaxValue))
+                    {
+                        throw new InvalidDataException(
+                            $"局部编辑 mask 只能使用 0/255 Alpha；发现 ({x},{y})={alpha}。");
+                    }
+
+                    if (alpha == byte.MinValue)
+                    {
+                        editablePixels++;
+                        hasEditablePixels = true;
+                        composite[x, y] = candidate[x, y];
+                        continue;
+                    }
+
+                    preservedPixels++;
+                    hasPreservedPixels = true;
+                    if (!HasSignificantPixelDifference(
+                            baseline[x, y],
+                            candidate[x, y],
+                            significantChannelDelta))
+                    {
+                        continue;
+                    }
+
+                    significantOutsideChanges++;
+                    differencePreview[x, y] = new Rgba32(255, 32, 32, 255);
+                }
+            }
+
+            if (!hasEditablePixels || !hasPreservedPixels)
+            {
+                throw new InvalidDataException(
+                    "局部编辑 mask 必须同时包含可编辑透明区和需保留的不透明区。");
+            }
+
+            var changedPercent = preservedPixels == 0
+                ? 100d
+                : significantOutsideChanges * 100d / preservedPixels;
+            var passed = changedPercent <= maximumOutsideMaskChangedPercent;
+            Directory.CreateDirectory(Path.GetDirectoryName(compositePath)!);
+            Directory.CreateDirectory(Path.GetDirectoryName(differencePreviewPath)!);
+            SavePngAtomic(composite, compositePath);
+            SavePngAtomic(differencePreview, differencePreviewPath);
+            return new ArtWorkspaceRegionEditDiagnostics(
+                baseImagePath,
+                maskPath,
+                candidatePath,
+                compositePath,
+                differenceReportPath,
+                differencePreviewPath,
+                editablePixels,
+                preservedPixels,
+                significantOutsideChanges,
+                changedPercent,
+                maximumOutsideMaskChangedPercent,
+                significantChannelDelta,
+                passed);
+        }, cancellationToken).ConfigureAwait(false);
+
+        await WriteRegionEditDiagnosticsAtomicAsync(
+                diagnostics,
+                differenceReportPath,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return diagnostics;
+    }
+
+    private static bool HasSignificantPixelDifference(
+        Rgba32 expected,
+        Rgba32 actual,
+        int threshold) =>
+        Math.Abs(expected.R - actual.R) > threshold ||
+        Math.Abs(expected.G - actual.G) > threshold ||
+        Math.Abs(expected.B - actual.B) > threshold ||
+        Math.Abs(expected.A - actual.A) > threshold;
+
+    private static async Task EnsureOutsideMaskMatchesBaseAsync(
+        string baseImagePath,
+        string maskPath,
+        string outputPath,
+        CancellationToken cancellationToken)
+    {
+        await Task.Run(() =>
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            using var baseline = Image.Load<Rgba32>(baseImagePath);
+            using var mask = Image.Load<Rgba32>(maskPath);
+            using var output = Image.Load<Rgba32>(outputPath);
+            if (mask.Width != baseline.Width || mask.Height != baseline.Height ||
+                output.Width != baseline.Width || output.Height != baseline.Height)
+            {
+                throw new InvalidDataException(
+                    "局部编辑最终图、base 与 mask 的像素尺寸不一致。");
+            }
+
+            for (var y = 0; y < baseline.Height; y++)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                for (var x = 0; x < baseline.Width; x++)
+                {
+                    if (mask[x, y].A == byte.MaxValue && baseline[x, y] != output[x, y])
+                    {
+                        throw new InvalidDataException(
+                            $"局部编辑最终产物在 mask 外发生像素变化：({x},{y})。");
+                    }
+                }
+            }
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task WriteRegionEditDiagnosticsAtomicAsync(
+        ArtWorkspaceRegionEditDiagnostics diagnostics,
+        string path,
+        CancellationToken cancellationToken)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        var temporaryPath = $"{path}.{Guid.NewGuid():N}.tmp";
+        try
+        {
+            await using (var stream = new FileStream(
+                temporaryPath,
+                FileMode.CreateNew,
+                FileAccess.Write,
+                FileShare.None,
+                64 * 1024,
+                FileOptions.Asynchronous | FileOptions.WriteThrough))
+            {
+                await JsonSerializer.SerializeAsync(
+                        stream,
+                        new
+                        {
+                            schemaVersion = 1,
+                            operationMode = ArtWorkspaceRegionEditContract.RegionEditOperationMode,
+                            observedAtUtc = DateTimeOffset.UtcNow,
+                            diagnostics.BaseImagePath,
+                            diagnostics.MaskPath,
+                            diagnostics.CandidatePath,
+                            diagnostics.CompositePath,
+                            diagnostics.DifferencePreviewPath,
+                            diagnostics.EditablePixelCount,
+                            diagnostics.PreservedPixelCount,
+                            diagnostics.SignificantOutsideChangedPixels,
+                            diagnostics.SignificantOutsideChangedPercent,
+                            diagnostics.MaximumAllowedPercent,
+                            diagnostics.SignificantChannelDelta,
+                            diagnostics.Passed
+                        },
+                        cancellationToken: cancellationToken)
+                    .ConfigureAwait(false);
+                await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            }
+
+            File.Move(temporaryPath, path, overwrite: true);
+        }
+        finally
+        {
+            TryDeleteFile(temporaryPath);
+        }
+    }
+
+    private static void SavePngAtomic(Image<Rgba32> image, string path)
+    {
+        var temporaryPath = $"{path}.{Guid.NewGuid():N}.tmp.png";
+        try
+        {
+            image.SaveAsPng(temporaryPath);
+            File.Move(temporaryPath, path, overwrite: true);
+        }
+        finally
+        {
+            TryDeleteFile(temporaryPath);
+        }
     }
 
     private async Task<GeneratedOutputProcessingResult> CommitDirectOutputAsync(
@@ -461,6 +902,7 @@ internal sealed class GeneratedOutputSubmissionService(
         string sourcePath,
         string targetPath,
         GenerationOutputSpec output,
+        bool preserveNormalizedCoordinates,
         CancellationToken cancellationToken)
     {
         var removal = output.BackgroundRemoval;
@@ -478,17 +920,31 @@ internal sealed class GeneratedOutputSubmissionService(
                 cancellationToken.ThrowIfCancellationRequested();
                 using var source = Image.Load<Rgba32>(sourcePath);
                 var wasResized = source.Width != output.Width || source.Height != output.Height;
-                source.Mutate(context => context.Resize(new ResizeOptions
+                if (preserveNormalizedCoordinates)
                 {
-                    Size = new Size(output.Width, output.Height),
-                    Mode = ResizeMode.Max,
-                    Sampler = KnownResamplers.Lanczos3,
-                    Compand = true
-                }));
+                    if (wasResized)
+                    {
+                        throw new InvalidDataException(
+                            $"局部编辑可提交候选必须已由 Harness 无插值恢复为 authoritative base " +
+                            $"{output.Width}x{output.Height}，实际为 {source.Width}x{source.Height}。");
+                    }
+                }
+                else
+                {
+                    source.Mutate(context => context.Resize(new ResizeOptions
+                    {
+                        Size = new Size(output.Width, output.Height),
+                        Mode = ResizeMode.Max,
+                        Sampler = KnownResamplers.Lanczos3,
+                        Compand = true
+                    }));
+                }
                 using var normalized = new Image<Rgba32>(output.Width, output.Height, background);
-                var location = new Point(
-                    (output.Width - source.Width) / 2,
-                    (output.Height - source.Height) / 2);
+                var location = preserveNormalizedCoordinates
+                    ? Point.Empty
+                    : new Point(
+                        (output.Width - source.Width) / 2,
+                        (output.Height - source.Height) / 2);
                 normalized.Mutate(context => context.DrawImage(source, location, 1f));
                 if (removal is not null)
                 {

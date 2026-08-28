@@ -99,7 +99,7 @@ public static class CodexManualFallbackPromptBuilder
         prompt.Append(executionPrompt.TrimEnd());
         prompt.AppendLine();
         prompt.AppendLine();
-        prompt.AppendLine("如果当前 Host 没有 `gasset_forge` 工具，请将上面执行链中出现的每个工具调用改为 `Invoke-GAssetForgeTool '<同名工具>' @{...}`；新任务仍先 claim_generation_task，再调用真实内置 imagegen：有明确 savedPath 时 submit_generation_output，只有可视结果且 savedPath 为空时调用 run_image_delivery_fallback。若工具正常返回 outcome=retryable_validation_failure，中间产物已经落盘，只需记录警告并继续其它任务，不要再次 fail，也不要包装成 image_delivery_fallback_failed；只有工具真实报错才 fail_generation_task。不要再因缺少 Bearer 环境变量停止。");
+        prompt.AppendLine("如果当前 Host 没有 `gasset_forge` 工具，请将上面执行链中出现的每个工具调用改为 `Invoke-GAssetForgeTool '<同名工具>' @{...}`。新任务仍先 claim_generation_task：若 imageGeneration.regionEdit.operationMode=region-edit，直接调用 run_image_delivery_fallback，让 Harness 使用唯一 base 与 mask 执行编辑；禁止先走普通整图 imagegen。其它任务才先调用真实内置 imagegen：有明确 savedPath 时 submit_generation_output，只有可视结果且 savedPath 为空时调用 run_image_delivery_fallback。若工具正常返回 outcome=retryable_validation_failure，中间产物已经落盘，只需记录警告并继续其它任务，不要再次 fail，也不要包装成 image_delivery_fallback_failed；只有工具真实报错才 fail_generation_task。不要再因缺少 Bearer 环境变量停止。");
         prompt.AppendLine("项目工作区、分类目录、原图导入、尺寸与底色归一化、背景剔除、最终校验和任务完成登记均由 GAssetForge 执行；人工接力不得再自行扫描、搬运或改写中间图片。");
         prompt.AppendLine("结束前再次查询这些 taskIds 的状态，逐项汇报 Completed/Failed 与实际产物路径；任何仍为 Pending/Claimed 的任务都必须明确列出，不能把当前批次报告为完成。");
         return prompt.ToString();

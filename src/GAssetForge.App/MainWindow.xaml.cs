@@ -1254,7 +1254,7 @@ public partial class MainWindow : Window
 
     private string GetWorkflowDocumentTitle(WorkflowDefinition workflow) => workflow.Kind switch
     {
-        WorkflowKind.UiDesign => _viewModel.EditorWorkspace.DocumentTitle,
+        WorkflowKind.UiDesign => workflow.Label,
         WorkflowKind.Tilemap => workflow.Label,
         WorkflowKind.CardDesign => workflow.Label,
         WorkflowKind.ParallelPerspective => workflow.Label,
@@ -1298,7 +1298,7 @@ public partial class MainWindow : Window
     private static string GetPanelTitle(string contentId) => contentId switch
     {
         ToolsContentId => "工具",
-        CanvasContentId => "页面 UI 设计工具",
+        CanvasContentId => "页面UI制作",
         TilemapWorkspaceContentId => "Tilemap 制作",
         CardDesignWorkspaceContentId => "卡牌设计",
         ParallelPerspectiveWorkspaceContentId => "平行透视角物体制作",

@@ -2,6 +2,7 @@ using GAssetForge.App.Infrastructure;
 using GAssetForge.App.Services;
 using GAssetForge.Core.ArtWorkspaces;
 using GAssetForge.Core.Generation;
+using System.ComponentModel;
 using System.Collections.ObjectModel;
 using System.IO;
 using System.Text;
@@ -56,11 +57,13 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
     private readonly RelayCommand<ArtWorkspaceImageItemViewModel> _selectImageCommand;
     private readonly Dispatcher _dispatcher;
     private readonly List<ArtWorkspaceManagedAsset> _assets = [];
+    private readonly List<ArtWorkspaceInstructionDraftSegment> _instructionDraftSegments = [];
     private ArtWorkspaceDocument _document = ArtWorkspaceDocumentFactory.Create();
     private string? _projectRoot;
     private string _currentFilePath = string.Empty;
     private string _statusMessage = "美术工作区正在初始化";
     private string _instructionDraft = string.Empty;
+    private int _instructionDraftRevision;
     private string? _lastImportDirectory;
     private ArtWorkspaceImageItemViewModel? _selectedImage;
     private ArtWorkspaceImageRegionSelection? _selectedImageRegion;
@@ -256,15 +259,38 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
     public string InstructionDraft
     {
         get => _instructionDraft;
-        set
-        {
-            if (SetProperty(ref _instructionDraft, value ?? string.Empty))
-            {
-                OnPropertyChanged(nameof(CanSubmitInstructionText));
-                _submitInstructionCommand.RaiseCanExecuteChanged();
-            }
-        }
+        set => ReplaceInstructionDraftSegments(
+            string.IsNullOrEmpty(value)
+                ? []
+                : [ArtWorkspaceInstructionDraftSegment.CreateText(value)],
+            enforceBudget: false);
     }
+
+    /// <summary>
+    /// Immutable editor snapshot. The returned records and their region payloads are deep copies,
+    /// so a caller cannot make an already inserted image token follow later canvas selection edits.
+    /// </summary>
+    public IReadOnlyList<ArtWorkspaceInstructionDraftSegment> InstructionDraftSegments =>
+        _instructionDraftSegments.Select(segment => segment.DeepClone()).ToArray();
+
+    /// <summary>
+    /// Changes whenever the editor document must be rebuilt (including reference validity changes).
+    /// The WPF RichTextBox uses this instead of two-way binding a FlowDocument.
+    /// </summary>
+    public int InstructionDraftRevision => _instructionDraftRevision;
+
+    public int InstructionDraftSemanticLength => MeasureInstructionDraftSemanticLength(_instructionDraftSegments);
+
+    public bool HasInstructionReferences => _instructionDraftSegments.Any(segment => segment.IsImageReference);
+
+    public bool HasInvalidInstructionReferences => _instructionDraftSegments
+        .Where(segment => segment.IsImageReference)
+        .Any(segment => !IsInstructionReferenceValid(segment.TokenId));
+
+    public bool CanInsertSelectedImageReference =>
+        SelectedImage is { IsVisible: true, IsMissing: false } &&
+        _instructionDraftSegments.Count(segment => segment.IsImageReference) <
+        ArtWorkspaceGenerationConstraintPackageBuilder.MaximumInlineInstructionReferenceCount;
 
     public string CanSubmitInstructionText => IsImporting
         ? "参考图片正在导入；完成或取消后即可发送生成指令。"
@@ -280,10 +306,14 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
                             ? "Agent 当前正在执行其它任务，完成后即可发送。"
                             : HasMissingVisibleImages
                                 ? "当前画布存在受管文件缺失的可见参考图片；请重新导入或先隐藏该图片。"
+                                : HasInvalidInstructionReferences
+                                    ? "对话中存在已删除、隐藏或文件缺失的图片引用；请删除对应标签或恢复图片后再发送。"
                                 : Conversation.Count > ArtWorkspaceValidator.MaximumMessages - 2
                                     ? "对话记录已达到上限，请先归档或创建新的工作区会话。"
-                                    : string.IsNullOrWhiteSpace(InstructionDraft)
-                                        ? "输入希望创建的内容、构图、风格或修改要求。"
+                                    : !HasInstructionDraftContent()
+                                        ? "输入希望创建的内容，并可在光标处插入一张或多张画布图片。"
+                                        : InstructionDraftSemanticLength > ArtWorkspaceConversationMessageViewModel.MaximumTextLength
+                                            ? $"当前指令语义长度为 {InstructionDraftSemanticLength:N0}，不能超过 {ArtWorkspaceConversationMessageViewModel.MaximumTextLength:N0}。"
                                         : "发送后会冻结当前输出框与可见参考图，并通过已接入 Agent 生成图片。";
 
     public double OutputFrameX
@@ -399,6 +429,7 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
             OnPropertyChanged(nameof(SelectedImageRegion));
             OnPropertyChanged(nameof(HasSelectedImageRegion));
             OnPropertyChanged(nameof(SelectedImageReferenceText));
+            OnPropertyChanged(nameof(CanInsertSelectedImageReference));
             _removeSelectedImageCommand.RaiseCanExecuteChanged();
             _bringSelectedToFrontCommand.RaiseCanExecuteChanged();
             _imageRegionSelectToolCommand.RaiseCanExecuteChanged();
@@ -418,10 +449,10 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
     public string SelectedImageReferenceText => SelectedImage switch
     {
         null => "本轮未指定图片指代",
-        { IsVisible: false } image => $"所选图片“{image.Name}”当前已隐藏，不会随指令提交",
-        { IsMissing: true } image => $"所选图片“{image.Name}”的受管文件缺失，请重新导入或隐藏后再提交",
-        var image when HasSelectedImageRegion => $"本轮指代：{image.Name} · 已框选局部区域",
-        var image => $"本轮指代：{image.Name} · 整张图片"
+        { IsVisible: false } image => $"所选图片“{image.Name}”当前已隐藏，不能插入",
+        { IsMissing: true } image => $"所选图片“{image.Name}”的受管文件缺失，不能插入",
+        var image when HasSelectedImageRegion => $"可插入：{image.Name} · 当前局部区域（框选）",
+        var image => $"可插入：{image.Name} · 整张图片"
     };
 
     public ArtWorkspaceToolMode ActiveToolMode
@@ -781,6 +812,123 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
     public void SelectImage(ArtWorkspaceImageItemViewModel? image) =>
         SelectedImage = image is not null && Images.Contains(image) ? image : null;
 
+    /// <summary>
+    /// Captures the currently selected image and its current local region as an immutable editor
+    /// token. Creating the token does not append it; the RichTextBox inserts it at its caret and
+    /// then submits the resulting ordered segment list through <see cref="ReplaceInstructionDraftSegments"/>.
+    /// </summary>
+    public ArtWorkspaceInstructionDraftSegment? CreateSelectedImageReferenceDraftSegment()
+    {
+        if (!CanInsertSelectedImageReference || SelectedImage is not { } selected)
+        {
+            return null;
+        }
+
+        var region = _selectedImageRegion is not null &&
+                     string.Equals(_selectedImageRegion.ImageId, selected.Id, StringComparison.Ordinal)
+            ? new ArtWorkspaceGenerationRegion
+            {
+                X = _selectedImageRegion.X,
+                Y = _selectedImageRegion.Y,
+                Width = _selectedImageRegion.Width,
+                Height = _selectedImageRegion.Height
+            }
+            : null;
+        return ArtWorkspaceInstructionDraftSegment.CreateImageReference(
+            selected.Id,
+            selected.Name,
+            region);
+    }
+
+    // Kept as a concise automation/test-facing alias. The editor itself still decides the caret.
+    public ArtWorkspaceInstructionDraftSegment? InsertSelectedImageReference() =>
+        CreateSelectedImageReferenceDraftSegment();
+
+    public bool ReplaceInstructionDraftSegments(
+        IEnumerable<ArtWorkspaceInstructionDraftSegment> segments,
+        bool enforceBudget = true)
+    {
+        ArgumentNullException.ThrowIfNull(segments);
+        var normalized = NormalizeInstructionDraftSegments(segments);
+        var semanticLength = MeasureInstructionDraftSemanticLength(normalized);
+        if (enforceBudget &&
+            semanticLength > ArtWorkspaceConversationMessageViewModel.MaximumTextLength)
+        {
+            _statusMessage =
+                $"对话指令不能超过 {ArtWorkspaceConversationMessageViewModel.MaximumTextLength:N0} 个语义字符";
+            NotifySummaryChanged();
+            OnPropertyChanged(nameof(CanSubmitInstructionText));
+            return false;
+        }
+
+        if (InstructionDraftSegmentsEqual(_instructionDraftSegments, normalized))
+        {
+            return true;
+        }
+
+        _instructionDraftSegments.Clear();
+        _instructionDraftSegments.AddRange(normalized.Select(segment => segment.DeepClone()));
+        var plainText = string.Concat(_instructionDraftSegments
+            .Where(segment => segment.IsText)
+            .Select(segment => segment.Text));
+        if (!string.Equals(_instructionDraft, plainText, StringComparison.Ordinal))
+        {
+            _instructionDraft = plainText;
+            OnPropertyChanged(nameof(InstructionDraft));
+        }
+
+        _instructionDraftRevision++;
+        OnPropertyChanged(nameof(InstructionDraftSegments));
+        OnPropertyChanged(nameof(InstructionDraftRevision));
+        OnPropertyChanged(nameof(InstructionDraftSemanticLength));
+        OnPropertyChanged(nameof(HasInstructionReferences));
+        OnPropertyChanged(nameof(HasInvalidInstructionReferences));
+        OnPropertyChanged(nameof(CanInsertSelectedImageReference));
+        OnPropertyChanged(nameof(CanSubmitInstructionText));
+        _submitInstructionCommand.RaiseCanExecuteChanged();
+        return true;
+    }
+
+    public bool RemoveInstructionReference(string? tokenId)
+    {
+        if (string.IsNullOrWhiteSpace(tokenId) ||
+            !_instructionDraftSegments.Any(segment =>
+                segment.IsImageReference &&
+                string.Equals(segment.TokenId, tokenId, StringComparison.Ordinal)))
+        {
+            return false;
+        }
+
+        return ReplaceInstructionDraftSegments(
+            _instructionDraftSegments.Where(segment =>
+                !segment.IsImageReference ||
+                !string.Equals(segment.TokenId, tokenId, StringComparison.Ordinal)));
+    }
+
+    public void ClearInstructionDraftReferences() =>
+        ReplaceInstructionDraftSegments(_instructionDraftSegments.Where(segment => segment.IsText));
+
+    public bool IsInstructionReferenceValid(string? tokenId)
+    {
+        var token = _instructionDraftSegments.FirstOrDefault(segment =>
+            segment.IsImageReference &&
+            string.Equals(segment.TokenId, tokenId, StringComparison.Ordinal));
+        if (token is null)
+        {
+            return false;
+        }
+
+        return IsInstructionReferenceValid(token);
+    }
+
+    public bool IsInstructionReferenceValid(ArtWorkspaceInstructionDraftSegment token)
+    {
+        ArgumentNullException.ThrowIfNull(token);
+        var image = Images.FirstOrDefault(candidate =>
+            string.Equals(candidate.Id, token.ImageId, StringComparison.Ordinal));
+        return image is { IsVisible: true, IsMissing: false } && File.Exists(image.AbsolutePath);
+    }
+
     public bool SetSelectedImageRegionNormalized(
         double x,
         double y,
@@ -1086,14 +1234,15 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         !string.IsNullOrWhiteSpace(_projectRoot) &&
         _generationGateway is { IsConnected: true, IsBusy: false } &&
         !HasMissingVisibleImages &&
+        !HasInvalidInstructionReferences &&
         Conversation.Count <= ArtWorkspaceValidator.MaximumMessages - 2 &&
-        !string.IsNullOrWhiteSpace(InstructionDraft) &&
-        InstructionDraft.Trim().Length <= 16000;
+        HasInstructionDraftContent() &&
+        InstructionDraftSemanticLength <= ArtWorkspaceConversationMessageViewModel.MaximumTextLength;
 
     private async Task SubmitInstructionAsync()
     {
-        var instruction = InstructionDraft.Trim();
-        if (!CanSubmitInstruction() || instruction.Length == 0 || instruction.Length > 16000)
+        var instruction = BuildLegacyInstructionText(_instructionDraftSegments);
+        if (!CanSubmitInstruction())
         {
             return;
         }
@@ -1120,7 +1269,7 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
             instruction,
             frozenRequest.CreatedAtUtc,
             _generationGateway?.AgentDisplayName,
-            frozenRequest);
+            _instructionDraftSegments);
         try
         {
             var candidate = CaptureDocument();
@@ -1318,25 +1467,19 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
             });
         }
 
-        ArtWorkspaceGenerationInstructionReference? instructionReference = null;
-        if (SelectedImage is { IsVisible: true, IsMissing: false } selected &&
-            references.Any(reference => string.Equals(reference.ImageId, selected.Id, StringComparison.Ordinal)))
+        var instructionSegments = _instructionDraftSegments
+            .Select(segment => segment.ToGenerationSegment())
+            .ToArray();
+        foreach (var segment in instructionSegments.Where(segment => string.Equals(
+                     segment.Kind,
+                     ArtWorkspaceGenerationInstructionSegmentKinds.ImageReference,
+                     StringComparison.Ordinal)))
         {
-            var selectedRegion = _selectedImageRegion is not null &&
-                                 string.Equals(_selectedImageRegion.ImageId, selected.Id, StringComparison.Ordinal)
-                ? new ArtWorkspaceGenerationRegion
-                {
-                    X = _selectedImageRegion.X,
-                    Y = _selectedImageRegion.Y,
-                    Width = _selectedImageRegion.Width,
-                    Height = _selectedImageRegion.Height
-                }
-                : null;
-            instructionReference = new ArtWorkspaceGenerationInstructionReference
+            if (!references.Any(reference =>
+                    string.Equals(reference.ImageId, segment.ImageId, StringComparison.Ordinal)))
             {
-                ImageId = selected.Id,
-                Region = selectedRegion
-            };
+                throw new InvalidDataException("对话中的图片引用已失效，请删除对应标签或恢复该图片。");
+            }
         }
 
         return new ArtWorkspaceGenerationRequest
@@ -1360,7 +1503,8 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
                 OutputDirectoryPath = outputDirectory
             },
             VisibleReferences = references.ToArray(),
-            InstructionReference = instructionReference
+            InstructionSegments = instructionSegments,
+            InstructionReference = null
         };
     }
 
@@ -1571,6 +1715,7 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         SelectedImage = null;
         _statusMessage = $"已从画布移除 {selected.Name}；受管源文件仍保留供审计与复用";
         OnPropertyChanged(nameof(ImageCountText));
+        NotifyInstructionReferenceStateChanged();
         NotifyReferenceAvailabilityChanged();
         MarkDirty();
     }
@@ -1631,6 +1776,9 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
             Images.Clear();
             Conversation.Clear();
             _assets.Clear();
+            _instructionDraftSegments.Clear();
+            _instructionDraft = string.Empty;
+            _instructionDraftRevision++;
             _document = nextDocument;
             _projectRoot = projectRoot;
             _currentFilePath = result.FilePath;
@@ -1753,18 +1901,34 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
     private void SubscribeImage(ArtWorkspaceImageItemViewModel image) =>
         image.Changed += OnImageChanged;
 
-    private void OnImageChanged(object? sender, EventArgs e)
+    private void OnImageChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (ReferenceEquals(sender, SelectedImage))
         {
             OnPropertyChanged(nameof(SelectedImage));
-            OnPropertyChanged(nameof(SelectedImageReferenceText));
+            if (e.PropertyName is nameof(ArtWorkspaceImageItemViewModel.Name) or
+                nameof(ArtWorkspaceImageItemViewModel.IsVisible))
+            {
+                OnPropertyChanged(nameof(SelectedImageReferenceText));
+            }
+
             _imageRegionSelectToolCommand.RaiseCanExecuteChanged();
-            if (SelectedImage is { IsVisible: false })
+            if (e.PropertyName == nameof(ArtWorkspaceImageItemViewModel.IsVisible) &&
+                SelectedImage is { IsVisible: false })
             {
                 ClearSelectedImageRegion();
                 ActiveToolMode = ArtWorkspaceToolMode.SelectMove;
             }
+        }
+
+        // Inline tokens freeze their display name and local region when inserted. Canvas transform,
+        // opacity, z-order, locking, and later renames therefore do not change the draft token and
+        // must not rebuild the RichTextBox (which would discard its caret, selection, and undo
+        // history). Visibility is the only image property changed through this event that can make
+        // an existing token invalid; missing-file transitions are handled by the availability timer.
+        if (e.PropertyName == nameof(ArtWorkspaceImageItemViewModel.IsVisible))
+        {
+            NotifyInstructionReferenceStateChanged();
         }
 
         NotifyReferenceAvailabilityChanged();
@@ -1826,6 +1990,13 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         OnPropertyChanged(nameof(OutputBackgroundHex));
         OnPropertyChanged(nameof(OutputRelativeDirectory));
         OnPropertyChanged(nameof(OutputFrameSummary));
+        OnPropertyChanged(nameof(InstructionDraft));
+        OnPropertyChanged(nameof(InstructionDraftSegments));
+        OnPropertyChanged(nameof(InstructionDraftRevision));
+        OnPropertyChanged(nameof(InstructionDraftSemanticLength));
+        OnPropertyChanged(nameof(HasInstructionReferences));
+        OnPropertyChanged(nameof(HasInvalidInstructionReferences));
+        OnPropertyChanged(nameof(CanInsertSelectedImageReference));
         OnPropertyChanged(nameof(SelectedImage));
         OnPropertyChanged(nameof(HasSelectedImage));
         OnPropertyChanged(nameof(HasMissingVisibleImages));
@@ -1880,6 +2051,8 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
 
         OnPropertyChanged(nameof(HasMissingVisibleImages));
         OnPropertyChanged(nameof(SelectedImageReferenceText));
+        OnPropertyChanged(nameof(CanInsertSelectedImageReference));
+        NotifyInstructionReferenceStateChanged();
         OnPropertyChanged(nameof(CanSubmitInstructionText));
         _submitInstructionCommand.RaiseCanExecuteChanged();
         _imageRegionSelectToolCommand.RaiseCanExecuteChanged();
@@ -1889,6 +2062,21 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
     {
         OnPropertyChanged(nameof(StatusText));
         OnPropertyChanged(nameof(PersistenceText));
+    }
+
+    private void NotifyInstructionReferenceStateChanged()
+    {
+        OnPropertyChanged(nameof(HasInvalidInstructionReferences));
+        OnPropertyChanged(nameof(CanInsertSelectedImageReference));
+        OnPropertyChanged(nameof(CanSubmitInstructionText));
+        _submitInstructionCommand.RaiseCanExecuteChanged();
+        if (!HasInstructionReferences)
+        {
+            return;
+        }
+
+        _instructionDraftRevision++;
+        OnPropertyChanged(nameof(InstructionDraftRevision));
     }
 
     private static double CalculateDisplayScale(int pixelWidth, int pixelHeight)
@@ -2011,18 +2199,49 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         string instruction,
         DateTimeOffset createdAtUtc,
         string? agentDisplayName,
-        ArtWorkspaceGenerationRequest frozenRequest)
+        IReadOnlyList<ArtWorkspaceInstructionDraftSegment> draftSegments)
     {
-        var instructionReference = frozenRequest.InstructionReference;
-        var selectedReference = instructionReference is null
-            ? null
-            : frozenRequest.VisibleReferences.FirstOrDefault(reference =>
-                string.Equals(reference.ImageId, instructionReference.ImageId, StringComparison.Ordinal));
-        var referenceSummary = selectedReference is null
-            ? null
-            : instructionReference!.Region is null
-                ? $"引用：{selectedReference.Name} · 整张图片"
-                : $"引用：{selectedReference.Name} · 已框选局部区域";
+        var conversationSegments = new List<ArtWorkspaceConversationSegment>(draftSegments.Count);
+        var referenceOrdinal = 0;
+        foreach (var segment in draftSegments)
+        {
+            if (segment.IsText)
+            {
+                conversationSegments.Add(new ArtWorkspaceConversationSegment
+                {
+                    Kind = ArtWorkspaceConversationSegmentKinds.Text,
+                    Text = segment.Text
+                });
+                continue;
+            }
+
+            if (!segment.IsImageReference)
+            {
+                continue;
+            }
+
+            var displayLabel = ArtWorkspaceGenerationConstraintPackageBuilder
+                .GetInstructionReferenceLabel(referenceOrdinal++);
+            conversationSegments.Add(new ArtWorkspaceConversationSegment
+            {
+                Kind = ArtWorkspaceConversationSegmentKinds.ImageReference,
+                TokenId = segment.TokenId,
+                ImageId = segment.ImageId,
+                ImageName = segment.ImageName,
+                DisplayLabel = displayLabel,
+                Region = segment.Region is null
+                    ? null
+                    : new ArtWorkspaceImageRegionSelection
+                    {
+                        ImageId = segment.ImageId,
+                        X = segment.Region.X,
+                        Y = segment.Region.Y,
+                        Width = segment.Region.Width,
+                        Height = segment.Region.Height
+                    }
+            });
+        }
+
         return
         [
         new ArtWorkspaceConversationMessage
@@ -2031,8 +2250,7 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
             Text = instruction,
             CreatedAtUtc = createdAtUtc,
             State = "captured",
-            ReferenceImageId = selectedReference?.ImageId,
-            ReferenceSummary = referenceSummary
+            Segments = conversationSegments
         },
         new ArtWorkspaceConversationMessage
         {
@@ -2088,6 +2306,163 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         IsVisible = image.IsVisible
     };
 
+    private bool HasInstructionDraftContent() => _instructionDraftSegments.Any(segment =>
+        segment.IsImageReference ||
+        segment.IsText && !string.IsNullOrWhiteSpace(segment.Text));
+
+    private static List<ArtWorkspaceInstructionDraftSegment> NormalizeInstructionDraftSegments(
+        IEnumerable<ArtWorkspaceInstructionDraftSegment> segments)
+    {
+        var normalized = new List<ArtWorkspaceInstructionDraftSegment>();
+        var tokenIds = new HashSet<string>(StringComparer.Ordinal);
+        var referenceCount = 0;
+        foreach (var source in segments)
+        {
+            ArgumentNullException.ThrowIfNull(source);
+            if (source.IsText)
+            {
+                if (string.IsNullOrEmpty(source.Text))
+                {
+                    continue;
+                }
+
+                if (normalized.LastOrDefault() is { IsText: true } precedingText)
+                {
+                    normalized[^1] = ArtWorkspaceInstructionDraftSegment.CreateText(
+                        precedingText.Text + source.Text);
+                }
+                else
+                {
+                    normalized.Add(ArtWorkspaceInstructionDraftSegment.CreateText(source.Text));
+                }
+
+                continue;
+            }
+
+            if (!source.IsImageReference)
+            {
+                throw new ArgumentException($"不支持的美术工作区指令片段类型：{source.Kind}。", nameof(segments));
+            }
+
+            referenceCount++;
+            if (referenceCount > ArtWorkspaceGenerationConstraintPackageBuilder.MaximumInlineInstructionReferenceCount)
+            {
+                throw new ArgumentException(
+                    $"一条指令最多插入 {ArtWorkspaceGenerationConstraintPackageBuilder.MaximumInlineInstructionReferenceCount} 个图片引用。",
+                    nameof(segments));
+            }
+
+            if (!Guid.TryParseExact(source.TokenId, "N", out _) || !tokenIds.Add(source.TokenId))
+            {
+                throw new ArgumentException("图片引用标签必须具有唯一的 32 位 token ID。", nameof(segments));
+            }
+
+            if (!Guid.TryParseExact(source.ImageId, "N", out _))
+            {
+                throw new ArgumentException("图片引用标签必须指向有效的画布图片 ID。", nameof(segments));
+            }
+
+            var imageName = string.IsNullOrWhiteSpace(source.ImageName)
+                ? "参考图片"
+                : source.ImageName.Trim();
+            if (imageName.Length > 260)
+            {
+                imageName = imageName[..260];
+            }
+
+            ArtWorkspaceGenerationRegion? region = null;
+            if (source.Region is not null)
+            {
+                var selectedRegion = new ArtWorkspaceImageRegionSelection
+                {
+                    ImageId = source.ImageId,
+                    X = source.Region.X,
+                    Y = source.Region.Y,
+                    Width = source.Region.Width,
+                    Height = source.Region.Height
+                };
+                ArtWorkspaceImageRegionGeometry.ValidateRegion(selectedRegion, source.ImageId);
+                region = new ArtWorkspaceGenerationRegion
+                {
+                    X = selectedRegion.X,
+                    Y = selectedRegion.Y,
+                    Width = selectedRegion.Width,
+                    Height = selectedRegion.Height
+                };
+            }
+
+            normalized.Add(ArtWorkspaceInstructionDraftSegment.CreateImageReference(
+                source.ImageId,
+                imageName,
+                region,
+                source.TokenId));
+        }
+
+        if (normalized.Count > ArtWorkspaceGenerationConstraintPackageBuilder.MaximumInstructionSegmentCount)
+        {
+            throw new ArgumentException(
+                $"一条指令最多包含 {ArtWorkspaceGenerationConstraintPackageBuilder.MaximumInstructionSegmentCount} 个片段。",
+                nameof(segments));
+        }
+
+        return normalized;
+    }
+
+    private static int MeasureInstructionDraftSemanticLength(
+        IEnumerable<ArtWorkspaceInstructionDraftSegment> segments) =>
+        ArtWorkspaceGenerationConstraintPackageBuilder.GetInstructionSemanticLength(
+            segments.Select(segment => segment.ToGenerationSegment()).ToArray());
+
+    private static string BuildLegacyInstructionText(
+        IEnumerable<ArtWorkspaceInstructionDraftSegment> segments)
+    {
+        var text = string.Concat(segments
+            .Where(segment => segment.IsText)
+            .Select(segment => segment.Text))
+            .Trim();
+        return text.Length > 0
+            ? text
+            : "请根据对话中按顺序插入的图片引用执行本轮美术生成或编辑。";
+    }
+
+    private static bool InstructionDraftSegmentsEqual(
+        IReadOnlyList<ArtWorkspaceInstructionDraftSegment> left,
+        IReadOnlyList<ArtWorkspaceInstructionDraftSegment> right)
+    {
+        if (left.Count != right.Count)
+        {
+            return false;
+        }
+
+        for (var index = 0; index < left.Count; index++)
+        {
+            var first = left[index];
+            var second = right[index];
+            if (!string.Equals(first.Kind, second.Kind, StringComparison.Ordinal) ||
+                !string.Equals(first.Text, second.Text, StringComparison.Ordinal) ||
+                !string.Equals(first.TokenId, second.TokenId, StringComparison.Ordinal) ||
+                !string.Equals(first.ImageId, second.ImageId, StringComparison.Ordinal) ||
+                !string.Equals(first.ImageName, second.ImageName, StringComparison.Ordinal) ||
+                !RegionsEqual(first.Region, second.Region))
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private static bool RegionsEqual(
+        ArtWorkspaceGenerationRegion? left,
+        ArtWorkspaceGenerationRegion? right) =>
+        ReferenceEquals(left, right) ||
+        left is not null &&
+        right is not null &&
+        left.X.Equals(right.X) &&
+        left.Y.Equals(right.Y) &&
+        left.Width.Equals(right.Width) &&
+        left.Height.Equals(right.Height);
+
     private static ArtWorkspaceImageRegionSelection CloneRegion(
         ArtWorkspaceImageRegionSelection region) => new()
     {
@@ -2105,8 +2480,21 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         Text = message.Text,
         CreatedAtUtc = message.CreatedAtUtc,
         State = message.State,
+        Segments = message.Segments.Select(CloneConversationSegment).ToList(),
         ReferenceImageId = message.ReferenceImageId,
         ReferenceSummary = message.ReferenceSummary
+    };
+
+    private static ArtWorkspaceConversationSegment CloneConversationSegment(
+        ArtWorkspaceConversationSegment segment) => new()
+    {
+        Kind = segment.Kind,
+        Text = segment.Text,
+        TokenId = segment.TokenId,
+        ImageId = segment.ImageId,
+        ImageName = segment.ImageName,
+        DisplayLabel = segment.DisplayLabel,
+        Region = segment.Region is null ? null : CloneRegion(segment.Region)
     };
 }
 
@@ -2151,7 +2539,7 @@ public sealed class ArtWorkspaceImageItemViewModel : ObservableObject
         _isMissing = !File.Exists(absolutePath);
     }
 
-    public event EventHandler? Changed;
+    public event PropertyChangedEventHandler? Changed;
 
     public string Id { get; }
 
@@ -2309,7 +2697,7 @@ public sealed class ArtWorkspaceImageItemViewModel : ObservableObject
     {
         if (SetProperty(ref field, value, propertyName))
         {
-            Changed?.Invoke(this, EventArgs.Empty);
+            Changed?.Invoke(this, new PropertyChangedEventArgs(propertyName));
             return true;
         }
 
@@ -2328,7 +2716,7 @@ public sealed class ArtWorkspaceImageItemViewModel : ObservableObject
 
 public sealed class ArtWorkspaceConversationMessageViewModel : ObservableObject
 {
-    public const int MaximumTextLength = 16000;
+    public const int MaximumTextLength = ArtWorkspaceInstructionSegmentSemantics.MaximumSemanticLength;
     public const int MaximumStateLength = 64;
 
     private readonly ArtWorkspaceConversationMessage _model;
@@ -2336,6 +2724,9 @@ public sealed class ArtWorkspaceConversationMessageViewModel : ObservableObject
     public ArtWorkspaceConversationMessageViewModel(ArtWorkspaceConversationMessage model)
     {
         _model = model ?? throw new ArgumentNullException(nameof(model));
+        Segments = _model.Segments
+            .Select(segment => new ArtWorkspaceConversationSegmentViewModel(segment))
+            .ToArray();
     }
 
     public string Id => _model.Id;
@@ -2352,6 +2743,10 @@ public sealed class ArtWorkspaceConversationMessageViewModel : ObservableObject
     };
 
     public string Text => _model.Text;
+
+    public IReadOnlyList<ArtWorkspaceConversationSegmentViewModel> Segments { get; }
+
+    public bool HasStructuredSegments => Segments.Count > 0;
 
     public string TimeText => _model.CreatedAtUtc.ToLocalTime().ToString("HH:mm:ss");
 
@@ -2395,7 +2790,57 @@ public sealed class ArtWorkspaceConversationMessageViewModel : ObservableObject
         Text = _model.Text,
         CreatedAtUtc = _model.CreatedAtUtc,
         State = _model.State,
+        Segments = Segments.Select(segment => segment.ToModel()).ToList(),
         ReferenceImageId = _model.ReferenceImageId,
         ReferenceSummary = _model.ReferenceSummary
+    };
+}
+
+public sealed class ArtWorkspaceConversationSegmentViewModel
+{
+    private readonly ArtWorkspaceConversationSegment _model;
+
+    public ArtWorkspaceConversationSegmentViewModel(ArtWorkspaceConversationSegment model)
+    {
+        ArgumentNullException.ThrowIfNull(model);
+        _model = Clone(model);
+    }
+
+    public bool IsText => string.Equals(
+        _model.Kind,
+        ArtWorkspaceConversationSegmentKinds.Text,
+        StringComparison.Ordinal);
+
+    public bool IsImageReference => string.Equals(
+        _model.Kind,
+        ArtWorkspaceConversationSegmentKinds.ImageReference,
+        StringComparison.Ordinal);
+
+    public string Text => _model.Text;
+
+    public string ReferenceText => _model.Region is null
+        ? $"{_model.DisplayLabel} · {_model.ImageName} · 整张图片"
+        : $"{_model.DisplayLabel} · {_model.ImageName} · 局部框选";
+
+    public ArtWorkspaceConversationSegment ToModel() => Clone(_model);
+
+    private static ArtWorkspaceConversationSegment Clone(ArtWorkspaceConversationSegment segment) => new()
+    {
+        Kind = segment.Kind,
+        Text = segment.Text,
+        TokenId = segment.TokenId,
+        ImageId = segment.ImageId,
+        ImageName = segment.ImageName,
+        DisplayLabel = segment.DisplayLabel,
+        Region = segment.Region is null
+            ? null
+            : new ArtWorkspaceImageRegionSelection
+            {
+                ImageId = segment.Region.ImageId,
+                X = segment.Region.X,
+                Y = segment.Region.Y,
+                Width = segment.Region.Width,
+                Height = segment.Region.Height
+            }
     };
 }

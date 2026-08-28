@@ -74,6 +74,12 @@ public sealed record ArtWorkspaceGenerationRequest
 
     public ArtWorkspaceGenerationReferenceSnapshot[] VisibleReferences { get; init; } = [];
 
+    public ArtWorkspaceGenerationInstructionSegment[] InstructionSegments { get; init; } = [];
+
+    /// <summary>
+    /// Legacy single-image side channel retained for requests saved before inline instruction
+    /// tokens were introduced. New requests should use <see cref="InstructionSegments"/> only.
+    /// </summary>
     public ArtWorkspaceGenerationInstructionReference? InstructionReference { get; init; }
 }
 

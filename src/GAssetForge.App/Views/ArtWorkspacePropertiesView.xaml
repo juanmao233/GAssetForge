@@ -104,11 +104,64 @@
                                                                    FontWeight="SemiBold"
                                                                    Text="{Binding RoleLabel}" />
                                                     </DockPanel>
+                                                     <ItemsControl Margin="0,4,0,0"
+                                                                   ItemsSource="{Binding Segments}">
+                                                         <ItemsControl.Style>
+                                                             <Style TargetType="{x:Type ItemsControl}">
+                                                                 <Setter Property="Visibility" Value="Visible" />
+                                                                 <Style.Triggers>
+                                                                     <DataTrigger Binding="{Binding HasStructuredSegments}" Value="False">
+                                                                         <Setter Property="Visibility" Value="Collapsed" />
+                                                                     </DataTrigger>
+                                                                 </Style.Triggers>
+                                                             </Style>
+                                                         </ItemsControl.Style>
+                                                         <ItemsControl.ItemsPanel>
+                                                             <ItemsPanelTemplate>
+                                                                 <WrapPanel />
+                                                             </ItemsPanelTemplate>
+                                                         </ItemsControl.ItemsPanel>
+                                                         <ItemsControl.ItemTemplate>
+                                                             <DataTemplate>
+                                                                 <Grid>
+                                                                     <TextBlock Foreground="{DynamicResource App.TextPrimaryBrush}"
+                                                                                FontSize="10"
+                                                                                MaxWidth="240"
+                                                                                Text="{Binding Text}"
+                                                                                TextWrapping="Wrap"
+                                                                                Visibility="{Binding IsText, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                                                                     <Border Margin="2,1"
+                                                                             Padding="6,2"
+                                                                             Background="{DynamicResource App.InputBackgroundBrush}"
+                                                                             BorderBrush="{DynamicResource App.AccentBrush}"
+                                                                             BorderThickness="1"
+                                                                             CornerRadius="8"
+                                                                             Visibility="{Binding IsImageReference, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                                                         <TextBlock Foreground="{DynamicResource App.TextSecondaryBrush}"
+                                                                                    FontSize="8"
+                                                                                    Text="{Binding ReferenceText}"
+                                                                                    ToolTip="{Binding ReferenceText}" />
+                                                                     </Border>
+                                                                 </Grid>
+                                                             </DataTemplate>
+                                                         </ItemsControl.ItemTemplate>
+                                                     </ItemsControl>
                                                      <TextBlock Margin="0,4,0,0"
                                                                 Foreground="{DynamicResource App.TextPrimaryBrush}"
                                                                 FontSize="10"
                                                                 Text="{Binding Text}"
-                                                                TextWrapping="Wrap" />
+                                                                TextWrapping="Wrap">
+                                                         <TextBlock.Style>
+                                                             <Style TargetType="{x:Type TextBlock}">
+                                                                 <Setter Property="Visibility" Value="Visible" />
+                                                                 <Style.Triggers>
+                                                                     <DataTrigger Binding="{Binding HasStructuredSegments}" Value="True">
+                                                                         <Setter Property="Visibility" Value="Collapsed" />
+                                                                     </DataTrigger>
+                                                                 </Style.Triggers>
+                                                             </Style>
+                                                         </TextBlock.Style>
+                                                     </TextBlock>
                                                      <Border Margin="0,5,0,0"
                                                              Padding="6,3"
                                                              Background="{DynamicResource App.InputBackgroundBrush}"
@@ -148,46 +201,57 @@
 
                          <Border x:Name="ArtWorkspaceSelectedImageReferenceChip"
                                  Margin="0,0,0,7"
-                                 Padding="8,5"
+                                 Padding="8,6"
                                  Background="{DynamicResource App.InputBackgroundBrush}"
+                                 BorderBrush="{DynamicResource App.BorderBrush}"
                                  BorderThickness="1"
-                                 CornerRadius="10"
-                                 ToolTip="当前对话指令提交时所指代的画布图片">
-                             <Border.Style>
-                                 <Style TargetType="{x:Type Border}">
-                                     <Setter Property="BorderBrush" Value="{DynamicResource App.BorderBrush}" />
-                                     <Style.Triggers>
-                                         <DataTrigger Binding="{Binding HasSelectedImage}" Value="True">
-                                             <Setter Property="BorderBrush" Value="{DynamicResource App.AccentBrush}" />
-                                         </DataTrigger>
-                                     </Style.Triggers>
-                                 </Style>
-                             </Border.Style>
-                             <DockPanel LastChildFill="True">
-                                 <TextBlock DockPanel.Dock="Left"
-                                            Margin="0,0,6,0"
-                                            VerticalAlignment="Center"
-                                            Foreground="{DynamicResource App.AccentBrush}"
-                                            FontSize="11"
-                                            Text="▣" />
+                                 CornerRadius="5">
+                             <StackPanel>
                                  <TextBlock x:Name="ArtWorkspaceInstructionReferenceText"
-                                            VerticalAlignment="Center"
                                             Foreground="{DynamicResource App.TextSecondaryBrush}"
                                             FontSize="9"
                                             Text="{Binding SelectedImageReferenceText}"
                                             TextTrimming="CharacterEllipsis"
                                             ToolTip="{Binding SelectedImageReferenceText}" />
-                             </DockPanel>
+                                 <DockPanel Margin="0,6,0,0" LastChildFill="True">
+                                     <Button x:Name="ArtWorkspaceClearInstructionReferencesButton"
+                                             DockPanel.Dock="Right"
+                                             Margin="6,0,0,0"
+                                             Padding="8,4"
+                                             Click="ArtWorkspaceClearInstructionReferencesButton_OnClick"
+                                             Content="清除全部图片标签"
+                                             Style="{DynamicResource App.ButtonStyle}"
+                                             Visibility="{Binding HasInstructionReferences, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                                     <Button x:Name="ArtWorkspaceInsertSelectedImageButton"
+                                             Padding="8,4"
+                                             Click="ArtWorkspaceInsertSelectedImageButton_OnClick"
+                                             Content="插入所选图片到光标"
+                                             IsEnabled="{Binding CanInsertSelectedImageReference}"
+                                             Style="{DynamicResource App.ButtonStyle}"
+                                             ToolTip="可重复插入同一张图片；每个标签会冻结插入时的整图或局部框选" />
+                                 </DockPanel>
+                             </StackPanel>
                          </Border>
 
-                         <TextBox x:Name="ArtWorkspaceInstructionTextBox"
-                                 MinHeight="92"
-                                 MaxLength="16000"
-                                 AcceptsReturn="True"
-                                 Text="{Binding InstructionDraft, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
-                                 TextWrapping="Wrap"
-                                 VerticalScrollBarVisibility="Auto"
-                                 PreviewKeyDown="ArtWorkspaceInstructionTextBox_OnPreviewKeyDown" />
+                         <RichTextBox x:Name="ArtWorkspaceInstructionRichTextBox"
+                                      MinHeight="92"
+                                      AcceptsReturn="True"
+                                      AcceptsTab="False"
+                                      Background="{DynamicResource App.InputBackgroundBrush}"
+                                      BorderBrush="{DynamicResource App.BorderBrush}"
+                                      Foreground="{DynamicResource App.TextPrimaryBrush}"
+                                      FontFamily="Microsoft YaHei UI"
+                                      FontSize="11"
+                                      Padding="7,5"
+                                      SpellCheck.IsEnabled="False"
+                                      VerticalScrollBarVisibility="Auto"
+                                      DataObject.Pasting="ArtWorkspaceInstructionRichTextBox_OnPasting"
+                                      TextChanged="ArtWorkspaceInstructionRichTextBox_OnTextChanged"
+                                      PreviewKeyDown="ArtWorkspaceInstructionRichTextBox_OnPreviewKeyDown">
+                             <FlowDocument PagePadding="0">
+                                 <Paragraph Margin="0" />
+                             </FlowDocument>
+                         </RichTextBox>
                         <DockPanel Margin="0,8,0,0" LastChildFill="True">
                             <Button x:Name="ArtWorkspaceSubmitInstructionButton"
                                     DockPanel.Dock="Right"
@@ -200,7 +264,7 @@
                                        VerticalAlignment="Center"
                                        Foreground="{DynamicResource App.TextMutedBrush}"
                                        FontSize="9"
-                                       Text="Ctrl+Enter 提交"
+                                       Text="在文字间插入图片标签 · Ctrl+Enter 提交"
                                        TextWrapping="Wrap" />
                         </DockPanel>
                         <StackPanel Margin="0,8,0,0"

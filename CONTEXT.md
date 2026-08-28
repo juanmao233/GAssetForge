@@ -15,9 +15,14 @@ perspective, geometry, style, size, and delivery constraints.
 - **Art creation workspace** — the cross-workflow central `LayoutDocument` identified by
   `art-workspace`. It is not a `WorkflowKind`: its large canvas composes managed reference images
   around an output frame, while its Properties module captures the user's creation intent.
-- **Instruction image reference** — the valid visible canvas image selected when an Art Workspace
-  instruction is published. It explicitly binds deictic wording to either the whole image or one
-  image-local normalized region without exposing numeric coordinates in the conversation UI.
+- **Inline instruction image token** — an image reference inserted at an exact cursor position in an
+  Art Workspace instruction. Each token independently freezes one managed visible image and either
+  its whole-image state or insertion-time image-local normalized region, preserving ordered A/B/C
+  semantics without exposing IDs, paths, hashes, or coordinates in the conversation UI.
+- **Region-edit contract** — the pixel-authoritative operation created when an Art Workspace
+  instruction contains one frozen regional image token. It names one current base image, excludes
+  history images, freezes an Alpha mask and hashes, and requires the Harness to preserve every
+  pixel outside the mask.
 - **Blueprint workspace** — the dockable, project-persisted graph editor for describing Agent,
   Harness tool, condition, and function-collection execution trajectories. Editing graphs are
   validated and frozen into versioned execution plans before a run is published.
@@ -61,17 +66,25 @@ perspective, geometry, style, size, and delivery constraints.
   hidden image must remain recoverable from the Properties image list.
 - An Art Workspace local marquee is stored against the selected image in its unrotated normalized
   `0..1` coordinate space. Moving, scaling, or rotating the canvas object must not change the source
-  pixels it denotes; switching, hiding, deleting, or losing that image must not leave a dangling
-  region reference.
+  pixels it denotes. Inserting a token freezes the current marquee independently; later selection or
+  marquee changes must not rewrite it, and a hidden, deleted, changed, or missing source must make
+  that token invalid and block publication rather than retargeting it.
 - An art-workspace instruction may start generation only when a formal project and an executable
   managed Agent connection are active. Publication freezes the intent, output frame, project
-  `Assets` root, and visible reference hashes/transforms into a durable `art-workspace` task. The
-  currently selected valid image is also frozen automatically as this turn's explicit instruction
-  reference; a local region additionally freezes normalized bounds, source-pixel bounds, and the
-  rotation-aware canvas polygon, while user-visible conversation text remains coordinate-free.
+  `Assets` root, and visible reference hashes/transforms into a durable `art-workspace` task. Ordered
+  text/image segments preserve every inline token's insertion position and local responsibility; each
+  token freezes its image/asset identity, managed snapshot and SHA-256, and a local region additionally
+  freezes normalized bounds, source-pixel bounds, and the rotation-aware canvas polygon. Existing
+  plain-text conversation JSON and legacy single `InstructionReference` requests remain readable,
+  while new publications use the ordered segment contract and coordinate-free user-visible chips.
 - Art Workspace Agent progress is advisory; only a validated PNG atomically delivered to the exact
   frozen target below `Assets/Generated/ArtWorkspace/<batchId>/Final` is a generation result. The
   canvas imports a managed preview copy only after that durable task reaches `Completed`.
+- A single-image local edit must never degrade into prompt-only whole-image generation. GAssetForge
+  creates the authoritative base, API mask, preview, contract, safe composite, and outside-mask
+  diagnostics before/after model work; the CLI receives only that base plus mask. Accepted output is
+  software-composited so preserved pixels are byte-identical, while excessive model changes outside
+  the mask remain auditable and produce a retryable validation failure rather than `Completed`.
 - Product renames must preserve readable legacy state until an explicit migration removes support.
 
 ## Architecture sources

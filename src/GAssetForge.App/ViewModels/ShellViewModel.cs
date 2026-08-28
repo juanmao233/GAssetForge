@@ -32,6 +32,7 @@ public sealed class ShellViewModel : ObservableObject
     private readonly RelayCommand _activeDocumentSaveCommand;
     private GenerationBatchDispatchCoordinator _agentDispatchCoordinator = null!;
     private ProductionArtWorkspaceGenerationGateway _artWorkspaceGenerationPublisher = null!;
+    private ProductionPageUiAgentConversationGateway _pageUiAgentConversationGateway = null!;
     private WorkflowDefinition _currentWorkflow;
     private object _currentWorkspace;
     private string _activeDocumentContentId = "ui-canvas";
@@ -275,6 +276,8 @@ public sealed class ShellViewModel : ObservableObject
         AgentConnection.AgentActivityReceived += OnAgentActivityForStructuredLog;
         AgentConnection.PropertyChanged += OnAgentConnectionPropertyChanged;
         _agentWasConnected = AgentConnection.IsConnected;
+        _pageUiAgentConversationGateway = new ProductionPageUiAgentConversationGateway(AgentConnection);
+        EditorWorkspace.ConfigurePageUiAgentConversationGateway(_pageUiAgentConversationGateway);
         ArtStyleLibrary.ConfigurePromptAnalysisService(
             new AgentArtStylePromptAnalysisService(
                 new AgentConnectionArtStylePromptAgentClient(AgentConnection)));
@@ -311,10 +314,10 @@ public sealed class ShellViewModel : ObservableObject
             settingsService.Paths,
             _generationTaskStore,
             AgentConnection,
-            (batchId, taskIds) => _agentDispatchCoordinator.TryEnqueue(
+            (batchId, taskIds, isRetry) => _agentDispatchCoordinator.TryEnqueue(
                 batchId,
                 taskIds,
-                isRetry: false),
+                isRetry),
             _workbenchConsoleService);
         ArtWorkspace.ConfigureGenerationGateway(_artWorkspaceGenerationPublisher);
         AssetGeneration.ConfigureReconnectAndContinueHandler(
@@ -1135,6 +1138,7 @@ public sealed class ShellViewModel : ObservableObject
             _artWorkspaceGenerationPublisher.Dispose();
         }).ConfigureAwait(false);
 
+        _pageUiAgentConversationGateway.Dispose();
         await AgentConnection.DisposeAsync().ConfigureAwait(false);
         await RunOnDispatcherAsync(() =>
         {

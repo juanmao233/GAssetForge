@@ -123,23 +123,28 @@ internal static class CodexManualFallbackPromptSmokeTests
                 executionSegment,
                 "1. 使用 claim_generation_task",
                 "批次提示缺少认领步骤");
+            var regionEditIndex = RequiredIndex(
+                executionSegment,
+                "2. 先检查 claim 返回的 imageGeneration.regionEdit",
+                "批次提示缺少局部编辑合同分流步骤");
             var imagegenIndex = RequiredIndex(
                 executionSegment,
-                "3. 按 preferredSkill 调用真实图像生成能力",
+                "4. 仅对非 region-edit 任务按 preferredSkill 调用真实图像生成能力",
                 "批次提示缺少真实图像生成步骤");
             var submitIndex = RequiredIndex(
                 executionSegment,
-                "4. 内置 ImageGen 返回明确本地路径时",
+                "5. 非 region-edit 的内置 ImageGen 返回明确本地路径时",
                 "批次提示缺少单图源文件提交步骤");
             var failIndex = RequiredIndex(
                 executionSegment,
-                "5. 只有内置 imagegen、run_image_delivery_fallback 或 submit_generation_output 真正以 MCP tool error 失败时才调用 fail_generation_task",
+                "6. 只有内置 imagegen、run_image_delivery_fallback 或 submit_generation_output 真正以 MCP tool error 失败时才调用 fail_generation_task",
                 "批次提示缺少失败回报步骤");
             True(
-                claimIndex < imagegenIndex &&
+                claimIndex < regionEditIndex &&
+                regionEditIndex < imagegenIndex &&
                 imagegenIndex < submitIndex &&
                 submitIndex < failIndex,
-                "人工批次执行链必须保持 claim → 真实 imagegen → submit → fail 顺序");
+                "人工批次执行链必须保持 claim → region-edit 分流 → 真实 imagegen → submit → fail 顺序");
 
             Throws<ArgumentException>(
                 () => CodexManualFallbackPromptBuilder.BuildBatchPrompt(

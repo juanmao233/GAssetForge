@@ -49,6 +49,7 @@ internal static class AgentRuntimeTransportSmokeTests
         CodexProcessLaunchUsesUtf8NoBomForProtocolStreams();
         await CodexProcessLaunchRoundTripsUtf8ThroughRealChildAsync();
         await CodexExecDeclaresFallbackCapabilitiesAndBuildsArgumentsAsync();
+        await CodexExecPromotesActualTurnIdentityForIdlessItemsAsync();
         await CodexExecAcceptsConcatenatedJsonAndRedactsInvalidTailAsync();
         await CodexExecBoundsAndSummarizesRepeatedInvalidInputAsync();
         await CodexExecCancellationKillsTheEntireProcessTreeAsync();
@@ -1999,6 +2000,61 @@ internal static class AgentRuntimeTransportSmokeTests
         Equal("resume the fixture task",
             ((RecordingTextWriter)factory.Processes[1].StandardInput).WrittenText,
             "Codex exec resume prompt 应从 stdin 输入");
+    }
+
+    private static async Task CodexExecPromotesActualTurnIdentityForIdlessItemsAsync()
+    {
+        const string actualTurnId = "turn-promoted-exec";
+        var output = string.Join(
+            Environment.NewLine,
+            JsonSerializer.Serialize(new
+            {
+                type = "thread.started",
+                thread_id = "thread-promoted-exec"
+            }),
+            JsonSerializer.Serialize(new
+            {
+                type = "turn.started",
+                turn_id = actualTurnId
+            }),
+            JsonSerializer.Serialize(new
+            {
+                type = "item.completed",
+                item = new
+                {
+                    id = "message-promoted-exec",
+                    type = "agent_message",
+                    text = "Exec fallback 正文"
+                }
+            }),
+            JsonSerializer.Serialize(new { type = "turn.completed" })) + Environment.NewLine;
+        var factory = new FakeAgentProcessFactory((_, _) => FakeAgentChildProcess.Exited(
+            id: 4245,
+            new RecordingTextWriter(),
+            new StringReader(output),
+            exitCode: 0));
+        await using var transport = new CodexExecTransport(factory);
+        string? activeTurnIdAtAgentMessage = null;
+        transport.NotificationReceived += (_, eventArgs) =>
+        {
+            if (string.Equals(eventArgs.Method, "item.completed", StringComparison.Ordinal))
+            {
+                activeTurnIdAtAgentMessage = transport.ActiveTurnId;
+            }
+        };
+        await transport.StartAsync(new AgentSessionStartOptions
+        {
+            ExecutablePath = "codex-fixture",
+            WorkingDirectory = Environment.CurrentDirectory,
+            RequestTimeout = TimeSpan.FromSeconds(3)
+        });
+
+        var result = await transport.StartTurnAsync("promote the actual exec turn id");
+
+        Equal(actualTurnId, result.TurnId,
+            "Codex exec 最终结果应返回 turn.started 分配的真实 TurnId");
+        Equal(actualTurnId, activeTurnIdAtAgentMessage,
+            "缺少 turn_id 的 Exec item 必须继承真实 TurnId，而不是本地 exec-* 标识");
     }
 
     private static async Task CodexExecAcceptsConcatenatedJsonAndRedactsInvalidTailAsync()

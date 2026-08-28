@@ -13,6 +13,8 @@ internal static class ImageGenerationCliFallbackSmokeTests
     {
         await GenerateUsesFrozenPromptAndExactOutputAsync(temporaryRoot);
         await EditRepeatsReferencesAndPreservesPyLauncherPrefixAsync(temporaryRoot);
+        await RegionEditUsesAuthoritativeBaseMaskWithoutUnsupportedFidelityFlagAsync(temporaryRoot);
+        await RegionEditArbitrarySizePaddingAndCropPreserveOutsidePixelsAsync(temporaryRoot);
         await ExistingValidPngSkipsProbeAndImageApiAsync(temporaryRoot);
         await InvalidExistingPngIsRegeneratedAsync(temporaryRoot);
         await ConcurrentDuplicateCallsShareSingleGenerationAsync(temporaryRoot);
@@ -193,6 +195,97 @@ internal static class ImageGenerationCliFallbackSmokeTests
             "自定义 OpenAI Base URL 只能通过环境传递");
     }
 
+    private static async Task RegionEditUsesAuthoritativeBaseMaskWithoutUnsupportedFidelityFlagAsync(
+        string temporaryRoot)
+    {
+        var root = Path.Combine(temporaryRoot, "image-generation-cli-region-edit", Guid.NewGuid().ToString("N"));
+        var promptPath = Path.Combine(root, "20-prompts", "task.prompt.txt");
+        var outputPath = Path.Combine(root, "30-model-output", "task.model.png");
+        var baseImagePath = Path.Combine(root, "10-region-edit", "base.png");
+        var maskPath = Path.Combine(root, "10-region-edit", "mask.png");
+        var scriptPath = Path.Combine(root, "codex", "skills", ".system", "imagegen", "scripts", "image_gen.py");
+        Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+        Directory.CreateDirectory(Path.GetDirectoryName(scriptPath)!);
+        await File.WriteAllTextAsync(scriptPath, "# smoke-test image_gen.py");
+        WritePng(baseImagePath);
+        WriteRegionMask(maskPath);
+        var runner = new RecordingRunner(request =>
+        {
+            var launchArguments = request.Arguments.ToList();
+            var imageIndex = launchArguments.IndexOf("--image");
+            var outputIndex = launchArguments.IndexOf("--out");
+            File.Copy(launchArguments[imageIndex + 1], launchArguments[outputIndex + 1], overwrite: true);
+            return new ImageGenerationCliProcessResult(0, string.Empty, string.Empty, false);
+        });
+        var service = new ImageGenerationCliFallbackService(CreateFixedProbe(scriptPath), runner);
+
+        await service.GenerateAsync(
+            new ImageGenerationCliFallbackRequest(
+                "task-region-edit",
+                "codex-worker",
+                "只修改冻结 mask 内的眼睛颜色。",
+                promptPath,
+                [baseImagePath],
+                "16x16",
+                outputPath,
+                "region-edit",
+                baseImagePath,
+                maskPath,
+                PreserveOutsideMask: true),
+            CancellationToken.None);
+
+        var arguments = runner.Requests.Single().Arguments.ToList();
+        var apiBasePath = arguments[arguments.IndexOf("--image") + 1];
+        var apiMaskPath = arguments[arguments.IndexOf("--mask") + 1];
+        var apiRawPath = arguments[arguments.IndexOf("--out") + 1];
+        SequenceEqual(
+            new[]
+            {
+                scriptPath,
+                "edit",
+                "--image",
+                apiBasePath,
+                "--mask",
+                apiMaskPath,
+                "--prompt-file",
+                promptPath,
+                "--size",
+                "16x16",
+                "--output-format",
+                "png",
+                "--n",
+                "1",
+                "--no-augment",
+                "--out",
+                apiRawPath
+            },
+            arguments,
+            "region-edit 必须固定使用唯一 base 与 mask，并兼容默认 gpt-image-2");
+        False(
+            arguments.Contains("--input-fidelity", StringComparer.Ordinal),
+            "默认 gpt-image-2 固有使用高保真图片输入，CLI 不得传入其明确拒绝的 input-fidelity 参数");
+        False(string.Equals(apiBasePath, baseImagePath, StringComparison.OrdinalIgnoreCase),
+            "非原生 API 尺寸必须生成 prepared base，而不是缩放 authoritative base");
+        False(string.Equals(apiMaskPath, maskPath, StringComparison.OrdinalIgnoreCase),
+            "非原生 API 尺寸必须生成 prepared mask");
+        True(File.Exists(apiRawPath), "Image API full raw 必须保留在 region-edit 诊断目录");
+        True(File.Exists(Path.Combine(Path.GetDirectoryName(baseImagePath)!, "api-canvas-transform.v1.json")),
+            "region-edit 必须落盘 API 画布变换诊断");
+        using (var preparedBase = Image.Load<Rgba32>(apiBasePath))
+        using (var preparedMask = Image.Load<Rgba32>(apiMaskPath))
+        using (var submitted = Image.Load<Rgba32>(outputPath))
+        {
+            Equal(16, preparedBase.Width, "prepared base 宽度");
+            Equal(16, preparedBase.Height, "prepared base 高度");
+            Equal(byte.MinValue, preparedMask[7, 7].A,
+                "prepared mask 必须按整数 offset 保留原透明编辑像素");
+            Equal(byte.MaxValue, preparedMask[0, 0].A,
+                "prepared mask padding 必须保持不透明、禁止模型编辑");
+            Equal(2, submitted.Width, "可提交候选必须无插值裁切回 base 宽度");
+            Equal(2, submitted.Height, "可提交候选必须无插值裁切回 base 高度");
+        }
+    }
+
     private static async Task ExistingValidPngSkipsProbeAndImageApiAsync(string temporaryRoot)
     {
         var root = Path.Combine(temporaryRoot, "image-generation-cli-existing", Guid.NewGuid().ToString("N"));
@@ -214,6 +307,74 @@ internal static class ImageGenerationCliFallbackSmokeTests
         True(result.AlreadyExisted, "有效 recommendedSourcePath 必须幂等恢复而不要求 Python/API key");
         False(File.Exists(Path.Combine(root, "20-prompts", "task.prompt.txt")),
             "恢复既有 PNG 时不应创建多余 prompt 文件");
+    }
+
+    private static async Task RegionEditArbitrarySizePaddingAndCropPreserveOutsidePixelsAsync(
+        string temporaryRoot)
+    {
+        const int baseWidth = 955;
+        const int baseHeight = 1014;
+        var root = Path.Combine(
+            temporaryRoot,
+            "image-generation-cli-region-edit-arbitrary-size",
+            Guid.NewGuid().ToString("N"));
+        var promptPath = Path.Combine(root, "20-prompts", "task.prompt.txt");
+        var outputPath = Path.Combine(root, "30-model-output", "task.model.png");
+        var baseImagePath = Path.Combine(root, "25-region-edit", "authoritative-base.png");
+        var maskPath = Path.Combine(root, "25-region-edit", "api-mask.png");
+        var scriptPath = Path.Combine(root, "codex", "skills", ".system", "imagegen", "scripts", "image_gen.py");
+        Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+        Directory.CreateDirectory(Path.GetDirectoryName(scriptPath)!);
+        await File.WriteAllTextAsync(scriptPath, "# smoke-test image_gen.py");
+        WritePatternPng(baseImagePath, baseWidth, baseHeight);
+        WriteRegionMask(maskPath, baseWidth, baseHeight, 613, 391, 155, 167);
+        var cliSize = GenerationToolProvider.ResolveCliSize(baseWidth, baseHeight).Size;
+        var runner = new RecordingRunner(request =>
+        {
+            var arguments = request.Arguments.ToList();
+            var preparedBasePath = arguments[arguments.IndexOf("--image") + 1];
+            var rawOutputPath = arguments[arguments.IndexOf("--out") + 1];
+            File.Copy(preparedBasePath, rawOutputPath, overwrite: true);
+            return new ImageGenerationCliProcessResult(0, string.Empty, string.Empty, false);
+        });
+        var service = new ImageGenerationCliFallbackService(CreateFixedProbe(scriptPath), runner);
+
+        await service.GenerateAsync(
+            new ImageGenerationCliFallbackRequest(
+                "task-region-edit-955x1014",
+                "codex-worker",
+                "只修改冻结 mask 内的一只眼睛。",
+                promptPath,
+                [baseImagePath],
+                cliSize,
+                outputPath,
+                "region-edit",
+                baseImagePath,
+                maskPath,
+                PreserveOutsideMask: true),
+            CancellationToken.None);
+
+        using var baseline = Image.Load<Rgba32>(baseImagePath);
+        using var output = Image.Load<Rgba32>(outputPath);
+        Equal(baseWidth, output.Width, "955×1014 region-edit 输出必须恢复 base 宽度");
+        Equal(baseHeight, output.Height, "955×1014 region-edit 输出必须恢复 base 高度");
+        var differences = 0;
+        for (var y = 0; y < baseHeight; y++)
+        {
+            for (var x = 0; x < baseWidth; x++)
+            {
+                if (baseline[x, y] != output[x, y])
+                {
+                    differences++;
+                }
+            }
+        }
+
+        Equal(0, differences,
+            "955×1014 → 合法 API 画布 → 955×1014 的 padding/crop 不得引入任何插值像素漂移");
+        var launchArguments = runner.Requests.Single().Arguments.ToList();
+        var rawPath = launchArguments[launchArguments.IndexOf("--out") + 1];
+        True(File.Exists(rawPath), "955×1014 region-edit 必须保留 full API raw 诊断产物");
     }
 
     private static async Task InvalidExistingPngIsRegeneratedAsync(string temporaryRoot)
@@ -490,6 +651,55 @@ internal static class ImageGenerationCliFallbackSmokeTests
     {
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         using var image = new Image<Rgba32>(2, 2, new Rgba32(255, 0, 255, 255));
+        image.SaveAsPng(path);
+    }
+
+    private static void WriteRegionMask(string path)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using var image = new Image<Rgba32>(2, 2, new Rgba32(255, 255, 255, 255));
+        image[0, 0] = new Rgba32(255, 255, 255, 0);
+        image.SaveAsPng(path);
+    }
+
+    private static void WriteRegionMask(
+        string path,
+        int width,
+        int height,
+        int regionX,
+        int regionY,
+        int regionWidth,
+        int regionHeight)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using var image = new Image<Rgba32>(width, height, new Rgba32(255, 255, 255, 255));
+        for (var y = regionY; y < regionY + regionHeight; y++)
+        {
+            for (var x = regionX; x < regionX + regionWidth; x++)
+            {
+                image[x, y] = new Rgba32(255, 255, 255, 0);
+            }
+        }
+
+        image.SaveAsPng(path);
+    }
+
+    private static void WritePatternPng(string path, int width, int height)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        using var image = new Image<Rgba32>(width, height);
+        for (var y = 0; y < height; y++)
+        {
+            for (var x = 0; x < width; x++)
+            {
+                image[x, y] = new Rgba32(
+                    (byte)(x * 17 + y * 3),
+                    (byte)(x * 5 + y * 11),
+                    (byte)(x * 13 + y * 7),
+                    255);
+            }
+        }
+
         image.SaveAsPng(path);
     }
 

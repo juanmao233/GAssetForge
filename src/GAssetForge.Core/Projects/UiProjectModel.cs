@@ -140,4 +140,15 @@ public sealed class UiEditorSessionModel
     public double Zoom { get; set; } = 0.5;
     public List<string> CollapsedLayerIds { get; set; } = [];
     public List<string> ExpandedProjectFolderIds { get; set; } = [];
+    public string AgentInstructionDraft { get; set; } = string.Empty;
+    public List<UiAgentConversationMessageModel> AgentConversation { get; set; } = [];
+}
+
+public sealed class UiAgentConversationMessageModel
+{
+    public string Id { get; set; } = Guid.NewGuid().ToString("N");
+    public string Role { get; set; } = "user";
+    public string Text { get; set; } = string.Empty;
+    public string State { get; set; } = "completed";
+    public DateTimeOffset CreatedAt { get; set; } = DateTimeOffset.Now;
 }
