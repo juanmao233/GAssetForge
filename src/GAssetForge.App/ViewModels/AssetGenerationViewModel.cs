@@ -3,6 +3,7 @@ using GAssetForge.App.Services;
 using GAssetForge.App.Services.AgentRuntime;
 using GAssetForge.Core.ArtStyles;
 using GAssetForge.Core.Generation;
+using GAssetForge.Core.Projects;
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
@@ -1548,7 +1549,19 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             throw new InvalidDataException("恢复批次跨越了不同项目 Assets 根目录。");
         }
 
-        var run = _runWorkspaceService.OpenOrRepair(batchId, assetRoot);
+        var frozenRootRelativePath = deliveries[0].Workspace!.RootPath;
+        if (deliveries.Any(delivery => !string.Equals(
+                delivery.Workspace!.RootPath,
+                frozenRootRelativePath,
+                StringComparison.Ordinal)))
+        {
+            throw new InvalidDataException("恢复批次包含了不同的冻结 Run 根目录。");
+        }
+
+        var run = _runWorkspaceService.OpenOrRepair(
+            batchId,
+            assetRoot,
+            frozenRootRelativePath);
         var manifestFullPath = Path.GetFullPath(Path.Combine(
             assetRoot,
             run.ManifestRelativePath.Replace('/', Path.DirectorySeparatorChar)));
@@ -1559,17 +1572,31 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             var task = tasks[index];
             var delivery = deliveries[index];
             var workspace = delivery.Workspace!;
+            var stagingPaths = delivery.StagingPaths ?? [];
+            var isArtWorkspaceTask = string.Equals(
+                task.Constraints.WorkflowId,
+                ArtWorkspaceGenerationConstraintPackageBuilder.WorkflowId,
+                StringComparison.OrdinalIgnoreCase);
+            var hasValidStagingContract = stagingPaths.Length == 1 ||
+                                          isArtWorkspaceTask && stagingPaths.Length == 0;
             if (!string.Equals(workspace.RunId, run.BatchId, StringComparison.Ordinal) ||
                 !string.Equals(workspace.RootPath, run.RootRelativePath, StringComparison.Ordinal) ||
                 !string.Equals(workspace.ManifestPath, run.ManifestRelativePath, StringComparison.Ordinal) ||
                 workspace.ModelOutputPaths is not { Length: 1 } modelPaths ||
                 workspace.ProcessedPaths is not { Length: 1 } processedPaths ||
-                delivery.StagingPaths is not { Length: 1 } stagingPaths ||
+                !hasValidStagingContract ||
                 delivery.TargetPaths is not { Length: 1 } targetPaths)
             {
                 throw new InvalidDataException(
                     $"恢复任务 {ShortId(task.Id)} 的冻结 Run 路径与批次 {ShortId(batchId)} 不一致。");
             }
+
+            var normalizedPath = stagingPaths.Length == 1
+                ? stagingPaths[0]
+                : _runWorkspaceService.CreateNormalizedPath(
+                    run,
+                    task.BatchItemId ?? task.Id,
+                    delivery.SuggestedBaseName);
 
             var promptFullPath = Path.GetFullPath(Path.Combine(
                 assetRoot,
@@ -1592,7 +1619,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                     : index,
                 tasks.Length,
                 modelPaths[0],
-                stagingPaths[0],
+                normalizedPath,
                 processedPaths[0],
                 targetPaths[0]));
         }
@@ -1671,7 +1698,10 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             }
 
             retryBatchId = Guid.NewGuid().ToString("N");
-            runWorkspace = _runWorkspaceService.Prepare(retryBatchId, firstDelivery.AssetRoot);
+            runWorkspace = _runWorkspaceService.Prepare(
+                retryBatchId,
+                firstDelivery.AssetRoot,
+                ProjectAssetLayout.GetWorkflowCategory(retryableParents[0].Constraints.WorkflowId));
             await _runWorkspaceService.MirrorExistingRunReferencesAsync(runWorkspace, firstDelivery)
                 .ConfigureAwait(true);
             var retryItems = new List<CreateGenerationRetryBatchItemRequest>(retryableParents.Length);
@@ -1710,7 +1740,9 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                     throw new IOException($"自动重做目标已经存在：{targetFullPath}");
                 }
 
-                Directory.CreateDirectory(Path.GetDirectoryName(targetFullPath)!);
+                AssetRootService.EnsureManagedDirectory(
+                    previousDelivery.AssetRoot,
+                    Path.GetDirectoryName(targetFullPath)!);
                 var workspacePlan = _runWorkspaceService.CreateOutputPlan(
                     runWorkspace,
                     itemId,
@@ -2475,7 +2507,10 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             var stylePrompt = publication.StylePrompt;
             var backgroundRemoval = publication.BackgroundRemoval;
             var assetRoot = publication.AssetRoot;
-            runWorkspace = _runWorkspaceService.Prepare(batchId, assetRoot);
+            runWorkspace = _runWorkspaceService.Prepare(
+                batchId,
+                assetRoot,
+                ProjectAssetLayout.GetWorkflowCategory(stepSnapshot.WorkflowId));
             await _runWorkspaceService.MirrorStyleReferencesAsync(runWorkspace, snapshot)
                 .ConfigureAwait(true);
             var reservedTargets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -2491,16 +2526,18 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                     throw new InvalidOperationException($"第 {rowIndex + 1} 行：{outputReason}");
                 }
 
-                var relativeOutputDirectory = Path.GetRelativePath(assetRoot, normalizedOutput)
+                var finalRoot = Path.Combine(assetRoot, ProjectAssetLayout.FinalDirectoryName);
+                var collectionRelativePath = Path.GetRelativePath(finalRoot, normalizedOutput)
                     .Replace('\\', '/');
-                if (relativeOutputDirectory == ".")
+                if (collectionRelativePath == ".")
                 {
-                    relativeOutputDirectory = string.Empty;
+                    collectionRelativePath = string.Empty;
                 }
 
-                var finalOutputDirectory = string.IsNullOrEmpty(relativeOutputDirectory)
-                    ? $"Generated/{stepSnapshot.OutputFolderName}/{batchId}/Final"
-                    : $"{relativeOutputDirectory}/{stepSnapshot.OutputFolderName}/{batchId}/Final";
+                var finalOutputDirectory = ProjectAssetLayout.BuildFinalBatchRelativePath(
+                    stepSnapshot.OutputFolderName,
+                    batchId,
+                    collectionRelativePath);
                 var finalOutputFullPath = Path.GetFullPath(Path.Combine(
                     assetRoot,
                     finalOutputDirectory.Replace('/', Path.DirectorySeparatorChar)));
@@ -2509,7 +2546,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                     throw new InvalidDataException($"第 {rowIndex + 1} 行最终分类目录越出了当前 Assets：{finalOutputDirectory}");
                 }
 
-                Directory.CreateDirectory(finalOutputFullPath);
+                AssetRootService.EnsureManagedDirectory(assetRoot, finalOutputFullPath);
                 for (var variantIndex = 0; variantIndex < row.Quantity; variantIndex++)
                 {
                     var itemId = Guid.NewGuid().ToString("N");
@@ -2720,7 +2757,10 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
 
             var retryBatchId = Guid.NewGuid().ToString("N");
             retryDispatchBatchId = retryBatchId;
-            runWorkspace = _runWorkspaceService.Prepare(retryBatchId, previousDelivery.AssetRoot);
+            runWorkspace = _runWorkspaceService.Prepare(
+                retryBatchId,
+                previousDelivery.AssetRoot,
+                ProjectAssetLayout.GetWorkflowCategory(failedTask.Constraints.WorkflowId));
             await _runWorkspaceService.MirrorExistingRunReferencesAsync(runWorkspace, previousDelivery)
                 .ConfigureAwait(true);
             BeginDispatchProgress(
@@ -2756,7 +2796,9 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                     throw new IOException($"重试目标已经存在：{fullPath}");
                 }
 
-                Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+                AssetRootService.EnsureManagedDirectory(
+                    previousDelivery.AssetRoot,
+                    Path.GetDirectoryName(fullPath)!);
                 var singleOutputConstraints = failedTask.Constraints with
                 {
                     Output = failedTask.Constraints.Output with { Count = 1, MaxParallelism = 1 }
@@ -2906,7 +2948,10 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                 throw new InvalidDataException("失败批次缺少可重试的固定交付计划。");
             }
 
-            runWorkspace = _runWorkspaceService.Prepare(retryBatchId, firstDelivery.AssetRoot);
+            runWorkspace = _runWorkspaceService.Prepare(
+                retryBatchId,
+                firstDelivery.AssetRoot,
+                ProjectAssetLayout.GetWorkflowCategory(failedItems[0].Task.Constraints.WorkflowId));
             await _runWorkspaceService.MirrorExistingRunReferencesAsync(runWorkspace, firstDelivery)
                 .ConfigureAwait(true);
             for (var retryIndex = 0; retryIndex < failedItems.Length; retryIndex++)
@@ -2952,7 +2997,9 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                         throw new IOException($"手动重试目标已经存在：{fullPath}");
                     }
 
-                    Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+                    AssetRootService.EnsureManagedDirectory(
+                        previousDelivery.AssetRoot,
+                        Path.GetDirectoryName(fullPath)!);
                     var singleOutputConstraints = failedTask.Constraints with
                     {
                         Output = failedTask.Constraints.Output with { Count = 1, MaxParallelism = 1 }
@@ -4325,9 +4372,9 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             return;
         }
 
-        row.OutputDirectory = _projectBrowser.CurrentPath;
+        row.OutputDirectory = EnsureFinalAssetRoot();
         SelectedDraftRow = row;
-        StatusText = "已使用项目区当前文件夹作为生成输出目录";
+        StatusText = "已使用项目 Final 根目录作为最终产物分类位置";
     }
 
     private void AddDraftRow()
@@ -4344,7 +4391,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
                 ? "新的 Icon 物品"
                 : "新的 Tilemap 物品",
             1,
-            SelectedDraftRow?.OutputDirectory ?? PrimaryDraftRow?.OutputDirectory ?? _projectBrowser.CurrentPath);
+            SelectedDraftRow?.OutputDirectory ?? PrimaryDraftRow?.OutputDirectory ?? EnsureFinalAssetRoot());
         AttachDraftRow(row);
         DraftRows.Add(row);
         SelectedDraftRow = row;
@@ -4579,7 +4626,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             return normalized;
         }
 
-        return _projectBrowser.CurrentPath;
+        return EnsureFinalAssetRoot();
     }
 
     private bool TryValidateOutputDirectory(
@@ -4599,7 +4646,39 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
             return false;
         }
 
+        var finalRoot = Path.Combine(
+            _projectBrowser.RootPath,
+            ProjectAssetLayout.FinalDirectoryName);
+        if (!AssetRootService.IsWithinRoot(finalRoot, normalized))
+        {
+            reason = "最终产物分类目录必须位于当前项目的 Assets/Final 内";
+            normalized = string.Empty;
+            return false;
+        }
+
+        try
+        {
+            AssetRootService.EnsureExistingPathSegmentsAreNotReparsePoints(
+                _projectBrowser.RootPath,
+                normalized);
+        }
+        catch (Exception exception) when (exception is InvalidDataException or IOException or UnauthorizedAccessException)
+        {
+            reason = $"输出目录不能经过符号链接或目录联接：{exception.Message}";
+            normalized = string.Empty;
+            return false;
+        }
+
         return true;
+    }
+
+    private string EnsureFinalAssetRoot()
+    {
+        var finalRoot = Path.GetFullPath(Path.Combine(
+            _projectBrowser.RootPath,
+            ProjectAssetLayout.FinalDirectoryName));
+        AssetRootService.EnsureManagedDirectory(_projectBrowser.RootPath, finalRoot);
+        return finalRoot;
     }
 
     private bool HasUsableSelectedStyle(ArtStyleGroupViewModel group) =>
@@ -4951,40 +5030,29 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         string retryBatchId,
         string workflowId)
     {
-        var outputFolderName = GetWorkflowOutputFolder(workflowId);
+        var outputFolderName = ProjectAssetLayout.GetWorkflowCategory(workflowId);
         var segments = (previousOutputDirectory ?? string.Empty)
             .Replace('\\', '/')
             .Trim('/')
             .Split('/', StringSplitOptions.RemoveEmptyEntries)
             .ToList();
-        var batchSegmentIndex = segments.Count - 2;
-        var containsWorkflowFolder = batchSegmentIndex > 0 && segments
-            .Take(batchSegmentIndex)
-            .Any(segment => string.Equals(
-                segment,
-                outputFolderName,
-                StringComparison.OrdinalIgnoreCase));
-        if (containsWorkflowFolder &&
-            Guid.TryParseExact(segments[batchSegmentIndex], "N", out _) &&
-            string.Equals(segments[^1], "Final", StringComparison.OrdinalIgnoreCase))
+        string? collectionRelativePath = null;
+        if (segments.Count >= 3 &&
+            string.Equals(segments[0], ProjectAssetLayout.FinalDirectoryName, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(segments[^2], outputFolderName, StringComparison.OrdinalIgnoreCase) &&
+            Guid.TryParseExact(segments[^1], "N", out _))
         {
-            segments[batchSegmentIndex] = retryBatchId;
-            return string.Join('/', segments);
+            collectionRelativePath = string.Join('/', segments.Skip(1).Take(segments.Count - 3));
         }
 
-        var prefix = string.Join('/', segments);
-        return string.IsNullOrEmpty(prefix)
-            ? $"Generated/{outputFolderName}/{retryBatchId}/Final"
-            : $"{prefix}/{outputFolderName}/{retryBatchId}/Final";
+        return ProjectAssetLayout.BuildFinalBatchRelativePath(
+            outputFolderName,
+            retryBatchId,
+            collectionRelativePath);
     }
 
-    private static string GetWorkflowOutputFolder(string workflowId) => workflowId switch
-    {
-        TilemapConstraintPackageBuilder.WorkflowId => "Tilemap",
-        IconDesignConstraintPackageBuilder.WorkflowId => "Icon",
-        ArtWorkspaceGenerationConstraintPackageBuilder.WorkflowId => "ArtWorkspace",
-        _ => "GeneratedAsset"
-    };
+    private static string GetWorkflowOutputFolder(string workflowId) =>
+        ProjectAssetLayout.GetWorkflowCategory(workflowId);
 
     private static string GetWorkflowFilePrefix(string workflowId) => workflowId switch
     {
@@ -5080,18 +5148,8 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
 
     private void OnProjectCurrentPathChanged(string path)
     {
-        var changedAny = false;
-        foreach (var row in DraftRows.Where(row =>
-                     !TryValidateOutputDirectory(row.OutputDirectory, out _, out _)))
-        {
-            row.OutputDirectory = path;
-            changedAny = true;
-        }
-
-        if (!changedAny)
-        {
-            RefreshDerivedState();
-        }
+        // Browsing user content is intentionally independent from final delivery classification.
+        RefreshDerivedState();
     }
 
     private void OnProjectRootPathChanged(string? path)
@@ -5100,7 +5158,7 @@ public sealed class AssetGenerationViewModel : ObservableObject, IDisposable
         foreach (var row in DraftRows.Where(row =>
                      !TryValidateOutputDirectory(row.OutputDirectory, out _, out _)))
         {
-            row.OutputDirectory = _projectBrowser.CurrentPath;
+            row.OutputDirectory = EnsureFinalAssetRoot();
             changedAny = true;
         }
 

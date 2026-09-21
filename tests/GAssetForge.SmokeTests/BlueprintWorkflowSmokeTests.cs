@@ -448,8 +448,9 @@ internal static class BlueprintWorkflowSmokeTests
         Throws<InvalidDataException>(
             () => dispatcher.DispatchAsync(validPlan, ordinaryDirectory).GetAwaiter().GetResult(),
             "运行发布同样只能接受正式项目根目录");
-        True(!Directory.Exists(untrustedPaths.GeneratedAssetDirectory),
-            "拒绝普通目录运行发布时不得创建 Generated 目录");
+        True(!Directory.Exists(untrustedPaths.AiAssetDirectory) &&
+             !Directory.Exists(untrustedPaths.BlueprintRunDirectory),
+            "拒绝普通目录运行发布时不得创建 AI/Blueprint 目录");
 
         var isolatedPaths = new WorkspacePaths(Path.Combine(temporaryRoot, "blueprint-invalid-plan-app-data"));
         var invalidPlan = ClonePlan(validPlan);
@@ -534,7 +535,13 @@ internal static class BlueprintWorkflowSmokeTests
         True(viewModel.LastRunDirectory.StartsWith(
                 projectA.Paths.BlueprintRunDirectory,
                 StringComparison.OrdinalIgnoreCase),
-            "正式项目的蓝图运行必须落在当前项目 Generated 目录");
+            "正式项目的蓝图运行必须落在当前项目 AI/Blueprint 目录");
+        True(AssetRootService.PathEquals(
+                projectA.Paths.BlueprintRunDirectory,
+                Directory.GetParent(viewModel.LastRunDirectory)?.FullName ?? string.Empty),
+            "正式项目的蓝图运行目录应是 AI/Blueprint 的直接子目录");
+        True(!Directory.Exists(projectA.Paths.LegacyGeneratedAssetDirectory),
+            "正式蓝图运行不得新建旧 Generated 目录");
         True(File.Exists(Path.Combine(viewModel.LastRunDirectory, "execution-plan.v1.json")),
             "运行目录应包含冻结执行计划");
         var timelinePath = Path.Combine(viewModel.LastRunDirectory, "timeline.v1.jsonl");

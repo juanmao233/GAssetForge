@@ -28,6 +28,10 @@ implemented locally. The repository code does not add an independent analytics o
 
 ## Cleanup
 
-Before sharing logs or a project, inspect `Assets\Generated\GAssetForge\Runs`, project manifests,
-prompt files, reference snapshots, and `%LocalAppData%\GAssetForge\Desktop\Logs`. Remove content you
-do not intend to disclose. Do not delete an active Run while its tasks are pending or claimed.
+Before sharing logs or a project, inspect `Assets\AI` (prompts, references, model outputs and
+Run diagnostics), `Assets\Final`, `Assets\User`, project manifests, and
+`%LocalAppData%\GAssetForge\Desktop` (including logs, settings and reference snapshots).
+Older projects may still contain `Assets\Generated\GAssetForge\Runs` and
+`Assets\ArtWorkspace\References`; older installations may use the PerspectiveForge data root.
+Remove content you do not intend to disclose. Do not delete an active Run while its tasks are pending
+or claimed. The repository's `.gitignore` is a convenience, not a substitute for reviewing uploads.

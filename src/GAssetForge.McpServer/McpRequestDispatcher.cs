@@ -217,7 +217,7 @@ internal sealed class McpRequestDispatcher(McpToolCatalog toolCatalog)
                         title = "GAssetForge AI Art Generation Queue",
                         version = ProductIdentity.GetAssemblyInformationalVersion(typeof(McpRequestDispatcher).Assembly)
                     },
-                    instructions = "读取 get_current_context 获取桌面工作流约束；领取生成任务后，必须把产物保存到返回的有效 Assets 根目录内，再调用 complete_generation_task。"
+                    instructions = "对桌面已发布的任务，直接按任务合同使用 claim_generation_task；独立 MCP 客户端若可见 get_current_context，可在创建任务前读取工作流约束。新任务必须通过 submit_generation_output 提交内置图片生成返回的本地 PNG；内置能力未返回可用本地路径时调用 run_image_delivery_fallback。不得自行写入、扫描或改动 Assets；仅在 claim 返回旧 delivery 合同时使用 process_generation_output 与 complete_generation_task。"
                 };
 
             case "notifications/initialized":

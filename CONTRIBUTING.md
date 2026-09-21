@@ -12,11 +12,23 @@ processing, project isolation, and the durable generation-task contract.
 
 ## Build and verify
 
+本机根目录工程入口可通过以下命令生成；启动器每次只在当前 App 与 MCP Server 构建成功后启动 Debug 程序：
+
 ```powershell
+.\scripts\build-engineering-entry.ps1 -Verify
+```
+
+```powershell
+.\scripts\verify-text-format.ps1
 dotnet restore .\GAssetForge.sln --locked-mode
 dotnet build .\GAssetForge.sln -c Release --no-restore
 dotnet run --project .\tests\GAssetForge.SmokeTests\GAssetForge.SmokeTests.csproj -c Release --no-build
 ```
+
+The text-format check enforces LF, UTF-8 without BOM, and final newlines for tracked or unignored new
+source, project, XAML, solution, and PowerShell files without rewriting them. Run full
+`dotnet format --verify-no-changes` only when working on the separate legacy whitespace and
+import-order cleanup.
 
 Update `packages.lock.json` only when intentionally changing dependencies:
 
@@ -42,8 +54,8 @@ Keep each pull request focused on one workflow outcome. Describe the user-visibl
 and any migration implications. Security issues must follow [SECURITY.md](SECURITY.md), not a public
 issue.
 
-## License status
+## License
 
-The repository owner has not yet selected the project license. A public repository is not legally
-open source until a project `LICENSE` is added. Contributions should not be solicited before that
-choice and the contribution terms are published.
+Original project code is licensed under [MIT](LICENSE). By submitting a contribution, you agree
+that your contribution is provided under the same license. Preserve third-party notices and do not
+include assets or code you do not have permission to redistribute.

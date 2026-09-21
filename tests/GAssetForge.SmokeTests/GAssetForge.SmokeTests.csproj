@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\GAssetForge.App\GAssetForge.App.csproj" />
+    <ProjectReference Include="..\..\src\GAssetForge.EngineeringLauncher\GAssetForge.EngineeringLauncher.csproj" />
     <ProjectReference Include="..\..\src\GAssetForge.McpServer\GAssetForge.McpServer.csproj" />
   </ItemGroup>
 </Project>

@@ -1,5 +1,6 @@
 using GAssetForge.App.Infrastructure;
 using GAssetForge.App.Services;
+using GAssetForge.Core.Projects;
 using System.Collections.ObjectModel;
 using System.Diagnostics;
 using System.IO;
@@ -16,7 +17,7 @@ public sealed class ProjectBrowserViewModel : ObservableObject
     private readonly RelayCommand _chooseRootCommand;
     private readonly RelayCommand _useDefaultRootCommand;
     private readonly RelayCommand _navigateUpCommand;
-    private readonly string _defaultGeneratedPath;
+    private readonly string _defaultUserPath;
     private string? _configuredRootPath;
     private string _rootPath = string.Empty;
     private string _currentPath = string.Empty;
@@ -36,7 +37,7 @@ public sealed class ProjectBrowserViewModel : ObservableObject
         _rootService = new AssetRootService(paths);
         _catalogService = new LocalAssetCatalogService();
         _directoryPicker = directoryPicker;
-        _defaultGeneratedPath = paths.GeneratedAssetDirectory;
+        _defaultUserPath = paths.UserAssetDirectory;
         EditorWorkspace = editorWorkspace;
 
         _chooseRootCommand = new RelayCommand(ChooseRoot, () => !IsRootSelectionLocked);
@@ -54,7 +55,7 @@ public sealed class ProjectBrowserViewModel : ObservableObject
 
         var resolution = _rootService.Resolve(configuredRootPath);
         var initialCurrentPath = configuredCurrentPath ??
-                                 (string.IsNullOrWhiteSpace(configuredRootPath) ? _defaultGeneratedPath : null);
+                                 (string.IsNullOrWhiteSpace(configuredRootPath) ? _defaultUserPath : null);
         ApplyRootResolution(resolution, initialCurrentPath, notifyConfiguration: false);
     }
 
@@ -180,8 +181,8 @@ public sealed class ProjectBrowserViewModel : ObservableObject
         }
 
         var preferredCurrentPath = string.IsNullOrWhiteSpace(rootPath)
-            ? _defaultGeneratedPath
-            : resolution.EffectivePath;
+            ? _defaultUserPath
+            : GetUserContentPath(resolution.EffectivePath);
         ApplyRootResolution(resolution, preferredCurrentPath, notifyConfiguration: true);
         return true;
     }
@@ -206,6 +207,16 @@ public sealed class ProjectBrowserViewModel : ObservableObject
             return false;
         }
 
+        try
+        {
+            AssetRootService.EnsureExistingPathSegmentsAreNotReparsePoints(RootPath, normalizedPath);
+        }
+        catch (Exception exception) when (IsFileSystemException(exception))
+        {
+            StatusText = $"已拒绝经过符号链接或目录联接的导航请求：{exception.Message}";
+            return false;
+        }
+
         CurrentPath = normalizedPath;
         RefreshCurrentDirectory();
         CurrentPathChanged?.Invoke(CurrentPath);
@@ -223,6 +234,7 @@ public sealed class ProjectBrowserViewModel : ObservableObject
         node.Children.Clear();
         try
         {
+            AssetRootService.EnsureExistingPathSegmentsAreNotReparsePoints(RootPath, node.FullPath);
             foreach (var entry in _catalogService.Enumerate(node.FullPath).Entries.Where(entry => entry.IsDirectory))
             {
                 node.Children.Add(CreateFolderNode(entry.FullPath, entry.Name));
@@ -254,6 +266,7 @@ public sealed class ProjectBrowserViewModel : ObservableObject
 
         try
         {
+            AssetRootService.EnsureExistingPathSegmentsAreNotReparsePoints(RootPath, entry.FullPath);
             if (!File.Exists(entry.FullPath))
             {
                 Refresh();
@@ -264,7 +277,9 @@ public sealed class ProjectBrowserViewModel : ObservableObject
             Process.Start(new ProcessStartInfo(entry.FullPath) { UseShellExecute = true });
             StatusText = $"已打开：{entry.Name}";
         }
-        catch (Exception exception) when (exception is InvalidOperationException or IOException or System.ComponentModel.Win32Exception)
+        catch (Exception exception) when (
+            IsFileSystemException(exception) ||
+            exception is InvalidOperationException or System.ComponentModel.Win32Exception)
         {
             StatusText = $"无法打开文件：{exception.Message}";
         }
@@ -291,9 +306,26 @@ public sealed class ProjectBrowserViewModel : ObservableObject
             return;
         }
 
-        if (!Directory.Exists(CurrentPath) || !AssetRootService.IsWithinRoot(RootPath, CurrentPath))
+        var currentPathIsSafe = Directory.Exists(CurrentPath) &&
+                                AssetRootService.IsWithinRoot(RootPath, CurrentPath);
+        if (currentPathIsSafe)
         {
-            CurrentPath = RootPath;
+            try
+            {
+                AssetRootService.EnsureExistingPathSegmentsAreNotReparsePoints(RootPath, CurrentPath);
+            }
+            catch (Exception exception) when (IsFileSystemException(exception))
+            {
+                currentPathIsSafe = false;
+            }
+        }
+
+        if (!currentPathIsSafe)
+        {
+            var userContentPath = GetUserContentPath(RootPath);
+            CurrentPath = TryEnsureUserContentDirectory(RootPath, userContentPath)
+                ? userContentPath
+                : RootPath;
         }
 
         RebuildFolderTree();
@@ -334,26 +366,48 @@ public sealed class ProjectBrowserViewModel : ObservableObject
     {
         try
         {
-            if (!Directory.Exists(CurrentPath) ||
-                !AssetRootService.IsWithinRoot(RootPath, CurrentPath))
+            if (!Directory.Exists(RootPath))
             {
                 StatusText = "当前项目资产目录不可用，未创建文件夹。";
                 return;
             }
+
+            var userContentPath = GetUserContentPath(RootPath);
+            EnsureManagedDirectory(RootPath, userContentPath);
+            var creationParent = Directory.Exists(CurrentPath) &&
+                                 AssetRootService.IsWithinRoot(userContentPath, CurrentPath)
+                ? CurrentPath
+                : userContentPath;
+            if (!AssetRootService.IsWithinRoot(RootPath, creationParent))
+            {
+                StatusText = "用户内容目录越过当前 Assets 根目录，未创建文件夹。";
+                return;
+            }
+
+            EnsureManagedDirectory(RootPath, creationParent);
+            var redirectedToUserContent = !AssetRootService.PathEquals(creationParent, CurrentPath);
 
             var index = 1;
             string folderPath;
             do
             {
                 var folderName = index == 1 ? "New Folder" : $"New Folder {index}";
-                folderPath = Path.Combine(CurrentPath, folderName);
+                folderPath = Path.Combine(creationParent, folderName);
                 index++;
             }
             while (Directory.Exists(folderPath) || File.Exists(folderPath));
 
             Directory.CreateDirectory(folderPath);
+            if (redirectedToUserContent)
+            {
+                CurrentPath = creationParent;
+                CurrentPathChanged?.Invoke(CurrentPath);
+            }
+
             Refresh();
-            StatusText = $"已创建：{Path.GetFileName(folderPath)}";
+            StatusText = redirectedToUserContent
+                ? $"系统管理区域不接收用户文件夹；已转到 User 并创建：{Path.GetFileName(folderPath)}"
+                : $"已创建：{Path.GetFileName(folderPath)}";
         }
         catch (Exception exception) when (IsFileSystemException(exception))
         {
@@ -386,7 +440,7 @@ public sealed class ProjectBrowserViewModel : ObservableObject
         try
         {
             Clipboard.SetText(CurrentPath);
-            StatusText = "当前生成输出路径已复制";
+            StatusText = "当前资产目录路径已复制";
         }
         catch (Exception exception)
         {
@@ -402,12 +456,16 @@ public sealed class ProjectBrowserViewModel : ObservableObject
         _configuredRootPath = resolution.ConfiguredPath;
         RootPath = resolution.EffectivePath;
         IsUsingFallback = resolution.IsUsingFallback;
-        CurrentPath = ResolveCurrentPath(preferredCurrentPath, RootPath);
+        var userContentPath = GetUserContentPath(RootPath);
+        var fallbackPath = TryEnsureUserContentDirectory(RootPath, userContentPath)
+            ? userContentPath
+            : RootPath;
+        CurrentPath = ResolveCurrentPath(preferredCurrentPath, RootPath, fallbackPath);
         RebuildFolderTree();
         RefreshCurrentDirectory();
         StatusText = resolution.IsUsingFallback
             ? resolution.Message
-            : $"{resolution.Message} · 当前生成输出：{CurrentFolderName}";
+            : $"{resolution.Message} · 当前资产目录：{CurrentFolderName}";
 
         if (notifyConfiguration)
         {
@@ -422,6 +480,7 @@ public sealed class ProjectBrowserViewModel : ObservableObject
         Breadcrumbs.Clear();
         try
         {
+            AssetRootService.EnsureExistingPathSegmentsAreNotReparsePoints(RootPath, CurrentPath);
             var snapshot = _catalogService.Enumerate(CurrentPath);
             foreach (var entry in snapshot.Entries)
             {
@@ -430,7 +489,7 @@ public sealed class ProjectBrowserViewModel : ObservableObject
 
             BuildBreadcrumbs();
             EntryCountText = $"{snapshot.DirectoryCount} 个文件夹 · {snapshot.FileCount} 个文件";
-            StatusText = $"当前生成输出：{CurrentPath}";
+            StatusText = $"当前资产目录：{CurrentPath}";
         }
         catch (Exception exception) when (IsFileSystemException(exception))
         {
@@ -469,17 +528,51 @@ public sealed class ProjectBrowserViewModel : ObservableObject
         }
     }
 
-    private string ResolveCurrentPath(string? configuredCurrentPath, string fallback)
+    private string ResolveCurrentPath(
+        string? configuredCurrentPath,
+        string assetRoot,
+        string userContentPath)
     {
         if (!string.IsNullOrWhiteSpace(configuredCurrentPath) &&
             _rootService.TryNormalizeDirectory(configuredCurrentPath, out var normalizedPath, out _) &&
-            AssetRootService.IsWithinRoot(fallback, normalizedPath))
+            AssetRootService.IsWithinRoot(assetRoot, normalizedPath) &&
+            !AssetRootService.IsWithinRoot(
+                Path.Combine(assetRoot, ProjectAssetLayout.LegacyGeneratedDirectoryName),
+                normalizedPath))
         {
-            return normalizedPath;
+            try
+            {
+                AssetRootService.EnsureExistingPathSegmentsAreNotReparsePoints(assetRoot, normalizedPath);
+                return normalizedPath;
+            }
+            catch (Exception exception) when (IsFileSystemException(exception))
+            {
+                // Unsafe persisted navigation state falls back to User below.
+            }
         }
 
-        return fallback;
+        return Directory.Exists(userContentPath) ? userContentPath : assetRoot;
     }
+
+    private static string GetUserContentPath(string assetRoot) =>
+        ProjectAssetLayout.GetUserRootFullPath(assetRoot);
+
+    private static bool TryEnsureUserContentDirectory(string assetRoot, string userContentPath)
+    {
+        try
+        {
+            EnsureManagedDirectory(assetRoot, userContentPath);
+            return true;
+        }
+        catch (Exception exception) when (IsFileSystemException(exception))
+        {
+            // Read-only roots remain browseable. Folder creation will surface a concrete error later.
+            return false;
+        }
+    }
+
+    private static void EnsureManagedDirectory(string trustedRoot, string directoryPath) =>
+        AssetRootService.EnsureManagedDirectory(trustedRoot, directoryPath);
 
     private static string GetDirectoryName(string path, string fallback)
     {
@@ -497,5 +590,6 @@ public sealed class ProjectBrowserViewModel : ObservableObject
         DirectoryNotFoundException or
         PathTooLongException or
         ArgumentException or
+        InvalidDataException or
         NotSupportedException;
 }

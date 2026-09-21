@@ -3,6 +3,7 @@ using System.Windows.Threading;
 using GAssetForge.App.Services;
 using GAssetForge.App.ViewModels;
 using GAssetForge.Core.Generation;
+using GAssetForge.Core.Projects;
 
 namespace GAssetForge.SmokeTests;
 
@@ -32,8 +33,8 @@ internal static class AssetGenerationBatchSmokeTests
                 ?? throw new InvalidOperationException("批量 smoke 缺少默认风格组。");
             style.Description = "低饱和手绘石材、清晰轮廓与统一光照";
 
-            var firstOutput = Path.Combine(paths.GeneratedAssetDirectory, "Ground");
-            var secondOutput = Path.Combine(paths.GeneratedAssetDirectory, "Props");
+            var firstOutput = Path.Combine(paths.FinalAssetDirectory, "Ground");
+            var secondOutput = Path.Combine(paths.FinalAssetDirectory, "Props");
             Directory.CreateDirectory(firstOutput);
             Directory.CreateDirectory(secondOutput);
 
@@ -314,6 +315,123 @@ internal static class AssetGenerationBatchSmokeTests
                     .GetResult();
                 True(File.Exists(manifestPath),
                     "持久化 child 缺失 manifest 时必须能从冻结任务合同重建");
+
+                var legacyArtBatchId = Guid.NewGuid().ToString("N");
+                var legacyArtItemId = Guid.NewGuid().ToString("N");
+                const string legacyArtBaseName = "legacy_art_recovery";
+                var legacyArtRunRoot =
+                    $"{GenerationRunWorkspaceService.LegacyRunContainerRelativePath}/{legacyArtBatchId}";
+                var runWorkspaceService = new GenerationRunWorkspaceService();
+                var legacyArtRun = runWorkspaceService.OpenOrRepair(
+                    legacyArtBatchId,
+                    paths.AssetDirectory,
+                    legacyArtRunRoot);
+                var legacyArtWorkspace = runWorkspaceService.CreateOutputPlan(
+                    legacyArtRun,
+                    legacyArtItemId,
+                    legacyArtBaseName);
+                var legacyArtOutputDirectory =
+                    $"Generated/ArtWorkspace/{legacyArtBatchId}/Final";
+                var legacyArtTarget =
+                    $"{legacyArtOutputDirectory}/{legacyArtBaseName}.png";
+                var legacyArtConstraints = MaterialGenerationConstraintComposer.Compose(
+                    new GenerationConstraintPackage
+                    {
+                        WorkflowId = ArtWorkspaceGenerationConstraintPackageBuilder.WorkflowId,
+                        PreferredSkill = ArtWorkspaceGenerationConstraintPackageBuilder.PreferredSkill,
+                        Prompt = "恢复没有 stagingPaths 的历史美术工作区任务。",
+                        Output = new GenerationOutputSpec
+                        {
+                            Width = 1024,
+                            Height = 1024,
+                            Count = 1,
+                            MaxParallelism = 1,
+                            Format = "png",
+                            TransparentBackground = false
+                        }
+                    },
+                    new MaterialGenerationStyleSelection
+                    {
+                        GroupId = "legacy-art-recovery",
+                        Name = "历史美术工作区恢复",
+                        Description = "只验证冻结交付路径恢复。"
+                    },
+                    new GenerationDeliveryPlan
+                    {
+                        AssetRoot = paths.AssetDirectory,
+                        OutputDirectory = legacyArtOutputDirectory,
+                        TargetPaths = [legacyArtTarget],
+                        StagingPaths = [],
+                        SuggestedBaseName = legacyArtBaseName,
+                        Workspace = legacyArtWorkspace
+                    });
+                var legacyArtTask = (store.CreateBatchAsync(new CreateGenerationBatchRequest
+                {
+                    BatchId = legacyArtBatchId,
+                    DisplayName = "历史美术工作区恢复 smoke",
+                    RequestedBy = "GAssetForge SmokeTests",
+                    DispatchRequested = true,
+                    Items =
+                    [
+                        new CreateGenerationBatchItemRequest
+                        {
+                            ItemId = legacyArtItemId,
+                            DisplayName = "没有 stagingPaths 的美术工作区任务",
+                            Constraints = legacyArtConstraints
+                        }
+                    ]
+                }).GetAwaiter().GetResult()).Single();
+                var legacyArtManifestPath = Path.Combine(
+                    paths.AssetDirectory,
+                    legacyArtWorkspace.ManifestPath.Replace('/', Path.DirectorySeparatorChar));
+                var legacyArtPromptPath = Path.Combine(
+                    paths.AssetDirectory,
+                    legacyArtWorkspace.PromptPath.Replace('/', Path.DirectorySeparatorChar));
+                False(File.Exists(legacyArtManifestPath),
+                    "回归前置条件：历史美术任务的 manifest 应缺失");
+                False(File.Exists(legacyArtPromptPath),
+                    "回归前置条件：历史美术任务的 prompt 应缺失");
+                var taskCountBeforeLegacyArtRepair = store.ListAsync().GetAwaiter().GetResult().Count;
+
+                retryGeneration.RepairPersistedDispatchWorkspaceAsync(legacyArtBatchId)
+                    .GetAwaiter()
+                    .GetResult();
+
+                True(File.Exists(legacyArtManifestPath) && new FileInfo(legacyArtManifestPath).Length > 0,
+                    "stagingPaths=[] 的历史美术任务应能原地重建 manifest");
+                True(File.Exists(legacyArtPromptPath) && new FileInfo(legacyArtPromptPath).Length > 0,
+                    "stagingPaths=[] 的历史美术任务应能原地重建 prompt");
+                var expectedNormalizedPath =
+                    $"{legacyArtRunRoot}/35-normalized-input/{legacyArtItemId}/{legacyArtBaseName}.normalized.png";
+                True(File.ReadAllText(legacyArtManifestPath).Contains(
+                        expectedNormalizedPath,
+                        StringComparison.Ordinal),
+                    "没有 stagingPaths 时恢复 manifest 应使用冻结 Run 内的确定性 normalized 路径");
+                var repairedLegacyArtTask = store.GetAsync(legacyArtTask.Id)
+                    .GetAwaiter()
+                    .GetResult()
+                    ?? throw new InvalidOperationException("历史美术工作区恢复任务丢失。");
+                True(MaterialGenerationConstraintComposer.TryReadDelivery(
+                        repairedLegacyArtTask.Constraints,
+                        out var repairedLegacyArtDelivery) &&
+                     repairedLegacyArtDelivery is not null,
+                    "恢复后的历史美术工作区交付合同应保持可读");
+                Equal(legacyArtRunRoot, repairedLegacyArtDelivery!.Workspace?.RootPath,
+                    "恢复不得把 legacy frozen root 迁移到当前 AI 分类目录");
+                Equal(legacyArtTarget, repairedLegacyArtDelivery.TargetPaths.Single(),
+                    "恢复不得改写历史美术工作区冻结 target");
+                Equal(0, repairedLegacyArtDelivery.StagingPaths.Length,
+                    "恢复不得给历史美术工作区任务补造 stagingPaths");
+                Equal(taskCountBeforeLegacyArtRepair, store.ListAsync().GetAwaiter().GetResult().Count,
+                    "恢复历史美术任务不得创建替代任务");
+                var classifiedArtRunPath = Path.Combine(
+                    paths.AssetDirectory,
+                    ProjectAssetLayout.BuildAiRunRelativePath(
+                            ProjectAssetLayout.ArtWorkspaceCategory,
+                            legacyArtBatchId)
+                        .Replace('/', Path.DirectorySeparatorChar));
+                False(Directory.Exists(classifiedArtRunPath),
+                    "恢复历史美术任务不得并行创建新的 AI/ArtWorkspace Run");
             }
 
             generation.ReportDispatchQueued(firstEvent.BatchId, "smoke 调度队列");
@@ -372,6 +490,34 @@ internal static class AssetGenerationBatchSmokeTests
             Equal(1, firstDelivery!.TargetPaths.Length, "第一变体唯一目标数量");
             Equal(1, secondDelivery!.TargetPaths.Length, "第二变体唯一目标数量");
             Equal(1, thirdDelivery!.TargetPaths.Length, "第三变体唯一目标数量");
+            var expectedRunRoot = ProjectAssetLayout.BuildAiRunRelativePath(
+                ProjectAssetLayout.TilemapCategory,
+                firstEvent.BatchId);
+            var expectedGroundFinalDirectory = ProjectAssetLayout.BuildFinalBatchRelativePath(
+                ProjectAssetLayout.TilemapCategory,
+                firstEvent.BatchId,
+                "Ground");
+            var expectedPropsFinalDirectory = ProjectAssetLayout.BuildFinalBatchRelativePath(
+                ProjectAssetLayout.TilemapCategory,
+                firstEvent.BatchId,
+                "Props");
+            True(tasks.All(task =>
+                    MaterialGenerationConstraintComposer.TryReadDelivery(task.Constraints, out var delivery) &&
+                    string.Equals(delivery?.Workspace?.RootPath, expectedRunRoot, StringComparison.Ordinal)),
+                "Tilemap 首次生成的全部 Run 应共享 AI/Tilemap/<batch> 根目录");
+            Equal(expectedGroundFinalDirectory, firstDelivery.OutputDirectory,
+                "第一行最终目录应落入 Final/Ground/Tilemap/<batch>");
+            Equal(expectedGroundFinalDirectory, secondDelivery.OutputDirectory,
+                "第一行第二变体应复用 Final/Ground/Tilemap/<batch>");
+            Equal(expectedPropsFinalDirectory, thirdDelivery.OutputDirectory,
+                "第二行最终目录应落入 Final/Props/Tilemap/<batch>");
+            True(firstDelivery.TargetPaths[0].StartsWith(
+                     $"{expectedGroundFinalDirectory}/",
+                     StringComparison.Ordinal) &&
+                 thirdDelivery.TargetPaths[0].StartsWith(
+                     $"{expectedPropsFinalDirectory}/",
+                     StringComparison.Ordinal),
+                "最终 target 应直接位于 Final/[collection/]Tilemap/<batch> 内");
             True(firstDelivery.TargetPaths[0].Contains("_r01_v001.png", StringComparison.Ordinal),
                 "第一行第一变体目标命名");
             True(secondDelivery.TargetPaths[0].Contains("_r01_v002.png", StringComparison.Ordinal),
@@ -631,9 +777,24 @@ internal static class AssetGenerationBatchSmokeTests
                             manualRetryTasks[index].Constraints,
                             out var retryDelivery) &&
                          retryDelivery is not null &&
+                         string.Equals(
+                             retryDelivery.Workspace?.RootPath,
+                             ProjectAssetLayout.BuildAiRunRelativePath(
+                                 ProjectAssetLayout.TilemapCategory,
+                                 manualRetryEvent.BatchId),
+                             StringComparison.Ordinal) &&
+                         retryDelivery.OutputDirectory.StartsWith(
+                             $"{ProjectAssetLayout.FinalDirectoryName}/",
+                             StringComparison.Ordinal) &&
+                         retryDelivery.OutputDirectory.EndsWith(
+                             $"/{ProjectAssetLayout.TilemapCategory}/{manualRetryEvent.BatchId}",
+                             StringComparison.Ordinal) &&
                          retryDelivery.TargetPaths.All(path =>
-                             path.Contains($"/{manualRetryEvent.BatchId}/Final/", StringComparison.Ordinal) &&
-                             path.Contains("_manual_r", StringComparison.Ordinal)),
+                             path.StartsWith($"{retryDelivery.OutputDirectory}/", StringComparison.Ordinal) &&
+                             path.Contains("_manual_r", StringComparison.Ordinal) &&
+                             !path.Contains(
+                                 $"/{manualRetryEvent.BatchId}/Final/",
+                                 StringComparison.Ordinal)),
                         $"手动重试第 {index + 1} 项应分配新的人工接力交付路径");
                 }
 

@@ -9,7 +9,7 @@ public sealed class DesktopAssetGenerationOutputPicker : IAssetGenerationOutputP
     {
         var dialog = new OpenFolderDialog
         {
-            Title = "选择素材生成输出目录（必须位于当前 Assets 根目录内）",
+            Title = "选择最终产物分类目录（必须位于当前 Assets/Final 内）",
             InitialDirectory = Directory.Exists(initialPath) ? initialPath : string.Empty,
             Multiselect = false
         };

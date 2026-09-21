@@ -259,6 +259,12 @@ public sealed class JsonGenerationTaskStore : IGenerationTaskStore
                         $"任务 {parent.Id} 的自动重做已阻断，需要人工接管后才能创建后继任务。");
                 }
 
+                if (parent.DispatchIntent is { Requested: false } && !safeRequest.ManualOverride)
+                {
+                    throw new InvalidOperationException(
+                        $"任务 {parent.Id} 未启用自动调度，需要人工接管后才能创建后继任务。");
+                }
+
                 if ((parent.FailureRetryable != true ||
                      GenerationFailureClassifier.IsAgentInfrastructureFailureCode(parent.FailureCode)) &&
                     !safeRequest.ManualOverride)
@@ -394,6 +400,80 @@ public sealed class JsonGenerationTaskStore : IGenerationTaskStore
             }
 
             return (IReadOnlyList<GenerationTask>)blocked;
+        }, cancellationToken).ConfigureAwait(false);
+    }
+
+    public async Task<IReadOnlyList<GenerationTask>> SuspendAutomaticDispatchAsync(
+        IReadOnlyList<string> taskIds,
+        string reason,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(taskIds);
+        var normalizedTaskIds = taskIds
+            .Select(GenerationInputValidator.NormalizeTaskId)
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+        if (normalizedTaskIds.Length == 0)
+        {
+            throw new ArgumentException("至少需要一个需要暂停自动调度的任务。", nameof(taskIds));
+        }
+
+        ArgumentException.ThrowIfNullOrWhiteSpace(reason);
+        var normalizedReason = reason.Trim();
+        GenerationInputValidator.ValidateFailureMessage(normalizedReason);
+        if (normalizedReason.Length > 4_096)
+        {
+            throw new ArgumentOutOfRangeException(nameof(reason), "暂停自动调度原因不能超过 4096 个字符。");
+        }
+
+        return await WithExclusiveLockAsync(async token =>
+        {
+            // Suspending scheduling must not renew or expire any claim, including unselected tasks.
+            var document = await LoadDocumentAsync(token).ConfigureAwait(false);
+            var tasks = normalizedTaskIds.Select(taskId => RequireTask(document, taskId)).ToArray();
+            var now = GetUtcNow(tasks.Max(task => task.UpdatedAtUtc));
+            var suspended = new GenerationTask[tasks.Length];
+            var changed = false;
+            for (var index = 0; index < tasks.Length; index++)
+            {
+                var task = tasks[index];
+                var canBlockRetry = task.Status == GenerationTaskStatus.Failed &&
+                                    task.FailureRetryable == true &&
+                                    task.RetryLineage is { } lineage &&
+                                    lineage.AttemptNumber < lineage.MaxAttempts &&
+                                    task.SupersededByTaskId is null;
+                var blockedReason = canBlockRetry
+                    ? task.AutomaticRetryBlockedReason ?? normalizedReason
+                    : task.AutomaticRetryBlockedReason;
+                if (task.DispatchIntent is { Requested: false } &&
+                    string.Equals(task.AutomaticRetryBlockedReason, blockedReason, StringComparison.Ordinal))
+                {
+                    suspended[index] = GenerationJson.Clone(task);
+                    continue;
+                }
+
+                var updated = task with
+                {
+                    Revision = task.Revision + 1,
+                    // Claim expiry uses UpdatedAtUtc; a UI scheduling change is not a lease heartbeat.
+                    UpdatedAtUtc = task.Status == GenerationTaskStatus.Claimed ? task.UpdatedAtUtc : now,
+                    DispatchIntent = task.DispatchIntent is { } intent
+                        ? intent with { Requested = false }
+                        : new GenerationTaskDispatchIntent { Requested = false },
+                    AutomaticRetryBlockedReason = blockedReason
+                };
+                GenerationInputValidator.ValidatePersistedTask(updated);
+                ReplaceTask(document, updated);
+                suspended[index] = GenerationJson.Clone(updated);
+                changed = true;
+            }
+
+            if (changed)
+            {
+                await SaveDocumentAsync(document with { UpdatedAtUtc = now }, token).ConfigureAwait(false);
+            }
+
+            return (IReadOnlyList<GenerationTask>)suspended;
         }, cancellationToken).ConfigureAwait(false);
     }
 

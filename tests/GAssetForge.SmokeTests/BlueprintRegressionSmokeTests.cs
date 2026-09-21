@@ -339,6 +339,7 @@ internal static class BlueprintRegressionSmokeTests
         Directory.CreateDirectory(projectsRoot);
         var projectService = new ProjectWorkspaceService();
         var originalProject = projectService.Create(projectsRoot, "Original", "tilemap");
+        Directory.CreateDirectory(originalProject.Paths.LegacyGeneratedAssetDirectory);
         var paths = new WorkspacePaths(Path.Combine(root, "app-data"));
         var settings = new UserSettingsService(paths);
         settings.Save(new UserSettingsModel
@@ -357,6 +358,9 @@ internal static class BlueprintRegressionSmokeTests
 
         try
         {
+            True(PathEquals(originalProject.Paths.UserAssetDirectory, shell.ProjectBrowser.CurrentPath),
+                "旧设置即使指向仍存在的 Generated，也应回落到当前项目 User");
+
             using (File.Open(
                        originalProject.Paths.ManifestPath,
                        FileMode.Open,
@@ -443,7 +447,7 @@ internal static class BlueprintRegressionSmokeTests
             ActiveWorkflowKey = "tilemap",
             LastProjectPath = rejectedProject.Paths.RootDirectory,
             AssetRootPath = rejectedProject.Paths.AssetDirectory,
-            AssetCurrentPath = rejectedProject.Paths.GeneratedAssetDirectory
+            AssetCurrentPath = rejectedProject.Paths.UserAssetDirectory
         });
         var editor = new EditorWorkspaceViewModel(
             new JsonProjectRepository(paths),

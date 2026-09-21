@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows</TargetFramework>
+    <RootNamespace>GAssetForge.EngineeringLauncher</RootNamespace>
+    <AssemblyName>GAssetForge.EngineeringLauncher</AssemblyName>
+    <Title>GAssetForge 工程启动器</Title>
+    <Product>GAssetForge 工程启动器</Product>
+    <Description>从当前源码增量构建并启动 GAssetForge 开发工作区。</Description>
+    <ApplicationIcon>..\GAssetForge.App\Assets\Branding\GAssetForge.ico</ApplicationIcon>
+  </PropertyGroup>
+</Project>

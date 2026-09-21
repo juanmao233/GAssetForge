@@ -691,7 +691,7 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
                 _faultMessage = null;
                 AddLog(
                     DateTimeOffset.Now,
-                    $"Codex CLI 检测通过：{resolution.Launch!.CodexExecutablePath}",
+                    $"Codex CLI 检测通过：{resolution.Summary}",
                     false);
             }
             else
@@ -762,13 +762,10 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
         await _turnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var failureStage = "turn.prepare";
         try
         {
-            if (!IsConnected)
-            {
-                throw new InvalidOperationException(
-                    "Agent 会话尚未达到可执行状态。请先启动会话并完成认证与 MCP 工具初始化。");
-            }
+            await EnsureExecutionReadinessAsync("turn.prepare", cancellationToken).ConfigureAwait(false);
 
             Dispatch(() =>
             {
@@ -782,11 +779,7 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
                     _serverService,
                     cancellationToken)
                 .ConfigureAwait(false);
-            if (!IsConnected)
-            {
-                throw new InvalidOperationException(
-                    "Agent 执行环境刷新后尚未达到可执行状态。请检查 Codex 认证与 MCP 工具初始化状态。");
-            }
+            await EnsureExecutionReadinessAsync("turn.prepare", cancellationToken).ConfigureAwait(false);
 
             Dispatch(() =>
             {
@@ -795,12 +788,13 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
                 CaptureRuntimeSession();
                 RefreshState();
             });
+            failureStage = "turn.request";
             var result = await _runtimeService.RunTurnAsync(prompt, cancellationToken).ConfigureAwait(false);
             Dispatch(() =>
             {
                 _lastTurnStatus = result.IsSuccess
                     ? "最近 Turn 已完成"
-                    : $"最近 Turn：{result.Status} · {result.ErrorMessage ?? "未提供错误信息"}";
+                    : $"最近 Turn：{result.Status} · {Sanitize(result.ErrorMessage ?? "未提供错误信息")}";
                 CaptureRuntimeSession();
                 RefreshState();
             });
@@ -808,12 +802,7 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            Dispatch(() =>
-            {
-                _lastTurnStatus = $"Turn 失败：{Sanitize(exception.Message)}";
-                AddLog(DateTimeOffset.Now, _lastTurnStatus, true);
-                RefreshState();
-            });
+            LogExecutionFailure(exception, "Agent 请求失败", failureStage, "agent_turn_request_failed");
             throw;
         }
         finally
@@ -957,11 +946,7 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
         await _turnGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            if (!IsConnected)
-            {
-                throw new InvalidOperationException(
-                    "Agent 会话尚未达到可执行状态，无法为生成批次创建独立线程。");
-            }
+            await EnsureExecutionReadinessAsync("thread.prepare", cancellationToken).ConfigureAwait(false);
 
             await _runtimeService.EnsureSessionAsync(
                     WorkingDirectory,
@@ -969,11 +954,7 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
                     _serverService,
                     cancellationToken)
                 .ConfigureAwait(false);
-            if (!IsConnected)
-            {
-                throw new InvalidOperationException(
-                    "Agent 执行环境刷新后尚未达到 Ready 状态，无法轮换生成批次线程。");
-            }
+            await EnsureExecutionReadinessAsync("thread.prepare", cancellationToken).ConfigureAwait(false);
 
             Dispatch(() =>
             {
@@ -998,12 +979,7 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
-            Dispatch(() =>
-            {
-                _lastTurnStatus = $"批次线程轮换失败：{Sanitize(exception.Message)}";
-                AddLog(DateTimeOffset.Now, _lastTurnStatus, true);
-                RefreshState();
-            });
+            LogExecutionFailure(exception, "生成批次线程准备失败", "thread.prepare", "agent_thread_prepare_failed");
             throw;
         }
         finally
@@ -1602,14 +1578,18 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
             eventArgs.Level == AgentLogLevel.Error,
             "Agent Runtime"));
 
-    private void OnRuntimeNotificationReceived(object? sender, AgentNotificationEventArgs eventArgs) =>
+    private void OnRuntimeNotificationReceived(object? sender, AgentNotificationEventArgs eventArgs)
+    {
+        var occurredAt = DateTimeOffset.Now;
+        var threadId = _runtimeService.ThreadId;
+        var turnId = _runtimeService.ActiveTurnId;
         Dispatch(() =>
         {
             var activity = _activityParser.Parse(
                 eventArgs,
-                DateTimeOffset.Now,
-                _runtimeService.ThreadId,
-                _runtimeService.ActiveTurnId);
+                occurredAt,
+                threadId,
+                turnId);
             if (activity is not null)
             {
                 AgentActivityReceived?.Invoke(
@@ -1630,9 +1610,10 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
 
             if (eventArgs.Method.Contains("login", StringComparison.OrdinalIgnoreCase))
             {
-                AddLog(DateTimeOffset.Now, $"Codex 登录事件：{eventArgs.Method}", false, "Codex");
+                AddLog(occurredAt, $"Codex 登录事件：{eventArgs.Method}", false, "Codex");
             }
         });
+    }
 
     private void OnRuntimeTurnCompleted(object? sender, AgentTurnCompletedEventArgs eventArgs) =>
         Dispatch(() =>
@@ -1681,6 +1662,131 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
         _lastPublishedThreadId = threadId;
         _lastPublishedWorkingDirectory = workingDirectory;
         SessionChanged?.Invoke(this, new AgentSessionChangedEventArgs(threadId, workingDirectory));
+    }
+
+    internal string? ActiveThreadId => _runtimeService.ThreadId;
+
+    internal string? ActiveTurnId => _runtimeService.ActiveTurnId;
+
+    private async Task EnsureExecutionReadinessAsync(string stage, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        ValidateExecutionPrerequisites(stage);
+        if (_runtimeService.TransportMode == CodexAgentTransportMode.AppServer && !_runtimeService.McpReady)
+        {
+            var occurredAt = DateTimeOffset.Now;
+            Dispatch(() =>
+            {
+                _lastTurnStatus = "正在等待当前线程的 GAssetForge MCP 初始化；尚未提交 Turn";
+                AddLog(occurredAt, _lastTurnStatus, false);
+                RefreshState();
+            });
+        }
+
+        await _runtimeService.WaitForExecutionReadinessAsync(cancellationToken).ConfigureAwait(false);
+        // Waiting cannot authorize a stopped runtime, changed project, or expired authentication.
+        ValidateExecutionPrerequisites(stage);
+        if (_runtimeService.TransportMode == CodexAgentTransportMode.AppServer && !_runtimeService.McpReady)
+        {
+            throw CreateExecutionReadinessException("agent_mcp_not_ready", stage,
+                "当前线程的 MCP 尚未就绪，Turn 尚未提交。",
+                "请等待初始化完成；持续失败时重新连接 Agent，再继续原任务。");
+        }
+    }
+
+    private void ValidateExecutionPrerequisites(string stage)
+    {
+        if (!_runtimeService.IsConnected)
+        {
+            throw CreateExecutionReadinessException(
+                _runtimeService.State == AgentSessionTransportState.Faulted
+                    ? "agent_transport_faulted" : "agent_session_not_running", stage,
+                "Agent 会话未运行或连接已经停止，Turn 尚未提交。",
+                "请先启动或重新连接 Agent；原任务和产物不会被删除。");
+        }
+        if (!SelectedAgent.IsRuntimeAvailable)
+        {
+            throw CreateExecutionReadinessException("agent_runtime_unavailable", stage,
+                "当前选择的 Agent 不支持执行。", "请切换到可执行的 Agent Runtime。");
+        }
+        if (!IsActiveWorkingDirectoryCurrent())
+        {
+            throw CreateExecutionReadinessException("agent_project_mismatch", stage,
+                "Agent 的工作目录与当前项目不一致，已阻止跨项目提交。",
+                "请为当前项目重新连接 Agent。");
+        }
+        if (!_serverService.IsProcessRunning || !IsMcpHealthReady(_serverService.State))
+        {
+            throw CreateExecutionReadinessException("mcp_server_unavailable", stage,
+                "本地 GAssetForge MCP 服务未运行或健康检查未通过。",
+                "请检查 MCP 服务状态并重新连接 Agent。");
+        }
+        if (_serverService.Endpoint?.Port != Port)
+        {
+            throw CreateExecutionReadinessException("mcp_endpoint_mismatch", stage,
+                "MCP 服务端口与当前连接配置不一致。", "请按当前端口重新连接 Agent。");
+        }
+        if (_runtimeService.TransportMode == CodexAgentTransportMode.AppServer &&
+            _runtimeService.AuthenticationState is not CodexAgentAuthenticationState.Authenticated and
+                not CodexAgentAuthenticationState.NotRequired)
+        {
+            throw CreateExecutionReadinessException("agent_auth_required", stage,
+                "Agent 账号认证尚未确认，Turn 尚未提交。",
+                "请完成账号登录并刷新认证；无需修改绘图指令。");
+        }
+    }
+
+    private string CaptureExecutionState() =>
+        $"runtime={_runtimeService.State}; transport={_runtimeService.TransportMode}; " +
+        $"auth={_runtimeService.AuthenticationState}; mcpReady={_runtimeService.McpReady}; " +
+        $"server={_serverService.State}; serverRunning={_serverService.IsProcessRunning}; " +
+        $"portMatches={_serverService.Endpoint?.Port == Port}; " +
+        $"projectMatches={IsActiveWorkingDirectoryCurrent()}";
+
+    private AgentReadinessException CreateExecutionReadinessException(
+        string code, string stage, string message, string recoveryHint) =>
+        new(code, stage, message, _runtimeService.ThreadId, CaptureExecutionState(), recoveryHint);
+
+    private void LogExecutionFailure(Exception exception, string label, string stage, string fallbackCode)
+    {
+        var readiness = exception as AgentReadinessException;
+        var occurredAt = readiness?.OccurredAt ?? DateTimeOffset.Now;
+        var message = $"{label}：{Sanitize(exception.Message)}";
+        var context = new WorkbenchLogContext
+        {
+            AgentThreadId = readiness?.ThreadId ?? _runtimeService.ThreadId,
+            AgentTurnId = _runtimeService.ActiveTurnId,
+            Stage = readiness?.Stage ?? stage,
+            FailureStage = readiness?.Stage ?? stage,
+            Status = "failed",
+            ErrorCode = readiness?.Code ?? fallbackCode,
+            ReadinessState = readiness?.StateSummary ?? CaptureExecutionState(),
+            RecoveryHint = readiness?.RecoveryHint ?? "请保留此日志中的错误码与线程编号，检查详细错误后重试原任务。",
+            ExceptionType = exception.GetType().FullName
+        };
+        try
+        {
+            // Persist at the failure boundary. A delayed UI callback must not change
+            // the apparent ordering or lose evidence when the window is closing.
+            if (_workbenchLogSink is IWorkbenchStructuredLogSink structured)
+            {
+                structured.WriteStructured(WorkbenchLogLevel.Error, "Agent", message, context, occurredAt, exception);
+            }
+            else
+            {
+                _workbenchLogSink?.Write(WorkbenchLogLevel.Error, "Agent", message, occurredAt, exception);
+            }
+        }
+        catch
+        {
+            // Diagnostics must never replace the original execution failure.
+        }
+        Dispatch(() =>
+        {
+            _lastTurnStatus = message;
+            AddLog(occurredAt, message, true, publishToWorkbench: false);
+            RefreshState();
+        });
     }
 
     private bool IsSessionReady()
@@ -1828,7 +1934,8 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
         DateTimeOffset timestamp,
         string message,
         bool isError,
-        string source = "Agent")
+        string source = "Agent",
+        bool publishToWorkbench = true)
     {
         if (_disposed)
         {
@@ -1844,6 +1951,11 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
         }
 
         (ClearLogCommand as RelayCommand)?.RaiseCanExecuteChanged();
+
+        if (!publishToWorkbench)
+        {
+            return;
+        }
 
         try
         {
@@ -1868,9 +1980,10 @@ public sealed class AgentConnectionViewModel : ObservableObject, IDisposable, IA
     private string Sanitize(string message)
     {
         var token = _serverService.TokenEnvironmentVariableValue;
-        return string.IsNullOrEmpty(token)
+        var sanitized = string.IsNullOrEmpty(token)
             ? message
             : message.Replace(token, "[REDACTED]", StringComparison.Ordinal);
+        return WorkbenchConsoleService.RedactCommonCredentials(sanitized);
     }
 
     private static string FormatCodexRuntimeDiagnostics(CodexExecutableResolution resolution)

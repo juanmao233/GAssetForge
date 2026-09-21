@@ -183,6 +183,39 @@ public partial class ArtWorkspacePropertiesView : UserControl
         e.FormatToApply = DataFormats.UnicodeText;
     }
 
+    private async void ArtWorkspaceCopyConversationMessage_OnClick(object sender, RoutedEventArgs e)
+    {
+        if (sender is not FrameworkElement { Tag: string text } || string.IsNullOrEmpty(text))
+        {
+            return;
+        }
+
+        Exception? lastFailure = null;
+        for (var attempt = 0; attempt < 3; attempt++)
+        {
+            try
+            {
+                Clipboard.SetDataObject(text, copy: true);
+                return;
+            }
+            catch (Exception exception)
+            {
+                lastFailure = exception;
+                if (attempt < 2)
+                {
+                    await Task.Delay(40 * (attempt + 1));
+                }
+            }
+        }
+
+        MessageBox.Show(
+            Window.GetWindow(this),
+            $"复制对话内容失败：{lastFailure?.Message ?? "剪贴板暂不可用"}",
+            "美术工作区",
+            MessageBoxButton.OK,
+            MessageBoxImage.Warning);
+    }
+
     private void ArtWorkspaceInstructionRichTextBox_OnPreviewKeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key is Key.Back or Key.Delete &&

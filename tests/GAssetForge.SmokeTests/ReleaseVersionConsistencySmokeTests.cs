@@ -47,10 +47,14 @@ internal static class ReleaseVersionConsistencySmokeTests
             new McpSessionState(),
             expectedAgent: null,
             CancellationToken.None);
-        var initializeVersion = JsonSerializer.SerializeToElement(initializeResult, ProtocolJson.Options)
+        var initializePayload = JsonSerializer.SerializeToElement(initializeResult, ProtocolJson.Options);
+        var initializeVersion = initializePayload
             .GetProperty("serverInfo")
             .GetProperty("version")
             .GetString();
+        var initializeInstructions = initializePayload
+            .GetProperty("instructions")
+            .GetString() ?? string.Empty;
 
         var desktopExecutablePath = Path.Combine(AppContext.BaseDirectory, "GAssetForge.exe");
         if (!File.Exists(desktopExecutablePath))
@@ -73,6 +77,14 @@ internal static class ReleaseVersionConsistencySmokeTests
             "server_info.version 必须读取程序集 InformationalVersion");
         Equal(assemblyInformationalVersion, initializeVersion,
             "MCP initialize.serverInfo.version 必须读取程序集 InformationalVersion");
+        Contains(initializeInstructions, "submit_generation_output",
+            "MCP initialize.instructions 必须指向当前单图提交合同");
+        Contains(initializeInstructions, "run_image_delivery_fallback",
+            "MCP initialize.instructions 必须说明内置图片没有本地路径时的 Harness 交付路径");
+        NotContains(initializeInstructions, "必须把产物保存到返回的有效 Assets 根目录内",
+            "MCP initialize.instructions 不得继续要求 Agent 自行写入 Assets");
+        NotContains(initializeInstructions, "先调用 get_current_context",
+            "MCP initialize.instructions 不得强制调用可能被客户端工具白名单隐藏的上下文工具");
         Equal(assemblyInformationalVersion, desktopVersionInfo.ProductVersion,
             "GAssetForge.exe ProductVersion 必须与程序集 InformationalVersion 完全一致");
         Equal(assemblyInformationalVersion, mcpVersionInfo.ProductVersion,
@@ -89,6 +101,22 @@ internal static class ReleaseVersionConsistencySmokeTests
         {
             throw new InvalidOperationException(
                 $"{message}。期望：{expected}，实际：{actual ?? "<null>"}");
+        }
+    }
+
+    private static void Contains(string value, string expected, string message)
+    {
+        if (!value.Contains(expected, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"{message}。缺少：{expected}");
+        }
+    }
+
+    private static void NotContains(string value, string unexpected, string message)
+    {
+        if (value.Contains(unexpected, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"{message}。不应包含：{unexpected}");
         }
     }
 }

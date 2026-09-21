@@ -18,7 +18,7 @@ if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
 $distributionOutputPath = [System.IO.Path]::GetFullPath($OutputDirectory)
 New-Item -ItemType Directory -Path $distributionOutputPath -Force | Out-Null
 
-# This developer convenience publisher is not the Release Center. Never leave a formal
+# This local publisher must not leave a formal
 # release manifest from an older package beside newly overwritten binaries, because that
 # would falsely report the old version/source provenance for the current executable.
 $staleReleaseInfoPath = Join-Path $distributionOutputPath "release-info.json"
@@ -65,11 +65,18 @@ foreach ($requiredExecutable in @($desktopExecutable, $mcpExecutable)) {
 Copy-Item -LiteralPath (Join-Path $distributionRepositoryRoot "docs\MCP.md") `
     -Destination (Join-Path $distributionOutputPath "MCP-README.md") `
     -Force
+Copy-Item -LiteralPath (Join-Path $distributionRepositoryRoot "docs\GENERATION-DIAGNOSTICS.md") `
+    -Destination (Join-Path $distributionOutputPath "GENERATION-DIAGNOSTICS.md") `
+    -Force
 Copy-Item -LiteralPath (Join-Path $distributionRepositoryRoot "mcp-config.example.json") `
     -Destination (Join-Path $distributionOutputPath "mcp-config.example.json") `
     -Force
 Copy-Item -LiteralPath (Join-Path $distributionRepositoryRoot "THIRD-PARTY-NOTICES.md") `
     -Destination (Join-Path $distributionOutputPath "THIRD-PARTY-NOTICES.md") `
+    -Force
+
+Copy-Item -LiteralPath (Join-Path $distributionRepositoryRoot "LICENSE") `
+    -Destination (Join-Path $distributionOutputPath "LICENSE") `
     -Force
 
 $distributionLicenseDirectory = Join-Path $distributionOutputPath "licenses"

@@ -47,6 +47,7 @@ public sealed class UiLayerModel
     public UiStyleModel? Style { get; set; }
     public UiComponentModel? Component { get; set; }
     public UiTextModel? Text { get; set; }
+    public UiShapeModel? Shape { get; set; }
     public string? PrefabSourceId { get; set; }
 }
 
@@ -81,6 +82,30 @@ public sealed class UiTextModel
     public string Color { get; set; } = "#F3F5F7";
     public string Align { get; set; } = "left";
     public double LineHeight { get; set; } = 1.25;
+}
+
+public static class UiShapeTypes
+{
+    public const string Rectangle = "rectangle";
+    public const string Circle = "circle";
+    public const string Polygon = "polygon";
+
+    public static bool IsSupported(string? type) =>
+        string.Equals(type, Rectangle, StringComparison.Ordinal) ||
+        string.Equals(type, Circle, StringComparison.Ordinal) ||
+        string.Equals(type, Polygon, StringComparison.Ordinal);
+}
+
+public sealed class UiShapeModel
+{
+    public string Type { get; set; } = UiShapeTypes.Rectangle;
+    public List<UiShapePointModel>? Points { get; set; }
+}
+
+public sealed class UiShapePointModel
+{
+    public double X { get; set; }
+    public double Y { get; set; }
 }
 
 public sealed class UiAssetLibraryModel

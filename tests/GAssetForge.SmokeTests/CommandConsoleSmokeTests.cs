@@ -21,6 +21,10 @@ internal static class CommandConsoleSmokeTests
         BackgroundWritesReturnSafelyToTheUiDispatcher();
         QueuedBackgroundEntriesDoNotReappearAfterClear();
         RegisteredSensitiveValuesAreRedactedAtTheLogBoundary();
+        DiagnosticContextRetainsOccurrenceAndRecordingTimes();
+        CommonCredentialAssignmentsAreRedactedWithoutHidingNormalMessages();
+        FileWriteAndDisposeFailuresFallBackToVisibleMemoryLogs();
+        UnavailableLogDirectoryHasAnActionableWarning();
         AgentConnectionRegistersItsBearerTokenAtTheLogBoundary();
         WhitelistedCommandsReportResultsAndClearOnlyTheDisplay();
         PixelAlignmentCorrectionPreferencesPersistWithoutSourceGeometry();
@@ -182,6 +186,178 @@ internal static class CommandConsoleSmokeTests
         finally
         {
             DeleteTestRoot(root);
+        }
+    }
+
+    private static void DiagnosticContextRetainsOccurrenceAndRecordingTimes()
+    {
+        var root = CreateTestRoot("diagnostic-context");
+        try
+        {
+            const string secret = "diagnostic-context-secret";
+            using var service = new WorkbenchConsoleService(new WorkspacePaths(root));
+            using var viewModel = new CommandConsoleViewModel(service);
+            service.RegisterSensitiveValue(secret);
+            var occurrenceTime = DateTimeOffset.Now.AddMinutes(-2);
+            var beforeWrite = DateTimeOffset.Now;
+            var context = new WorkbenchLogContext
+            {
+                BatchId = "diagnostic-batch",
+                AgentThreadId = "diagnostic-thread",
+                AgentTurnId = "diagnostic-turn",
+                AgentItemId = "diagnostic-item",
+                ExpectedPath = $"diagnostic-path/{secret}/expected.png",
+                ErrorCode = "AGENT_MCP_NOT_READY"
+            };
+            // Reflection keeps the regression runnable against the pre-fix public contract.
+            foreach (var propertyName in new[] { "FailureStage", "RecoveryHint", "ReadinessState", "ExceptionType" })
+            {
+                var property = typeof(WorkbenchLogContext).GetProperty(propertyName);
+                True(property is not null, $"诊断上下文缺少结构化字段 {propertyName}");
+                property!.SetValue(context, $"{propertyName}={secret}");
+            }
+
+            service.WriteStructured(
+                WorkbenchLogLevel.Error, "Agent", "diagnostic-context-marker", context,
+                occurrenceTime, new InvalidOperationException($"nested={secret}"));
+            var entry = service.GetSnapshot().Last();
+            var persisted = FindJsonLine(service.SessionLogPath, entry.Message);
+            Equal(2, persisted.GetProperty("schemaVersion").GetInt32(), "日志格式版本应可识别");
+            Equal(occurrenceTime, persisted.GetProperty("timestamp").GetDateTimeOffset(), "不得改写源事件时间");
+            var recordedAt = persisted.GetProperty("recordedAt").GetDateTimeOffset();
+            True(recordedAt >= beforeWrite && recordedAt > occurrenceTime,
+                "写入时间应独立记录，不能伪装为较早的源事件时间");
+            foreach (var propertyName in new[] { "FailureStage", "RecoveryHint", "ReadinessState", "ExceptionType" })
+            {
+                AssertRedacted(persisted.GetProperty("context").GetProperty(propertyName).GetString()!, secret,
+                    $"新增诊断字段 {propertyName}");
+            }
+
+            AssertRedacted(entry.Details, secret, "诊断异常详情");
+            AssertRedacted(entry.ExportText, secret, "完整诊断导出");
+            True(entry.ExportText.Contains("diagnostic-item", StringComparison.Ordinal),
+                "完整导出必须包含摘要省略的 AgentItemId");
+            True(entry.ExportText.Contains("expected.png", StringComparison.Ordinal),
+                "完整导出必须包含摘要省略的目标路径");
+            viewModel.SelectedEntry = entry;
+            True(viewModel.SelectedEntryText.Contains("diagnostic-thread", StringComparison.Ordinal),
+                "复制详情应包含线程标识");
+            True(viewModel.SelectedEntryText.Contains("RecoveryHint=", StringComparison.Ordinal),
+                "复制详情应包含恢复建议");
+            True(viewModel.SelectedEntryText.Contains(occurrenceTime.ToString("O"), StringComparison.Ordinal),
+                "复制详情应包含完整的源事件时间");
+            True(viewModel.SelectedEntryText.Contains(recordedAt.ToString("O"), StringComparison.Ordinal),
+                "复制详情应包含完整的写入时间");
+        }
+        finally
+        {
+            DeleteTestRoot(root);
+        }
+    }
+
+    private static void CommonCredentialAssignmentsAreRedactedWithoutHidingNormalMessages()
+    {
+        var root = CreateTestRoot("credential-redaction");
+        try
+        {
+            using var service = new WorkbenchConsoleService(new WorkspacePaths(root));
+            const string bearerSecret = "unregistered-bearer-secret";
+            const string apiSecret = "unregistered-api-secret";
+            const string accessSecret = "unregistered-access-secret";
+            service.WriteError("Agent", "credential-marker",
+                new InvalidOperationException(
+                    $"Authorization: Bearer {bearerSecret}\n\"api_key\": \"{apiSecret}\"\n" +
+                    $"https://example.invalid/callback?access_token={accessSecret}&state=normal-state"));
+            var entry = service.GetSnapshot().Last();
+            foreach (var secret in new[] { bearerSecret, apiSecret, accessSecret })
+            {
+                AssertRedacted(entry.Details, secret, "未预注册的常见凭据");
+            }
+
+            True(entry.Details.Contains("state=normal-state", StringComparison.Ordinal),
+                "凭据脱敏不能吞掉后续的普通查询参数");
+            const string normal = "API key unavailable; Bearer Token authentication is configured; model=gpt-image";
+            service.WriteWarning("Agent", normal);
+            Equal(normal, service.GetSnapshot().Last().Message, "普通认证说明不能误判为凭据值");
+        }
+        finally
+        {
+            DeleteTestRoot(root);
+        }
+    }
+
+    private static void FileWriteAndDisposeFailuresFallBackToVisibleMemoryLogs()
+    {
+        var root = CreateTestRoot("sink-failure");
+        try
+        {
+            using var service = new WorkbenchConsoleService(new WorkspacePaths(root));
+            using var viewModel = new CommandConsoleViewModel(service);
+            const string secret = "log-sink-secret";
+            var persistenceStatusChanged = false;
+            viewModel.PropertyChanged += (_, eventArgs) =>
+            {
+                if (eventArgs.PropertyName == nameof(CommandConsoleViewModel.PersistenceStatusText))
+                {
+                    persistenceStatusChanged = true;
+                }
+            };
+            service.RegisterSensitiveValue(secret);
+            var writerField = typeof(WorkbenchConsoleService).GetField("_sessionWriter",
+                System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+            ((StreamWriter)writerField.GetValue(service)!).Dispose();
+            writerField.SetValue(service, new FailingLogWriter(secret));
+            service.WriteError("Agent", "original-generation-error");
+            False(service.IsFileLoggingAvailable, "写失败后应关闭不可用的文件日志通道");
+            True(persistenceStatusChanged, "运行中日志降级必须刷新已打开控制台的持久化状态");
+            AssertRedacted(service.FileLoggingError, secret, "文件日志错误状态");
+            var snapshot = service.GetSnapshot();
+            True(snapshot.Any(entry => entry.Message == "original-generation-error"),
+                "磁盘写失败不得丢弃原始内存错误");
+            var warning = snapshot.SingleOrDefault(entry => entry.Context?.ErrorCode == "LOG_FILE_UNAVAILABLE");
+            True(warning is { Level: WorkbenchLogLevel.Warning }, "日志持久化失败必须可见且有稳定错误码");
+            AssertRedacted(warning!.Details, secret, "文件日志降级详情");
+            True(viewModel.Entries.Any(entry => entry.Sequence == warning.Sequence),
+                "日志降级警告应发布到控制台");
+            service.WriteInfo("Agent", "memory-logging-continues");
+            True(service.GetSnapshot().Any(entry => entry.Message == "memory-logging-continues"),
+                "日志降级不能打断后续任务或内存记录");
+            Equal(1, service.GetSnapshot().Count(entry => entry.Context?.ErrorCode == "LOG_FILE_UNAVAILABLE"),
+                "不可用的文件日志通道不能反复刷屏");
+        }
+        finally
+        {
+            DeleteTestRoot(root);
+        }
+    }
+
+    private static void UnavailableLogDirectoryHasAnActionableWarning()
+    {
+        var root = CreateTestRoot("log-directory-unavailable");
+        try
+        {
+            File.WriteAllText(Path.Combine(root, "Logs"), "blocking-file");
+            using var service = new WorkbenchConsoleService(new WorkspacePaths(root));
+            False(service.IsFileLoggingAvailable, "日志目录不可写时应启动内存日志");
+            True(service.GetSnapshot().Any(entry =>
+                    entry.Level == WorkbenchLogLevel.Warning &&
+                    entry.Context?.ErrorCode == "LOG_FILE_UNAVAILABLE"),
+                "启动时无法创建日志目录也必须产生明确的降级警告");
+        }
+        finally
+        {
+            DeleteTestRoot(root);
+        }
+    }
+
+    private sealed class FailingLogWriter(string secret) : StreamWriter(new MemoryStream())
+    {
+        public override void WriteLine(string? value) => throw new IOException($"sink-write-failed {secret}");
+
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            throw new IOException($"sink-dispose-failed {secret}");
         }
     }
 
@@ -472,6 +648,25 @@ internal static class CommandConsoleSmokeTests
             True(ReferenceEquals(viewModel.FilteredEntries, logGrid.ItemsSource),
                 "日志表格应绑定 FilteredEntries");
             Equal(5, logGrid.Columns.Count, "日志表格正式列数");
+            var detailsColumn = logGrid.Columns.Single(column => Equals(column.Header, "详细信息"));
+            Equal("ExportText", (detailsColumn.ClipboardContentBinding as Binding)?.Path?.Path,
+                "实际表格复制出口必须使用完整诊断导出，而非截断的显示摘要");
+            var levelColumn = logGrid.Columns.Single(column => Equals(column.Header, "类型"));
+            Equal("LevelText", (levelColumn.ClipboardContentBinding as Binding)?.Path?.Path,
+                "模板类型列复制应包含可读级别");
+            const string clipboardSecret = "clipboard-context-secret";
+            service.RegisterSensitiveValue(clipboardSecret);
+            service.WriteStructured(WorkbenchLogLevel.Error, "Clipboard", "clipboard-diagnostic-marker",
+                new WorkbenchLogContext
+                {
+                    AgentThreadId = "clipboard-thread",
+                    RecoveryHint = $"retry after initialization; api_key={clipboardSecret}",
+                    ExpectedPath = $"target/{clipboardSecret}/asset.png"
+                }, DateTimeOffset.Now.AddMinutes(-1), new InvalidOperationException(clipboardSecret));
+            var clipboardEntry = service.GetSnapshot().Last();
+            var clipboardText = detailsColumn.OnCopyingCellClipboardContent(clipboardEntry)?.ToString() ?? string.Empty;
+            Equal(clipboardEntry.ExportText, clipboardText, "DataGrid 实际复制事件应解析完整 ExportText 绑定");
+            AssertRedacted(clipboardText, clipboardSecret, "实际 DataGrid 剪贴板诊断内容");
             SequenceEqual(
                 new[] { "时间", "类型", "来源", "消息", "详细信息" },
                 logGrid.Columns.Select(column => column.Header?.ToString() ?? string.Empty),

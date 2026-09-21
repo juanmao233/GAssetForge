@@ -8,6 +8,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GAssetForge.App", "src\GAss
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GAssetForge.McpServer", "src\GAssetForge.McpServer\GAssetForge.McpServer.csproj", "{B9FBE423-0A9E-4D90-A7EC-D4D1CB510190}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GAssetForge.EngineeringLauncher", "src\GAssetForge.EngineeringLauncher\GAssetForge.EngineeringLauncher.csproj", "{0CF64E53-0E8D-4EAF-9DC4-3D1BE562C188}"
+EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "GAssetForge.SmokeTests", "tests\GAssetForge.SmokeTests\GAssetForge.SmokeTests.csproj", "{A2F47BB5-51B4-4D98-96AD-761E8FB79A50}"
 EndProject
 Global
@@ -28,6 +30,10 @@ Global
 		{B9FBE423-0A9E-4D90-A7EC-D4D1CB510190}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{B9FBE423-0A9E-4D90-A7EC-D4D1CB510190}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{B9FBE423-0A9E-4D90-A7EC-D4D1CB510190}.Release|Any CPU.Build.0 = Release|Any CPU
+		{0CF64E53-0E8D-4EAF-9DC4-3D1BE562C188}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{0CF64E53-0E8D-4EAF-9DC4-3D1BE562C188}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{0CF64E53-0E8D-4EAF-9DC4-3D1BE562C188}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{0CF64E53-0E8D-4EAF-9DC4-3D1BE562C188}.Release|Any CPU.Build.0 = Release|Any CPU
 		{A2F47BB5-51B4-4D98-96AD-761E8FB79A50}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{A2F47BB5-51B4-4D98-96AD-761E8FB79A50}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{A2F47BB5-51B4-4D98-96AD-761E8FB79A50}.Release|Any CPU.ActiveCfg = Release|Any CPU

@@ -19,5 +19,5 @@ Verbatim license texts from the installed NuGet packages are stored in:
 ImageSharp's license contains different terms depending on the use and license of the consuming
 project. Review it before commercial distribution or changing the GAssetForge project license.
 
-The GAssetForge project license has not yet been selected. Add a root `LICENSE` before describing the
-repository as open source or accepting external contributions.
+GAssetForge's original source code is licensed under [MIT](LICENSE). This does not replace the
+licenses of the third-party components listed above.

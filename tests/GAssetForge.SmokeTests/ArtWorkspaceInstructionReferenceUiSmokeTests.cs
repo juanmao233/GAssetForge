@@ -7,6 +7,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Data;
+using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
@@ -218,6 +219,26 @@ internal static class ArtWorkspaceInstructionReferenceUiSmokeTests
                 "用户可编辑指令正文必须与结构化引用摘要分离");
             False(conversationMessage.Text.Contains(image.AbsolutePath, StringComparison.OrdinalIgnoreCase),
                 "用户可见指令正文不得混入本地路径");
+            True(conversationMessage.ClipboardText.Contains(conversationMessage.Text, StringComparison.Ordinal) &&
+                 conversationMessage.ClipboardText.Contains(safeSummary, StringComparison.Ordinal),
+                "复制整条消息应同时保留正文和用户可见引用摘要");
+            False(conversationMessage.ClipboardText.Contains(image.AbsolutePath, StringComparison.OrdinalIgnoreCase) ||
+                  conversationMessage.ClipboardText.Contains("0.25", StringComparison.Ordinal) ||
+                  conversationMessage.ClipboardText.Contains("120", StringComparison.Ordinal) ||
+                  conversationMessage.ClipboardText.Contains("180", StringComparison.Ordinal),
+                "复制整条消息不得泄露路径或几何数据");
+
+            var selectableMessageText = FindVisualDescendants<TextBox>(propertiesView)
+                .FirstOrDefault(candidate =>
+                    ReferenceEquals(candidate.DataContext, conversationMessage) &&
+                    string.Equals(candidate.Text, conversationMessage.Text, StringComparison.Ordinal));
+            True(selectableMessageText is { IsReadOnly: true },
+                "对话历史正文必须使用可选择的只读文本控件，而不是不可复制的 TextBlock");
+            selectableMessageText!.SelectAll();
+            Equal(conversationMessage.Text, selectableMessageText.SelectedText,
+                "对话历史正文应允许选择全部文本供复制粘贴");
+            True(ApplicationCommands.Copy.CanExecute(null, selectableMessageText),
+                "选中对话历史正文后必须启用标准复制命令");
 
             var selectTool = toolPalette.FindName("ArtWorkspaceToolSelectButton") as ToggleButton
                 ?? throw new InvalidOperationException("美术工作区工具栏缺少选择移动 ToggleButton。");

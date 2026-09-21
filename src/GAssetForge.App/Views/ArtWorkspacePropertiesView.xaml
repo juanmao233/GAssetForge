@@ -73,6 +73,14 @@
                                    Text="说明希望创建的对象、画面关系、风格、修改范围或输出要求。"
                                    TextWrapping="Wrap" />
 
+                        <Button x:Name="ArtWorkspaceClearConversationButton"
+                                Margin="0,0,0,8"
+                                Padding="8,4"
+                                HorizontalAlignment="Right"
+                                Content="清除对话并停止任务"
+                                Command="{Binding ClearConversationCommand}"
+                                ToolTip="清除当前项目美术对话并暂停旧美术任务的自动调度；保留当前草稿、画布图片与已落盘产物。" />
+
                         <Border MaxHeight="250"
                                 Margin="0,0,0,8"
                                 Padding="7"
@@ -94,6 +102,14 @@
                                                     CornerRadius="5">
                                                 <StackPanel>
                                                     <DockPanel LastChildFill="True">
+                                                        <Button DockPanel.Dock="Right"
+                                                                Margin="6,0,0,0"
+                                                                Padding="5,1"
+                                                                FontSize="8"
+                                                                Tag="{Binding ClipboardText}"
+                                                                ToolTip="复制整条消息"
+                                                                Click="ArtWorkspaceCopyConversationMessage_OnClick"
+                                                                Content="复制" />
                                                         <TextBlock DockPanel.Dock="Right"
                                                                    Margin="8,0,0,0"
                                                                    Foreground="{DynamicResource App.TextMutedBrush}"
@@ -124,12 +140,25 @@
                                                          <ItemsControl.ItemTemplate>
                                                              <DataTemplate>
                                                                  <Grid>
-                                                                     <TextBlock Foreground="{DynamicResource App.TextPrimaryBrush}"
-                                                                                FontSize="10"
-                                                                                MaxWidth="240"
-                                                                                Text="{Binding Text}"
-                                                                                TextWrapping="Wrap"
-                                                                                Visibility="{Binding IsText, Converter={StaticResource BooleanToVisibilityConverter}}" />
+                                                                     <TextBox Foreground="{DynamicResource App.TextPrimaryBrush}"
+                                                                              Background="Transparent"
+                                                                              BorderThickness="0"
+                                                                              Cursor="IBeam"
+                                                                              FontSize="10"
+                                                                              IsReadOnly="True"
+                                                                              IsReadOnlyCaretVisible="True"
+                                                                              MaxWidth="240"
+                                                                              Padding="0"
+                                                                              Text="{Binding Text, Mode=OneWay}"
+                                                                              TextWrapping="Wrap"
+                                                                              Visibility="{Binding IsText, Converter={StaticResource BooleanToVisibilityConverter}}">
+                                                                         <TextBox.ContextMenu>
+                                                                             <ContextMenu>
+                                                                                 <MenuItem Header="复制所选文本" Command="Copy" />
+                                                                                 <MenuItem Header="全选" Command="SelectAll" />
+                                                                             </ContextMenu>
+                                                                         </TextBox.ContextMenu>
+                                                                     </TextBox>
                                                                      <Border Margin="2,1"
                                                                              Padding="6,2"
                                                                              Background="{DynamicResource App.InputBackgroundBrush}"
@@ -146,13 +175,25 @@
                                                              </DataTemplate>
                                                          </ItemsControl.ItemTemplate>
                                                      </ItemsControl>
-                                                     <TextBlock Margin="0,4,0,0"
-                                                                Foreground="{DynamicResource App.TextPrimaryBrush}"
-                                                                FontSize="10"
-                                                                Text="{Binding Text}"
-                                                                TextWrapping="Wrap">
-                                                         <TextBlock.Style>
-                                                             <Style TargetType="{x:Type TextBlock}">
+                                                     <TextBox Margin="0,4,0,0"
+                                                              Padding="0"
+                                                              Foreground="{DynamicResource App.TextPrimaryBrush}"
+                                                              Background="Transparent"
+                                                              BorderThickness="0"
+                                                              Cursor="IBeam"
+                                                              FontSize="10"
+                                                              IsReadOnly="True"
+                                                              IsReadOnlyCaretVisible="True"
+                                                              Text="{Binding Text, Mode=OneWay}"
+                                                              TextWrapping="Wrap">
+                                                         <TextBox.ContextMenu>
+                                                             <ContextMenu>
+                                                                 <MenuItem Header="复制所选文本" Command="Copy" />
+                                                                 <MenuItem Header="全选" Command="SelectAll" />
+                                                             </ContextMenu>
+                                                         </TextBox.ContextMenu>
+                                                         <TextBox.Style>
+                                                             <Style TargetType="{x:Type TextBox}">
                                                                  <Setter Property="Visibility" Value="Visible" />
                                                                  <Style.Triggers>
                                                                      <DataTrigger Binding="{Binding HasStructuredSegments}" Value="True">
@@ -160,8 +201,8 @@
                                                                      </DataTrigger>
                                                                  </Style.Triggers>
                                                              </Style>
-                                                         </TextBlock.Style>
-                                                     </TextBlock>
+                                                         </TextBox.Style>
+                                                     </TextBox>
                                                      <Border Margin="0,5,0,0"
                                                              Padding="6,3"
                                                              Background="{DynamicResource App.InputBackgroundBrush}"
@@ -248,6 +289,15 @@
                                       DataObject.Pasting="ArtWorkspaceInstructionRichTextBox_OnPasting"
                                       TextChanged="ArtWorkspaceInstructionRichTextBox_OnTextChanged"
                                       PreviewKeyDown="ArtWorkspaceInstructionRichTextBox_OnPreviewKeyDown">
+                             <RichTextBox.ContextMenu>
+                                 <ContextMenu>
+                                     <MenuItem Header="剪切" Command="Cut" />
+                                     <MenuItem Header="复制" Command="Copy" />
+                                     <MenuItem Header="粘贴" Command="Paste" />
+                                     <Separator />
+                                     <MenuItem Header="全选" Command="SelectAll" />
+                                 </ContextMenu>
+                             </RichTextBox.ContextMenu>
                              <FlowDocument PagePadding="0">
                                  <Paragraph Margin="0" />
                              </FlowDocument>

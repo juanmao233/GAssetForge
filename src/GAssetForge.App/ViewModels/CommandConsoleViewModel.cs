@@ -231,16 +231,7 @@ public sealed class CommandConsoleViewModel : ObservableObject, IDisposable
         }
     }
 
-    public string SelectedEntryText => SelectedEntry is null
-        ? "选择一条日志可查看完整信息"
-        : string.Join(
-            Environment.NewLine,
-            new[]
-            {
-                SelectedEntry.Message,
-                SelectedEntry.Context?.Summary,
-                string.IsNullOrWhiteSpace(SelectedEntry.Details) ? null : SelectedEntry.Details
-            }.Where(value => !string.IsNullOrWhiteSpace(value)));
+    public string SelectedEntryText => SelectedEntry?.ExportText ?? "选择一条日志可查看完整信息";
 
     public int InformationCount => _informationCount;
 
@@ -609,6 +600,7 @@ public sealed class CommandConsoleViewModel : ObservableObject, IDisposable
         }
 
         RecalculateStatistics();
+        OnPropertyChanged(nameof(PersistenceStatusText));
         RefreshFilter();
         if (AutoScroll && MatchesFilter(entry))
         {

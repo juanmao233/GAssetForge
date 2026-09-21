@@ -10,6 +10,9 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
 {
     public static async Task RunAllAsync()
     {
+        await FaultedSubmissionNeverReportsAcceptedTurnAsync();
+        await ReadinessFailuresKeepStructuredCauseAcrossPreparationAndSubmissionAsync();
+        await TurnAcknowledgementRejectsStaleEventsAndDistinguishesExecutionFailureAsync();
         AgentPromptDelegatesOnlyImageGenerationAndSingleOutputSubmission();
         RecommendedSourcePathCannotEscapeFrozenAssetRoot();
         RecommendedSourcePathRejectsReparsePointAncestors();
@@ -17,6 +20,8 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
         await EnqueueResultsDistinguishNewDuplicateAndStoppedCoordinatorAsync();
         await BatchReleaseWaitersTrackEachSchedulingLifecycleAsync();
         await DisposeCompletesBatchReleaseWaitersAsync();
+        await TargetedCancellationStopsOnlyCapturedLifecyclesAsync();
+        await TargetedCancellationReachesBatchPreparationAsync();
         await ManagedCodexClaimResumesIdempotentlyAndForeignClaimIsNotStolenAsync();
         await DispatchProgressIsMonotonicAndSerializedAsync();
         await LegacyTaskSkipsNewImageDeliveryPreflightAsync();
@@ -25,6 +30,104 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
         await FailedChunkStopsLaterTurnsAsync();
         await DispatchFailuresAreReportedWithoutRetryLoopsAsync();
         await ActiveDispatchReportsCanceledWhenCoordinatorStopsAsync();
+    }
+
+    private static async Task FaultedSubmissionNeverReportsAcceptedTurnAsync()
+    {
+        var progress = new List<GenerationBatchDispatchProgressSnapshot>();
+        var completion = new TaskCompletionSource<GenerationBatchDispatchCompletedEventArgs>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var original = new InvalidOperationException(
+            "Agent 会话尚未达到可执行状态。请先启动会话并完成认证与 MCP 工具初始化。");
+        await using var coordinator = new GenerationBatchDispatchCoordinator((_, _) =>
+            Task.FromException<AgentTurnResult>(original));
+        coordinator.DispatchProgressChanged += (_, e) => progress.Add(e.Snapshot);
+        coordinator.DispatchCompleted += (_, e) => completion.TrySetResult(e);
+        coordinator.TryEnqueue("batch-unready-replay", ["task-original-pending"], isRetry: false);
+        var result = await completion.Task.WaitAsync(TimeSpan.FromSeconds(3));
+
+        False(progress.Any(snapshot => snapshot.Stage == GenerationBatchDispatchStage.WaitingForTaskClaim),
+            "启动入口返回 faulted Task 时不得出现已提交/等待领取的假阶段");
+        Equal(GenerationBatchDispatchStage.StartingAgentTurn, progress.Last().FailureStage,
+            "未成功启动的 Turn 必须停留在提交阶段，不得把等待领取当作失败点");
+        True(result.FailureMessage?.Contains(original.Message, StringComparison.Ordinal) == true,
+            "调度拒绝必须保留原始原因");
+        True(result.Result is null, "提交失败不能伪造 Agent Turn 结果");
+        True(ReferenceEquals(original, result.Diagnostic?.Exception),
+            "未知启动错误必须保留原始 Exception 实例供结构化日志记录");
+        Equal("agent_turn_submission_failed", result.Diagnostic?.Code,
+            "未知提交错误必须有稳定错误码，不能把界面进度阶段当成错误码");
+        Equal(result.Diagnostic?.Code, progress.Last().FailureCode,
+            "进度和完成事件必须共享同一稳定错误码");
+    }
+
+    private static async Task ReadinessFailuresKeepStructuredCauseAcrossPreparationAndSubmissionAsync()
+    {
+        foreach (var duringPreparation in new[] { true, false })
+        {
+            var progress = new List<GenerationBatchDispatchProgressSnapshot>();
+            var completion = new TaskCompletionSource<GenerationBatchDispatchCompletedEventArgs>(
+                TaskCreationOptions.RunContinuationsAsynchronously);
+            var original = new AgentReadinessException(
+                "agent_mcp_initialization_timeout", "mcp_readiness", "fixture 初始化超时",
+                "thread-new", "epoch=2; gasset_forge=starting", "等待工具初始化完成后重试原任务。");
+            var runCount = 0;
+            await using var coordinator = new GenerationBatchDispatchCoordinator((_, _) =>
+            {
+                Interlocked.Increment(ref runCount);
+                return Task.FromException<AgentTurnResult>(original);
+            }, prepareBatch: duringPreparation ? (_, _) => Task.FromException(original) : null);
+            coordinator.DispatchProgressChanged += (_, e) => progress.Add(e.Snapshot);
+            coordinator.DispatchCompleted += (_, e) => completion.TrySetResult(e);
+            coordinator.TryEnqueue("batch-readiness-replay", ["task-original-pending"], isRetry: false);
+            var result = await completion.Task.WaitAsync(TimeSpan.FromSeconds(3));
+            var diagnostic = result.Diagnostic;
+            True(diagnostic is not null, "就绪失败必须携带结构化诊断");
+            Equal(original.Code, diagnostic!.Code, "typed 错误码不得退化为进度枚举");
+            Equal(original.Stage, diagnostic.Stage, "typed 失败阶段必须完整保留");
+            Equal(original.ThreadId, diagnostic.ThreadId, "必须保留实际失败线程关联信息");
+            Equal(original.StateSummary, diagnostic.ReadinessState, "必须保留初始化状态快照");
+            Equal(original.OccurredAt, diagnostic.OccurredAt, "记录原始发生时间而非 UI 消息处理时间");
+            Equal(original.OccurredAt, progress.Last().OccurredAt, "最终进度和诊断使用同一发生时间");
+            True(ReferenceEquals(original, diagnostic.Exception), "原始异常对象不能在协调器被丢弃");
+            False(diagnostic.TurnStarted, "就绪拒绝不得伪报 Turn 已开始");
+            False(progress.Any(snapshot => snapshot.Stage == GenerationBatchDispatchStage.WaitingForTaskClaim),
+                "准备或提交时被拒绝均不得制造等待认领阶段");
+            Equal(duringPreparation ? 0 : 1, runCount, "准备失败不得调用 RunTurn 或自动重试");
+        }
+    }
+
+    private static async Task TurnAcknowledgementRejectsStaleEventsAndDistinguishesExecutionFailureAsync()
+    {
+        var progress = new List<GenerationBatchDispatchProgressSnapshot>();
+        var completion = new TaskCompletionSource<GenerationBatchDispatchCompletedEventArgs>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        var original = new IOException("fixture response pipe broke after accepted Turn");
+        GenerationBatchDispatchCoordinator? coordinator = null;
+        await using var ownedCoordinator = coordinator = new GenerationBatchDispatchCoordinator(async (_, _) =>
+        {
+            False(coordinator!.NotifyTurnStarted("thread-old", "turn-old"),
+                "旧线程的迟到 TurnStarted 不得推进当前任务");
+            True(coordinator.NotifyTurnStarted("thread-current", "turn-current"),
+                "只有当前线程真实的启动通知可推进等待领取阶段");
+            False(coordinator.NotifyTurnStarted("thread-current", "turn-current"),
+                "重复的启动通知只能处理一次");
+            await Task.Yield();
+            throw original;
+        }, currentThreadIdProvider: () => "thread-current");
+        coordinator.DispatchProgressChanged += (_, e) => progress.Add(e.Snapshot);
+        coordinator.DispatchCompleted += (_, e) => completion.TrySetResult(e);
+        coordinator.TryEnqueue("batch-accepted", ["task-original"], isRetry: false);
+        var result = await completion.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        Equal(1, progress.Count(snapshot => snapshot.Stage == GenerationBatchDispatchStage.WaitingForTaskClaim),
+            "仅真实且匹配的启动确认生成一次等待认领进度");
+        Equal("agent_turn_execution_failed", result.Diagnostic?.Code,
+            "已收到启动确认后的异常应分类为执行错误，不是提交错误");
+        Equal("turn-current", result.Diagnostic?.TurnId, "执行失败必须保留实际 Turn ID");
+        True(result.Diagnostic?.TurnStarted == true, "实际启动事实必须传递到收束层");
+        True(ReferenceEquals(original, result.Diagnostic?.Exception), "执行异常需保留堆栈源实例");
+        False(coordinator.NotifyTurnStarted("thread-current", "turn-current"),
+            "已结束生命周期不得再被迟到通知推进");
     }
 
     private static void PendingRecoveryOnlyRunsOnConnectedRisingEdge()
@@ -184,6 +287,155 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
         {
             await coordinator.DisposeAsync();
         }
+    }
+
+    private static async Task TargetedCancellationStopsOnlyCapturedLifecyclesAsync()
+    {
+        var activeStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var activeCanceled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowActiveExit = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var remainingCompleted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var completed = new List<string>();
+        var invoked = new List<string>();
+        await using var coordinator = new GenerationBatchDispatchCoordinator(async (prompt, token) =>
+        {
+            var taskId = ReadPromptTaskIds(prompt).Single();
+            lock (invoked)
+            {
+                invoked.Add(taskId);
+            }
+
+            if (taskId == "target-active-old")
+            {
+                activeStarted.TrySetResult();
+                try
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                }
+                catch (OperationCanceledException) when (token.IsCancellationRequested)
+                {
+                    activeCanceled.TrySetResult();
+                    await allowActiveExit.Task;
+                    throw;
+                }
+            }
+
+            token.ThrowIfCancellationRequested();
+            return new AgentTurnResult("targeted-thread", taskId, "completed", null);
+        });
+        coordinator.DispatchCompleted += (_, e) =>
+        {
+            lock (completed)
+            {
+                completed.Add(e.Request.TaskIds.Single());
+                if (completed.Count == 3)
+                {
+                    remainingCompleted.TrySetResult();
+                }
+            }
+        };
+
+        coordinator.TryEnqueue("target-active", ["target-active-old"], isRetry: false);
+        await activeStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        var oldActiveRelease = coordinator.WaitForBatchReleasedAsync("target-active");
+        coordinator.TryEnqueue("target-queued", ["target-queued-old"], isRetry: false);
+        var oldQueuedRelease = coordinator.WaitForBatchReleasedAsync("target-queued");
+        coordinator.TryEnqueue("target-unrelated", ["target-unrelated-task"], isRetry: false);
+
+        // A queued cancellation must not wait for an unrelated active Agent turn to finish.
+        await coordinator.CancelBatchesAsync(["target-queued"]).WaitAsync(TimeSpan.FromSeconds(3));
+        True(oldQueuedRelease.IsCompletedSuccessfully,
+            "定向取消排队批次必须释放该生命周期的等待信号");
+        False(activeCanceled.Task.IsCompleted,
+            "取消排队批次不得中断其它活动 Turn");
+        Equal(GenerationBatchDispatchEnqueueResult.Enqueued,
+            coordinator.TryEnqueue("target-queued", ["target-queued-new"], isRetry: true),
+            "排队批次取消后，同一 batchId 应可重新入队");
+
+        var cancelActive = coordinator.CancelBatchesAsync(["target-active", "missing-batch"]);
+        await activeCanceled.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        False(cancelActive.IsCompleted,
+            "停止活动批次必须等待 runtime 真正退出，不能在仅收到 token 时提前完成");
+        True(oldActiveRelease.IsCompletedSuccessfully,
+            "停止活动批次必须释放旧调度生命周期信号");
+        coordinator.ReleaseBatch("target-active");
+        Equal(GenerationBatchDispatchEnqueueResult.Enqueued,
+            coordinator.TryEnqueue("target-active", ["target-active-new"], isRetry: true),
+            "取消期间释放再重入同 id 必须获得独立的新生命周期");
+        var newActiveRelease = coordinator.WaitForBatchReleasedAsync("target-active");
+
+        allowActiveExit.TrySetResult();
+        await cancelActive.WaitAsync(TimeSpan.FromSeconds(3));
+        await remainingCompleted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        False(newActiveRelease.IsCompleted,
+            "旧 Turn 退出不得释放同 id 新生命周期的信号");
+        Equal(GenerationBatchDispatchEnqueueResult.AlreadyScheduled,
+            coordinator.TryEnqueue("target-active", ["duplicate-new"], isRetry: false),
+            "旧 Turn 的清理不得移除同 id 新生命周期的幂等门禁");
+        lock (completed)
+        {
+            Equal("target-unrelated-task,target-queued-new,target-active-new", string.Join(',', completed),
+                "取消不得发送普通完成事件；无关批次和重新入队的新生命周期应正常串行完成");
+        }
+
+        lock (invoked)
+        {
+            False(invoked.Contains("target-queued-old", StringComparer.Ordinal),
+                "Channel 中遗留的已取消排队项必须跳过，不能被同 id 新任务复活");
+        }
+    }
+
+    private static async Task TargetedCancellationReachesBatchPreparationAsync()
+    {
+        var preparationStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var preparationCanceled = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var allowPreparationExit = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var nextCompleted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var runtimeCalls = 0;
+        await using var coordinator = new GenerationBatchDispatchCoordinator(
+            (_, token) =>
+            {
+                token.ThrowIfCancellationRequested();
+                Interlocked.Increment(ref runtimeCalls);
+                return Task.FromResult(new AgentTurnResult("prepare-thread", "prepare-turn", "completed", null));
+            },
+            prepareBatch: async (request, token) =>
+            {
+                if (request.BatchId != "prepare-canceled")
+                {
+                    return;
+                }
+
+                preparationStarted.TrySetResult();
+                try
+                {
+                    await Task.Delay(Timeout.InfiniteTimeSpan, token);
+                }
+                catch (OperationCanceledException) when (token.IsCancellationRequested)
+                {
+                    preparationCanceled.TrySetResult();
+                    await allowPreparationExit.Task;
+                    throw;
+                }
+            });
+        coordinator.DispatchCompleted += (_, e) =>
+        {
+            Equal("prepare-next", e.Request.BatchId,
+                "准备阶段被手动取消的批次不得触发普通 DispatchCompleted");
+            nextCompleted.TrySetResult();
+        };
+        coordinator.TryEnqueue("prepare-canceled", ["prepare-canceled-task"], isRetry: false);
+        await preparationStarted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        coordinator.TryEnqueue("prepare-next", ["prepare-next-task"], isRetry: false);
+        var cancellation = coordinator.CancelBatchesAsync(["prepare-canceled"]);
+        await preparationCanceled.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        False(cancellation.IsCompleted,
+            "准备阶段的取消也必须等待准备函数真正退出");
+        allowPreparationExit.TrySetResult();
+        await cancellation.WaitAsync(TimeSpan.FromSeconds(3));
+        await nextCompleted.Task.WaitAsync(TimeSpan.FromSeconds(3));
+        Equal(1, runtimeCalls,
+            "被取消的准备阶段不能继续启动 Agent Turn，无关下一批次应正常启动");
     }
 
     private static async Task ManagedCodexClaimResumesIdempotentlyAndForeignClaimIsNotStolenAsync()
@@ -609,16 +861,19 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
         var completionCount = 0;
         var allCompleted = new TaskCompletionSource(
             TaskCreationOptions.RunContinuationsAsynchronously);
-        await using var coordinator = new GenerationBatchDispatchCoordinator(
+        GenerationBatchDispatchCoordinator? coordinator = null;
+        await using var ownedCoordinator = coordinator = new GenerationBatchDispatchCoordinator(
             async (_, cancellationToken) =>
             {
+                var turnId = Guid.NewGuid().ToString("N");
+                coordinator!.NotifyTurnStarted("thread-progress-smoke", turnId);
                 await Task.Delay(25, cancellationToken);
                 return new AgentTurnResult(
                     ThreadId: "thread-progress-smoke",
-                    TurnId: Guid.NewGuid().ToString("N"),
+                    TurnId: turnId,
                     Status: "completed",
                     ErrorMessage: null);
-            });
+            }, currentThreadIdProvider: () => "thread-progress-smoke");
         coordinator.DispatchProgressChanged += (_, eventArgs) =>
         {
             lock (progress)
@@ -953,7 +1208,7 @@ internal static class GenerationBatchDispatchCoordinatorSmokeTests
             coordinator.DispatchProgressChanged += (_, eventArgs) =>
             {
                 progress.Add(eventArgs.Snapshot);
-                if (eventArgs.Snapshot.Stage == GenerationBatchDispatchStage.WaitingForTaskClaim)
+                if (eventArgs.Snapshot.Stage == GenerationBatchDispatchStage.StartingAgentTurn)
                 {
                     waitingForClaim.TrySetResult();
                 }

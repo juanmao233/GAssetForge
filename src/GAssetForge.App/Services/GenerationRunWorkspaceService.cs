@@ -1,5 +1,6 @@
 using GAssetForge.Core;
 using GAssetForge.Core.Generation;
+using GAssetForge.Core.Projects;
 using System.IO;
 using System.Security.Cryptography;
 using System.Text;
@@ -49,7 +50,11 @@ public sealed record GenerationRunManifest(
 /// </summary>
 public sealed class GenerationRunWorkspaceService
 {
-    public const string RunContainerRelativePath = ProductIdentity.GenerationRunContainerRelativePath;
+    /// <summary>
+    /// Historical run container retained for frozen task compatibility. New workspaces are
+    /// classified below Assets/AI by <see cref="ProjectAssetLayout"/>.
+    /// </summary>
+    public const string LegacyRunContainerRelativePath = ProductIdentity.GenerationRunContainerRelativePath;
 
     private static readonly string[] RequiredDirectories =
     [
@@ -64,9 +69,15 @@ public sealed class GenerationRunWorkspaceService
         "90-diagnostics"
     ];
 
-    public PreparedGenerationRunWorkspace Prepare(string batchId, string assetRoot)
+    public PreparedGenerationRunWorkspace Prepare(string batchId, string assetRoot) =>
+        Prepare(batchId, assetRoot, ProjectAssetLayout.GeneralCategory);
+
+    public PreparedGenerationRunWorkspace Prepare(
+        string batchId,
+        string assetRoot,
+        string category)
     {
-        var prepared = CreateWorkspaceDescriptor(batchId, assetRoot);
+        var prepared = CreateWorkspaceDescriptor(batchId, assetRoot, category, frozenRootRelativePath: null);
         var normalizedAssetRoot = prepared.AssetRoot;
         var rootFullPath = prepared.RootFullPath;
         if (Directory.Exists(rootFullPath) || File.Exists(rootFullPath))
@@ -74,12 +85,12 @@ public sealed class GenerationRunWorkspaceService
             throw new IOException($"生成运行工作区已存在：{rootFullPath}");
         }
 
-        Directory.CreateDirectory(rootFullPath);
+        EnsureManagedDirectory(normalizedAssetRoot, rootFullPath);
         try
         {
             foreach (var directory in RequiredDirectories)
             {
-                Directory.CreateDirectory(Path.Combine(rootFullPath, directory));
+                EnsureManagedDirectory(rootFullPath, Path.Combine(rootFullPath, directory));
             }
 
             GenerationRunJournal.Append(
@@ -96,24 +107,38 @@ public sealed class GenerationRunWorkspaceService
         }
         catch
         {
-            TryDeleteOwnedRun(preparedRoot: rootFullPath, normalizedAssetRoot);
+            TryDeleteOwnedRun(prepared);
             throw;
         }
     }
 
-    public PreparedGenerationRunWorkspace OpenOrRepair(string batchId, string assetRoot)
+    public PreparedGenerationRunWorkspace OpenOrRepair(string batchId, string assetRoot) =>
+        OpenOrRepair(
+            batchId,
+            assetRoot,
+            ProjectAssetLayout.BuildAiRunRelativePath(ProjectAssetLayout.GeneralCategory, batchId));
+
+    /// <summary>
+    /// Opens a persisted workspace at its frozen path. This deliberately does not recalculate
+    /// the path from today's defaults: historical Pending/Claimed tasks may still live below
+    /// Assets/Generated and their delivery contract is authoritative.
+    /// </summary>
+    public PreparedGenerationRunWorkspace OpenOrRepair(
+        string batchId,
+        string assetRoot,
+        string frozenRootRelativePath)
     {
-        var prepared = CreateWorkspaceDescriptor(batchId, assetRoot);
+        var prepared = CreateWorkspaceDescriptor(
+            batchId,
+            assetRoot,
+            category: null,
+            frozenRootRelativePath);
         if (File.Exists(prepared.RootFullPath))
         {
             throw new IOException($"生成运行工作区路径被文件占用：{prepared.RootFullPath}");
         }
 
-        Directory.CreateDirectory(prepared.RootFullPath);
-        if ((File.GetAttributes(prepared.RootFullPath) & FileAttributes.ReparsePoint) != 0)
-        {
-            throw new InvalidDataException($"生成运行工作区不能是符号链接或目录联接：{prepared.RootFullPath}");
-        }
+        EnsureManagedDirectory(prepared.AssetRoot, prepared.RootFullPath);
 
         foreach (var directory in RequiredDirectories)
         {
@@ -123,11 +148,7 @@ public sealed class GenerationRunWorkspaceService
                 throw new IOException($"生成运行分类目录被文件占用：{path}");
             }
 
-            Directory.CreateDirectory(path);
-            if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
-            {
-                throw new InvalidDataException($"生成运行分类目录不能是符号链接或目录联接：{path}");
-            }
+            EnsureManagedDirectory(prepared.RootFullPath, path);
         }
 
         return prepared;
@@ -468,12 +489,29 @@ public sealed class GenerationRunWorkspaceService
             return;
         }
 
+        if (!AssetRootService.PathEquals(run.AssetRoot, previousDelivery.AssetRoot))
+        {
+            throw new InvalidDataException("重试 Run 与父任务不属于同一个 Assets 根目录。");
+        }
+
+        if (!ProjectAssetLayout.IsRecognizedRunRelativePath(
+                previousDelivery.Workspace.RootPath,
+                previousDelivery.Workspace.RunId,
+                out _))
+        {
+            throw new InvalidDataException("父任务冻结的 Run 根目录不是受支持的 canonical/legacy 路径。");
+        }
+
         var sourceRelativePath = $"{previousDelivery.Workspace.RootPath}/10-style-reference";
         var sourceRoot = ResolveAssetPath(previousDelivery.AssetRoot, sourceRelativePath);
         if (!Directory.Exists(sourceRoot))
         {
             return;
         }
+
+        AssetRootService.EnsureExistingPathSegmentsAreNotReparsePoints(
+            previousDelivery.AssetRoot,
+            sourceRoot);
 
         foreach (var sourcePath in Directory.EnumerateFiles(sourceRoot, "*", SearchOption.TopDirectoryOnly))
         {
@@ -543,7 +581,7 @@ public sealed class GenerationRunWorkspaceService
     public void DeleteIfUnpublished(PreparedGenerationRunWorkspace run)
     {
         ArgumentNullException.ThrowIfNull(run);
-        TryDeleteOwnedRun(run.RootFullPath, run.AssetRoot);
+        TryDeleteOwnedRun(run);
     }
 
     private static GenerationDeliveryPlan CreateJournalDelivery(PreparedGenerationRunWorkspace run) =>
@@ -564,7 +602,9 @@ public sealed class GenerationRunWorkspaceService
 
     private static PreparedGenerationRunWorkspace CreateWorkspaceDescriptor(
         string batchId,
-        string assetRoot)
+        string assetRoot,
+        string? category,
+        string? frozenRootRelativePath)
     {
         if (!Guid.TryParseExact(batchId, "N", out _))
         {
@@ -583,7 +623,27 @@ public sealed class GenerationRunWorkspaceService
         }
 
         var normalizedBatchId = batchId.ToLowerInvariant();
-        var rootRelativePath = $"{RunContainerRelativePath}/{normalizedBatchId}";
+        string rootRelativePath;
+        if (string.IsNullOrWhiteSpace(frozenRootRelativePath))
+        {
+            rootRelativePath = ProjectAssetLayout.BuildAiRunRelativePath(
+                category ?? ProjectAssetLayout.GeneralCategory,
+                normalizedBatchId);
+        }
+        else
+        {
+            rootRelativePath = GenerationInputValidator.NormalizeRelativeAssetPath(
+                frozenRootRelativePath);
+            if (!ProjectAssetLayout.IsRecognizedRunRelativePath(
+                    rootRelativePath,
+                    normalizedBatchId,
+                    out _))
+            {
+                throw new InvalidDataException(
+                    $"冻结生成工作区不是受支持的 canonical/legacy Run 路径：{rootRelativePath}");
+            }
+        }
+
         var rootFullPath = ResolveAssetPath(normalizedAssetRoot, rootRelativePath);
         return new PreparedGenerationRunWorkspace(
             normalizedBatchId,
@@ -616,8 +676,11 @@ public sealed class GenerationRunWorkspaceService
         var fullPath = ResolveAssetPath(assetRoot, relativePath);
         var directory = Path.GetDirectoryName(fullPath)
             ?? throw new InvalidDataException($"无法解析运行工作区目录：{relativePath}");
-        Directory.CreateDirectory(directory);
+        EnsureManagedDirectory(assetRoot, directory);
     }
+
+    private static void EnsureManagedDirectory(string trustedRoot, string targetPath) =>
+        AssetRootService.EnsureManagedDirectory(trustedRoot, targetPath);
 
     private static string NormalizeFileName(string value)
     {
@@ -841,18 +904,28 @@ public sealed class GenerationRunWorkspaceService
         }
     }
 
-    private static void TryDeleteOwnedRun(string preparedRoot, string normalizedAssetRoot)
+    private static void TryDeleteOwnedRun(PreparedGenerationRunWorkspace run)
     {
         try
         {
-            var fullPath = Path.GetFullPath(preparedRoot);
-            var expectedContainer = ResolveAssetPath(normalizedAssetRoot, RunContainerRelativePath);
-            if (!Directory.Exists(fullPath) ||
-                !AssetRootService.IsWithinRoot(expectedContainer, fullPath) ||
-                AssetRootService.PathEquals(expectedContainer, fullPath))
+            if (!ProjectAssetLayout.IsRecognizedRunRelativePath(
+                    run.RootRelativePath,
+                    run.BatchId,
+                    out _))
             {
                 return;
             }
+
+            var fullPath = Path.GetFullPath(run.RootFullPath);
+            var expectedFullPath = ResolveAssetPath(run.AssetRoot, run.RootRelativePath);
+            if (!Directory.Exists(fullPath) ||
+                !AssetRootService.PathEquals(fullPath, expectedFullPath) ||
+                AssetRootService.PathEquals(run.AssetRoot, fullPath))
+            {
+                return;
+            }
+
+            EnsureManagedDirectory(run.AssetRoot, fullPath);
 
             var attributes = File.GetAttributes(fullPath);
             if ((attributes & FileAttributes.ReparsePoint) != 0)

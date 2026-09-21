@@ -16,6 +16,7 @@ internal static class AgentRuntimeTransportSmokeTests
 
     public static async Task RunAllAsync()
     {
+        await CodexAppServerThreadSelectionIsOwnedByRpcResponsesAsync();
         await JsonLineRpcRoutesConcurrentResponsesByIdAsync();
         await JsonLineRpcAcceptsMultipleMessagesOnOnePhysicalLineAsync();
         await JsonLineRpcRecoversValidMessageAfterNonJsonPrefixAsync();
@@ -31,10 +32,13 @@ internal static class AgentRuntimeTransportSmokeTests
         await CodexAppServerKeepsImageGenerationNotificationsStructuredAsync();
         await CodexAppServerFreezesWorkspaceWriteSandboxPolicyPerTurnAsync();
         await CodexAppServerFailsActiveTurnWhenProtocolStreamEndsAsync();
+        await CodexAppServerIgnoresCanceledTurnCompletionAfterNewThreadAsync();
         await CodexAppServerScopesGAssetForgeMcpApprovalsToTheActiveBatchAsync();
         await CodexAppServerRejectsPreBaselineVersionAsync();
         CodexProcessLaunchUsesOptionsPathForAutomaticRuntimeResolution();
-        CodexExecutableResolverPrefersAppDataNpmShimBeforeOfficialInstallAndWindowsApps();
+        CodexExecutableResolverPrefersNewestAppDataRuntime();
+        CodexExecutableSemanticVersionOrdersStableAndPrereleaseIdentifiers();
+        CodexExecutableResolverDiscoversDesktopLocalAppDataRuntimeWithoutPath();
         CodexExecutableResolverDiscoversOfficialLocalAppDataRuntimeWithoutPath();
         CodexExecutableResolverSkipsWindowsAppsExecutableWithDiagnostic();
         CodexExecutableResolverProbesExplicitScriptAndExecutable();
@@ -45,6 +49,7 @@ internal static class AgentRuntimeTransportSmokeTests
         CodexProcessLaunchFallsBackToLegacyPathScript();
         CodexProcessLaunchExplainsMissingCompanionWithoutFallback();
         CodexProcessLaunchKeepsBearerTokenOutOfArguments();
+        CodexProcessLaunchNetworkSummaryDoesNotLeakConfiguration();
         CodexProcessLaunchScopesImageApiNetworkToWorkspaceWriteSandbox();
         CodexProcessLaunchUsesUtf8NoBomForProtocolStreams();
         await CodexProcessLaunchRoundTripsUtf8ThroughRealChildAsync();
@@ -53,6 +58,84 @@ internal static class AgentRuntimeTransportSmokeTests
         await CodexExecAcceptsConcatenatedJsonAndRedactsInvalidTailAsync();
         await CodexExecBoundsAndSummarizesRepeatedInvalidInputAsync();
         await CodexExecCancellationKillsTheEntireProcessTreeAsync();
+    }
+
+    private static async Task CodexAppServerThreadSelectionIsOwnedByRpcResponsesAsync()
+    {
+        using var stdout = new InlineContinuationTextReader();
+        var threadNumber = 0;
+        var writer = new RecordingTextWriter(line =>
+        {
+            using var message = JsonDocument.Parse(line);
+            var root = message.RootElement;
+            if (!root.TryGetProperty("id", out var id))
+            {
+                return ValueTask.CompletedTask;
+            }
+
+            var method = root.GetProperty("method").GetString();
+            object result = method switch
+            {
+                "initialize" => new { userAgent = "codex/0.139.0" },
+                "thread/start" => new { thread = new { id = $"selected-thread-{++threadNumber}" } },
+                "thread/resume" => new
+                {
+                    thread = new { id = root.GetProperty("params").GetProperty("threadId").GetString() }
+                },
+                _ => new { }
+            };
+            stdout.EnqueueLine(JsonSerializer.Serialize(new { id = id.GetInt64(), result }));
+            return ValueTask.CompletedTask;
+        });
+        var process = new FakeAgentChildProcess(
+            4196, writer, stdout, new StringReader(string.Empty), stdout.Complete);
+        await using var transport = new CodexAppServerTransport(
+            new FakeAgentProcessFactory((_, _) => process));
+        var observed = new List<string?>();
+        transport.NotificationReceived += (_, e) =>
+        {
+            if (e.Method == "thread/started")
+            {
+                observed.Add(e.Parameters.GetProperty("thread").GetProperty("id").GetString());
+            }
+        };
+        var notificationHandler = typeof(CodexAppServerTransport).GetMethod(
+            "OnNotificationReceived",
+            System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic)!;
+        void ReplayThreadNotification(string threadId)
+        {
+            var parameters = JsonSerializer.SerializeToElement(new { thread = new { id = threadId } });
+            notificationHandler.Invoke(transport, ["thread/started", parameters]);
+        }
+
+        await transport.StartAsync(new AgentSessionStartOptions
+        {
+            ExecutablePath = "codex-fixture",
+            WorkingDirectory = Environment.CurrentDirectory,
+            RequestTimeout = TimeSpan.FromSeconds(3)
+        });
+        await transport.StartThreadAsync();
+        await transport.StartThreadAsync();
+        ReplayThreadNotification("selected-thread-1");
+        Equal("selected-thread-2", transport.CurrentThreadId,
+            "上一线程迟到的 thread/started 不得覆盖新线程 RPC 已选定的书签");
+
+        await transport.ResumeThreadAsync("resumed-thread");
+        Equal("resumed-thread", transport.CurrentThreadId,
+            "显式 thread/resume 响应仍必须切换当前线程");
+        ReplayThreadNotification("selected-thread-2");
+        Equal("resumed-thread", transport.CurrentThreadId,
+            "恢复线程后旧 thread/started 不得让后续 Turn 走错线程");
+        ReplayThreadNotification("resumed-thread");
+        Equal("resumed-thread", transport.CurrentThreadId,
+            "匹配线程的观察通知不得影响当前选择");
+
+        await transport.StopAsync();
+        ReplayThreadNotification("resumed-thread");
+        True(transport.CurrentThreadId is null,
+            "传输停止后迟到 thread/started 不得重新填充已清理的书签");
+        Equal(4, observed.Count,
+            "禁止通知修改书签不应吞掉其可审计通知事件");
     }
 
     private static async Task JsonLineRpcRoutesConcurrentResponsesByIdAsync()
@@ -640,6 +723,111 @@ internal static class AgentRuntimeTransportSmokeTests
             "turn/start 必须显式冻结 Image API 出站网络权限");
     }
 
+    private static async Task CodexAppServerIgnoresCanceledTurnCompletionAfterNewThreadAsync()
+    {
+        using var stdout = new InlineContinuationTextReader();
+        var threadNumber = 0;
+        var turnNumber = 0;
+        var writer = new RecordingTextWriter(line =>
+        {
+            using var message = JsonDocument.Parse(line);
+            var root = message.RootElement;
+            if (!root.TryGetProperty("id", out var id))
+            {
+                return ValueTask.CompletedTask;
+            }
+
+            var method = root.GetProperty("method").GetString();
+            object result = new { };
+            if (method == "initialize")
+            {
+                result = new { userAgent = "codex/0.139.0" };
+            }
+            else if (method == "thread/start")
+            {
+                result = new { thread = new { id = $"thread-{++threadNumber}" } };
+            }
+            else if (method == "turn/start")
+            {
+                var turnId = $"turn-{++turnNumber}";
+                result = new { turn = new { id = turnId, status = "inProgress" } };
+                if (turnNumber == 3)
+                {
+                    stdout.EnqueueLine(JsonSerializer.Serialize(new
+                    {
+                        method = "turn/completed",
+                        @params = new { threadId = "thread-2", turn = new { id = "turn-2", status = "completed" } }
+                    }));
+                    stdout.EnqueueLine(JsonSerializer.Serialize(new
+                    {
+                        method = "turn/completed",
+                        @params = new { threadId = "thread-2", turn = new { id = turnId, status = "completed" } }
+                    }));
+                }
+            }
+
+            stdout.EnqueueLine(JsonSerializer.Serialize(new { id = id.GetInt64(), result }));
+            return ValueTask.CompletedTask;
+        });
+        var process = new FakeAgentChildProcess(
+            4195, writer, stdout, new StringReader(string.Empty), stdout.Complete);
+        await using var transport = new CodexAppServerTransport(
+            new FakeAgentProcessFactory((_, _) => process));
+        var completedTurnIds = new ConcurrentQueue<string?>();
+        var staleNotificationSeen = new TaskCompletionSource(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        transport.TurnCompleted += (_, args) => completedTurnIds.Enqueue(args.Result.TurnId);
+        transport.NotificationReceived += (_, args) =>
+        {
+            if (args.Method == "turn/completed" &&
+                args.Parameters.GetProperty("turn").GetProperty("id").GetString() == "turn-1")
+            {
+                staleNotificationSeen.TrySetResult();
+            }
+        };
+        await transport.StartAsync(new AgentSessionStartOptions
+        {
+            ExecutablePath = "codex-fixture",
+            WorkingDirectory = Environment.CurrentDirectory,
+            RequestTimeout = TimeSpan.FromSeconds(3)
+        });
+        await transport.StartThreadAsync();
+        using var cancellation = new CancellationTokenSource();
+        var oldTurn = transport.StartTurnAsync("old instruction", cancellation.Token);
+        await WaitUntilAsync(() => transport.ActiveTurnId == "turn-1", TimeSpan.FromSeconds(2),
+            "旧 Turn 未绑定。");
+        cancellation.Cancel();
+        await ThrowsAsync<OperationCanceledException>(() => oldTurn.WaitAsync(TimeSpan.FromSeconds(2)),
+            "取消必须在没有 turn/completed 通知时释放本地 Turn 等待");
+        Equal(AgentSessionTransportState.Ready, transport.State, "取消旧 Turn 后必须恢复 Ready");
+
+        await transport.StartThreadAsync();
+        var newTurn = transport.StartTurnAsync("new instruction");
+        await WaitUntilAsync(() => transport.ActiveTurnId == "turn-2", TimeSpan.FromSeconds(2),
+            "新 Turn 未绑定。");
+        stdout.EnqueueLine(JsonSerializer.Serialize(new
+        {
+            method = "turn/completed",
+            @params = new { threadId = "thread-1", turn = new { id = "turn-1", status = "interrupted" } }
+        }));
+        await staleNotificationSeen.Task.WaitAsync(TimeSpan.FromSeconds(2));
+        Equal("thread-2", transport.CurrentThreadId, "旧 Turn 晚到完成不得覆盖新线程书签");
+        Equal("turn-2", transport.ActiveTurnId, "旧 Turn 晚到完成不得清掉新 Turn 身份");
+        Equal(AgentSessionTransportState.RunningTurn, transport.State, "旧完成不得把新 Turn 改为 Ready");
+        False(newTurn.IsCompleted, "旧完成不得结束新 Turn 等待");
+        False(completedTurnIds.Contains("turn-1"), "失效旧完成不得通知上层覆盖新 Turn 状态");
+        stdout.EnqueueLine(JsonSerializer.Serialize(new
+        {
+            method = "turn/completed",
+            @params = new { threadId = "thread-2", turn = new { id = "turn-2", status = "completed" } }
+        }));
+        True((await newTurn.WaitAsync(TimeSpan.FromSeconds(2))).IsSuccess, "新 Turn 应由自己的完成通知结束");
+        True((await transport.StartTurnAsync("early completion").WaitAsync(TimeSpan.FromSeconds(2))).IsSuccess,
+            "turn/start 响应之前到达的正常完成仍必须被绑定与消费");
+        Equal(1, completedTurnIds.Count(id => id == "turn-2"), "绑定新 Turn 时同线程旧完成不得重复通知");
+        Equal(1, completedTurnIds.Count(id => id == "turn-3"), "正常早到完成必须在确认身份后通知一次");
+    }
+
     private static async Task CodexAppServerKeepsImageGenerationNotificationsStructuredAsync()
     {
         var standardOutput = new AsyncLineTextReader();
@@ -741,10 +929,16 @@ internal static class AgentRuntimeTransportSmokeTests
     {
         const string threadId = "thread-generation-fixture";
         const string turnId = "turn-generation-fixture";
+        const string untrustedTurnId = "turn-untrusted-prompt-fixture";
         const string approvedTaskId = "0123456789abcdef0123456789abcdef";
         const string foreignTaskId = "fedcba9876543210fedcba9876543210";
-        var standardOutput = new AsyncLineTextReader();
+        var approvedAgentId = GenerationManagedAgentIdentity.ForTask(approvedTaskId);
+        var foreignAgentId = GenerationManagedAgentIdentity.ForTask(foreignTaskId);
+        // Complete reads inline so a turn/start response and an immediately following
+        // elicitation deterministically exercise the production ordering boundary.
+        var standardOutput = new InlineContinuationTextReader();
         var approvalResponses = new ConcurrentDictionary<long, JsonElement>();
+        var turnStartCount = 0;
         var standardInput = new RecordingTextWriter(line =>
         {
             using var document = JsonDocument.Parse(line);
@@ -775,47 +969,74 @@ internal static class AgentRuntimeTransportSmokeTests
                         }));
                         break;
                     case "turn/start":
+                        var isGenerationTurn = Interlocked.Increment(ref turnStartCount) == 1;
+                        var fixtureTurnId = isGenerationTurn ? turnId : untrustedTurnId;
                         standardOutput.EnqueueLine(JsonSerializer.Serialize(new
                         {
                             id = requestId.GetInt64(),
-                            result = new { turn = new { id = turnId } }
+                            result = new { turn = new { id = fixtureTurnId } }
                         }));
+                        if (!isGenerationTurn)
+                        {
+                            standardOutput.EnqueueLine(CreateMcpApprovalRequest(
+                                808,
+                                threadId,
+                                fixtureTurnId,
+                                "claim_generation_task",
+                                approvedTaskId,
+                                approvedAgentId));
+                            break;
+                        }
+
                         standardOutput.EnqueueLine(CreateMcpApprovalRequest(
                             801,
                             threadId,
                             turnId,
                             "create_generation_task",
-                            approvedTaskId));
+                            approvedTaskId,
+                            approvedAgentId));
                         standardOutput.EnqueueLine(CreateMcpApprovalRequest(
                             802,
                             threadId,
                             turnId,
                             "submit_generation_output",
-                            foreignTaskId));
+                            foreignTaskId,
+                            approvedAgentId));
                         standardOutput.EnqueueLine(CreateMcpApprovalRequest(
                             803,
                             threadId,
                             turnId,
                             "claim_generation_task",
-                            approvedTaskId));
+                            approvedTaskId,
+                            approvedAgentId));
                         standardOutput.EnqueueLine(CreateMcpApprovalRequest(
                             804,
                             threadId,
                             turnId,
                             "submit_generation_output",
-                            approvedTaskId));
+                            approvedTaskId,
+                            approvedAgentId));
                         standardOutput.EnqueueLine(CreateMcpApprovalRequest(
                             805,
                             threadId,
                             turnId,
                             "run_image_delivery_fallback",
-                            approvedTaskId));
+                            approvedTaskId,
+                            approvedAgentId));
                         standardOutput.EnqueueLine(CreateMcpApprovalRequest(
                             806,
                             threadId,
                             turnId,
                             "run_image_delivery_fallback",
-                            taskId: null));
+                            taskId: null,
+                            approvedAgentId));
+                        standardOutput.EnqueueLine(CreateMcpApprovalRequest(
+                            807,
+                            threadId,
+                            turnId,
+                            "claim_generation_task",
+                            approvedTaskId,
+                            foreignAgentId));
                         break;
                 }
 
@@ -824,21 +1045,24 @@ internal static class AgentRuntimeTransportSmokeTests
 
             if (!root.TryGetProperty("id", out var responseId) ||
                 !responseId.TryGetInt64(out var numericResponseId) ||
-                numericResponseId is < 801 or > 806)
+                numericResponseId is < 801 or > 808)
             {
                 return ValueTask.CompletedTask;
             }
 
             approvalResponses[numericResponseId] = root.GetProperty("result").Clone();
-            if (numericResponseId == 806)
+            var generationTurnResponsesComplete = approvalResponses.Count(response =>
+                response.Key is >= 801 and <= 807) == 7;
+            if (numericResponseId == 808 || generationTurnResponsesComplete)
             {
+                var completedTurnId = numericResponseId == 808 ? untrustedTurnId : turnId;
                 standardOutput.EnqueueLine(JsonSerializer.Serialize(new
                 {
                     method = "turn/completed",
                     @params = new
                     {
                         threadId,
-                        turn = new { id = turnId, status = "completed" }
+                        turn = new { id = completedTurnId, status = "completed" }
                     }
                 }));
             }
@@ -853,6 +1077,8 @@ internal static class AgentRuntimeTransportSmokeTests
             standardOutput.Complete);
         await using var transport = new CodexAppServerTransport(
             new FakeAgentProcessFactory((_, _) => process));
+        var transportLogs = new ConcurrentQueue<string>();
+        transport.LogReceived += (_, args) => transportLogs.Enqueue(args.Message);
 
         await transport.StartAsync(new AgentSessionStartOptions
         {
@@ -860,14 +1086,17 @@ internal static class AgentRuntimeTransportSmokeTests
             WorkingDirectory = Environment.CurrentDirectory,
             RequestTimeout = TimeSpan.FromSeconds(3)
         });
-        var result = await transport.StartTurnAsync($"""
-            执行 GAssetForge 批次。
-            - {approvedTaskId}
-            """);
+        var approvalPrompt = GenerationAgentPromptBuilder.Build(
+            [approvedTaskId],
+            new Dictionary<string, string>(StringComparer.Ordinal)
+            {
+                [approvedTaskId] = approvedAgentId
+            }).ReplaceLineEndings("\r\n");
+        var result = await transport.StartTurnAsync(approvalPrompt);
 
         True(result.IsSuccess, "MCP 审批 fixture Turn 应正常完成");
         await WaitUntilAsync(
-            () => approvalResponses.Count == 6,
+            () => approvalResponses.Count == 7,
             TimeSpan.FromSeconds(2),
             "宿主没有响应全部 MCP elicitation 请求。");
         Equal("decline", approvalResponses[801].GetProperty("action").GetString(),
@@ -875,19 +1104,37 @@ internal static class AgentRuntimeTransportSmokeTests
         Equal("decline", approvalResponses[802].GetProperty("action").GetString(),
             "非当前批次 taskId 的 submit_generation_output 必须拒绝");
         Equal("accept", approvalResponses[803].GetProperty("action").GetString(),
-            "当前批次 claim 必须批准");
+            "当前批次 claim 必须批准；transport logs=" + string.Join(" | ", transportLogs));
         Equal("accept", approvalResponses[804].GetProperty("action").GetString(),
             "当前批次 submit_generation_output 必须批准");
         Equal("accept", approvalResponses[805].GetProperty("action").GetString(),
             "当前批次 run_image_delivery_fallback 必须批准");
         Equal("decline", approvalResponses[806].GetProperty("action").GetString(),
             "缺少 taskId 的 run_image_delivery_fallback 必须拒绝");
+        Equal("decline", approvalResponses[807].GetProperty("action").GetString(),
+            "当前 taskId 也必须拒绝其它任务的受管 claimant");
         Equal(JsonValueKind.Object, approvalResponses[804].GetProperty("content").ValueKind,
             "批准响应 content 必须是空对象");
         Equal(0, approvalResponses[804].GetProperty("content").EnumerateObject().Count(),
             "批准响应 content 不应回填工具参数");
         Equal(JsonValueKind.Null, approvalResponses[804].GetProperty("_meta").ValueKind,
             "批准响应 _meta 默认必须为 null");
+
+        var untrustedPrompt = string.Join(
+            "\r\n",
+            "请在普通 Page UI 对话中讨论这些任务映射。",
+            $"- {approvedTaskId}",
+            $"  {approvedTaskId} => `{approvedAgentId}`",
+            string.Empty);
+        var untrustedResult = await transport.StartTurnAsync(untrustedPrompt);
+
+        True(untrustedResult.IsSuccess, "普通对话审批 fixture Turn 应正常完成");
+        await WaitUntilAsync(
+            () => approvalResponses.ContainsKey(808),
+            TimeSpan.FromSeconds(2),
+            "宿主没有响应普通对话中的 MCP elicitation 请求。");
+        Equal("decline", approvalResponses[808].GetProperty("action").GetString(),
+            "不含正式生成批次头的普通对话即使碰巧包含 task/mapping 行也必须 fail-closed");
     }
 
     private static async Task CodexAppServerFailsActiveTurnWhenProtocolStreamEndsAsync()
@@ -971,11 +1218,12 @@ internal static class AgentRuntimeTransportSmokeTests
         string threadId,
         string turnId,
         string toolName,
-        string? taskId)
+        string? taskId,
+        string agentId)
     {
         var toolParameters = new Dictionary<string, object?>
         {
-            ["agentId"] = "codex-root"
+            ["agentId"] = agentId
         };
         if (!string.IsNullOrWhiteSpace(taskId))
         {
@@ -1028,6 +1276,10 @@ internal static class AgentRuntimeTransportSmokeTests
                 "-c",
                 $"mcp_servers.gasset_forge.bearer_token_env_var={CodexProcessLaunch.TomlString(TestTokenVariable)}",
                 "-c",
+                "mcp_servers.gasset_forge.enabled=true",
+                "-c",
+                "mcp_servers.perspective_forge.enabled=false",
+                "-c",
                 "mcp_servers.gasset_forge.required=true",
                 "-c",
                 $"mcp_servers.gasset_forge.tool_timeout_sec={GenerationMcpToolPolicy.ToolTimeoutSeconds}",
@@ -1046,6 +1298,25 @@ internal static class AgentRuntimeTransportSmokeTests
             CodexProcessLaunch.Redact($"stderr leaked {token}", options)
                 .Contains(token, StringComparison.Ordinal),
             "日志脱敏不得保留 Bearer Token");
+    }
+
+    private static void CodexProcessLaunchNetworkSummaryDoesNotLeakConfiguration()
+    {
+        const string secret = "fixture-proxy-password";
+        var summary = CodexProcessLaunch.DescribeNetworkEnvironment(new Dictionary<string, string?>
+        {
+            ["https_proxy"] = $"http://user:{secret}@proxy.private.invalid:8443",
+            ["OPENAI_API_KEY"] = "fixture-api-secret"
+        });
+        True(summary.Contains("已配置代理", StringComparison.Ordinal), "网络日志应报告配置状态");
+        True(summary.Contains("未验证", StringComparison.Ordinal), "配置存在不得伪报网络已可达");
+        False(summary.Contains(secret, StringComparison.Ordinal) ||
+              summary.Contains("private.invalid", StringComparison.Ordinal) ||
+              summary.Contains("fixture-api-secret", StringComparison.Ordinal),
+            "网络诊断不得打印代理地址、凭据或 API key");
+        var direct = CodexProcessLaunch.DescribeNetworkEnvironment(new Dictionary<string, string?>());
+        True(direct.Contains("未配置 API 兜底凭据", StringComparison.Ordinal),
+            "缺 key 时不能承诺备用通道可用");
     }
 
     private static void CodexProcessLaunchScopesImageApiNetworkToWorkspaceWriteSandbox()
@@ -1205,7 +1476,7 @@ internal static class AgentRuntimeTransportSmokeTests
             "拒绝旧版 app-server 时必须清理进程树");
     }
 
-    private static void CodexExecutableResolverPrefersAppDataNpmShimBeforeOfficialInstallAndWindowsApps()
+    private static void CodexExecutableResolverPrefersNewestAppDataRuntime()
     {
         var root = Path.Combine(
             Path.GetTempPath(),
@@ -1216,9 +1487,8 @@ internal static class AgentRuntimeTransportSmokeTests
         var applicationDataDirectory = Path.Combine(root, "AppData", "Roaming");
         var npmDirectory = Path.Combine(applicationDataDirectory, "npm");
         var localApplicationDataDirectory = Path.Combine(root, "AppData", "Local");
-        var officialBinDirectory = Path.Combine(
+        var desktopBinDirectory = Path.Combine(
             localApplicationDataDirectory,
-            "Programs",
             "OpenAI",
             "Codex",
             "bin");
@@ -1233,11 +1503,12 @@ internal static class AgentRuntimeTransportSmokeTests
         {
             Directory.CreateDirectory(applicationDirectory);
             Directory.CreateDirectory(npmDirectory);
-            Directory.CreateDirectory(officialBinDirectory);
+            Directory.CreateDirectory(desktopBinDirectory);
             Directory.CreateDirectory(windowsAppsDirectory);
             var expectedShimPath = Path.Combine(npmDirectory, "codex.cmd");
             File.WriteAllText(expectedShimPath, "@echo off\r\nexit /b 0\r\n");
-            File.WriteAllBytes(Path.Combine(officialBinDirectory, "codex.exe"), [0x03]);
+            var expectedDesktopPath = Path.Combine(desktopBinDirectory, "codex.exe");
+            File.WriteAllBytes(expectedDesktopPath, [0x03]);
             var windowsAppsExecutable = Path.Combine(windowsAppsDirectory, "codex.exe");
             File.WriteAllBytes(windowsAppsExecutable, [0x01]);
             File.WriteAllBytes(
@@ -1245,27 +1516,30 @@ internal static class AgentRuntimeTransportSmokeTests
                 [0x02]);
             var probedCandidates = new List<string>();
 
-            var resolution = CodexExecutableResolver.Resolve(
+            var resolution = CodexExecutableResolver.ResolveWithDiagnostics(
                 "codex",
                 applicationDirectory,
                 windowsAppsDirectory,
-                candidate =>
+                launchProbe: candidate =>
                 {
                     probedCandidates.Add(candidate.CodexExecutablePath);
-                    return string.Equals(
+                    return CodexExecutableProbeResult.Successful(string.Equals(
                         candidate.CodexExecutablePath,
                         expectedShimPath,
-                        StringComparison.OrdinalIgnoreCase);
+                        StringComparison.OrdinalIgnoreCase)
+                        ? "codex-cli 0.139.0"
+                        : "codex-cli 0.151.0-alpha.7.2");
                 },
-                applicationDataDirectory,
-                localApplicationDataDirectory);
+                applicationDataDirectory: applicationDataDirectory,
+                localApplicationDataDirectory: localApplicationDataDirectory);
 
-            Equal(Path.GetFullPath(expectedShimPath), resolution.CodexExecutablePath,
-                "%APPDATA%\\npm 中的 codex.cmd 必须先于 LOCALAPPDATA 官方安装和 WindowsApps exe");
+            True(resolution.IsSuccess, "自动解析应找到至少一个可启动的 AppData Codex Runtime");
+            Equal(Path.GetFullPath(expectedDesktopPath), resolution.Launch!.CodexExecutablePath,
+                "自动解析必须选择版本较新的 Codex Desktop Runtime，不能被旧 npm shim 遮蔽");
             SequenceEqual(
-                new[] { Path.GetFullPath(expectedShimPath) },
+                new[] { Path.GetFullPath(expectedShimPath), Path.GetFullPath(expectedDesktopPath) },
                 probedCandidates,
-                "命中 AppData npm shim 后不应再探测 LOCALAPPDATA 或 WindowsApps 候选");
+                "选择版本前必须同时探测 npm shim 与 Codex Desktop 候选");
         }
         finally
         {
@@ -1274,6 +1548,69 @@ internal static class AgentRuntimeTransportSmokeTests
                 Directory.Delete(root, recursive: true);
             }
         }
+    }
+
+    private static void CodexExecutableResolverDiscoversDesktopLocalAppDataRuntimeWithoutPath()
+    {
+        var root = Path.Combine(
+            Path.GetTempPath(),
+            "GAssetForge.SmokeTests",
+            "codex-runtime-desktop-localappdata",
+            Guid.NewGuid().ToString("N"));
+        var applicationDirectory = Path.Combine(root, "distribution");
+        var applicationDataDirectory = Path.Combine(root, "empty-appdata");
+        var localApplicationDataDirectory = Path.Combine(root, "LocalAppData");
+        var desktopBinDirectory = Path.Combine(
+            localApplicationDataDirectory,
+            "OpenAI",
+            "Codex",
+            "bin");
+        try
+        {
+            Directory.CreateDirectory(applicationDirectory);
+            Directory.CreateDirectory(applicationDataDirectory);
+            Directory.CreateDirectory(desktopBinDirectory);
+            var expectedExecutablePath = Path.Combine(desktopBinDirectory, "codex.exe");
+            File.WriteAllBytes(expectedExecutablePath, [0x01]);
+
+            var resolution = CodexExecutableResolver.ResolveWithDiagnostics(
+                "codex",
+                applicationDirectory,
+                pathEnvironment: string.Empty,
+                launchProbe: _ => CodexExecutableProbeResult.Successful("codex-cli 0.151.0-alpha.7.2"),
+                applicationDataDirectory: applicationDataDirectory,
+                localApplicationDataDirectory: localApplicationDataDirectory);
+
+            True(resolution.IsSuccess,
+                "PATH 为空时仍应检测 %LOCALAPPDATA%\\OpenAI\\Codex\\bin");
+            Equal(Path.GetFullPath(expectedExecutablePath), resolution.Launch!.CodexExecutablePath,
+                "Codex Desktop LOCALAPPDATA 安装路径");
+            True(resolution.Candidates.Any(candidate =>
+                    candidate.Source.Contains("Desktop", StringComparison.OrdinalIgnoreCase)),
+                "候选诊断必须明确 Codex Desktop 安装来源");
+        }
+        finally
+        {
+            if (Directory.Exists(root))
+            {
+                Directory.Delete(root, recursive: true);
+            }
+        }
+    }
+
+    private static void CodexExecutableSemanticVersionOrdersStableAndPrereleaseIdentifiers()
+    {
+        var oldStable = CodexCliSemanticVersion.TryParseFromProbeText("codex-cli 0.139.0")!;
+        var newAlpha = CodexCliSemanticVersion.TryParseFromProbeText("codex-cli 0.151.0-alpha.7.2")!;
+        var sameCoreStable = CodexCliSemanticVersion.TryParseFromProbeText("codex-cli 0.151.0")!;
+        var laterAlpha = CodexCliSemanticVersion.TryParseFromProbeText("codex-cli 0.151.0-alpha.7.10")!;
+
+        True(newAlpha.CompareTo(oldStable) > 0,
+            "较高 core 版本的 alpha Runtime 必须胜过较低稳定版本");
+        True(sameCoreStable.CompareTo(newAlpha) > 0,
+            "相同 core 版本下稳定版必须胜过预发布版");
+        True(laterAlpha.CompareTo(newAlpha) > 0,
+            "预发布数字标识必须按数值比较，不能按字符串把 10 排在 2 前面");
     }
 
     private static void CodexProcessLaunchUsesOptionsPathForAutomaticRuntimeResolution()
@@ -1944,6 +2281,10 @@ internal static class AgentRuntimeTransportSmokeTests
                 "-c",
                 tokenVariableConfig,
                 "-c",
+                "mcp_servers.gasset_forge.enabled=true",
+                "-c",
+                "mcp_servers.perspective_forge.enabled=false",
+                "-c",
                 "mcp_servers.gasset_forge.required=true",
                 "-c",
                 toolTimeoutConfig,
@@ -1972,6 +2313,10 @@ internal static class AgentRuntimeTransportSmokeTests
                 urlConfig,
                 "-c",
                 tokenVariableConfig,
+                "-c",
+                "mcp_servers.gasset_forge.enabled=true",
+                "-c",
+                "mcp_servers.perspective_forge.enabled=false",
                 "-c",
                 "mcp_servers.gasset_forge.required=true",
                 "-c",
@@ -2384,6 +2729,112 @@ internal static class AgentRuntimeTransportSmokeTests
             }
 
             return _lineWritten?.Invoke(line).AsTask() ?? Task.CompletedTask;
+        }
+    }
+
+    private sealed class InlineContinuationTextReader : TextReader
+    {
+        private readonly object _gate = new();
+        private readonly Queue<string> _lines = new();
+        private TaskCompletionSource<string?>? _pendingRead;
+        private bool _completed;
+
+        internal void EnqueueLine(string line)
+        {
+            TaskCompletionSource<string?>? pendingRead;
+            lock (_gate)
+            {
+                if (_completed)
+                {
+                    throw new InvalidOperationException("Fixture stdout 已关闭。");
+                }
+
+                pendingRead = _pendingRead;
+                if (pendingRead is null)
+                {
+                    _lines.Enqueue(line);
+                    return;
+                }
+
+                _pendingRead = null;
+            }
+
+            // Deliberately allow the protocol read loop to resume inline. This models an
+            // app-server that emits turn/start and elicitation messages in one tight burst.
+            pendingRead.TrySetResult(line);
+        }
+
+        internal void Complete()
+        {
+            TaskCompletionSource<string?>? pendingRead;
+            lock (_gate)
+            {
+                if (_completed)
+                {
+                    return;
+                }
+
+                _completed = true;
+                pendingRead = _pendingRead;
+                _pendingRead = null;
+            }
+
+            pendingRead?.TrySetResult(null);
+        }
+
+        public override ValueTask<string?> ReadLineAsync(CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            TaskCompletionSource<string?> pendingRead;
+            lock (_gate)
+            {
+                if (_lines.Count > 0)
+                {
+                    return ValueTask.FromResult<string?>(_lines.Dequeue());
+                }
+
+                if (_completed)
+                {
+                    return ValueTask.FromResult<string?>(null);
+                }
+
+                if (_pendingRead is not null)
+                {
+                    throw new InvalidOperationException("Fixture stdout 不允许并发读取。");
+                }
+
+                pendingRead = new TaskCompletionSource<string?>();
+                _pendingRead = pendingRead;
+            }
+
+            if (cancellationToken.CanBeCanceled)
+            {
+                var registration = cancellationToken.Register(
+                    static state =>
+                    {
+                        var tuple = ((TaskCompletionSource<string?> Completion, CancellationToken Token))state!;
+                        tuple.Completion.TrySetCanceled(tuple.Token);
+                    },
+                    (pendingRead, cancellationToken));
+                _ = pendingRead.Task.ContinueWith(
+                    static (_, state) => ((CancellationTokenRegistration)state!).Dispose(),
+                    registration,
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+            }
+
+            return new ValueTask<string?>(pendingRead.Task);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing)
+            {
+                Complete();
+            }
+
+            base.Dispose(disposing);
         }
     }
 

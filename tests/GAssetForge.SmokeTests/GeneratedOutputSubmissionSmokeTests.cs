@@ -5,6 +5,7 @@ using System.Text.Json;
 using System.IO;
 using GAssetForge.App.Services;
 using GAssetForge.Core.Generation;
+using GAssetForge.Core.Projects;
 using GAssetForge.McpServer;
 using SixLabors.ImageSharp;
 using SixLabors.ImageSharp.Formats.Png;
@@ -32,6 +33,8 @@ internal static class GeneratedOutputSubmissionSmokeTests
 
         try
         {
+            LegacyFrozenRunOpenOrRepairStaysInPlace(dataRoot);
+            await RetryReferenceMirroringRejectsRunJunctionAsync(dataRoot);
             await SubmissionPreservesAuditableStagesAndCompletesIdempotentlyAsync(dataRoot);
             await SubmissionWithoutBackgroundRemovalPreservesOpaqueDirectStagesAsync(dataRoot);
             await GeometryFailureReturnsWarningAndPreservesEveryIntermediateAsync(dataRoot);
@@ -43,6 +46,107 @@ internal static class GeneratedOutputSubmissionSmokeTests
             if (Directory.Exists(dataRoot))
             {
                 Directory.Delete(dataRoot, recursive: true);
+            }
+        }
+    }
+
+    private static void LegacyFrozenRunOpenOrRepairStaysInPlace(string dataRoot)
+    {
+        var paths = new WorkspacePaths(Path.Combine(dataRoot, "legacy-frozen-run-repair"));
+        var batchId = Guid.NewGuid().ToString("N");
+        var legacyRootRelativePath = $"Generated/GAssetForge/Runs/{batchId}";
+        var legacyRootFullPath = ResolveArtifactPath(paths.AssetDirectory, legacyRootRelativePath);
+        var markerPath = Path.Combine(legacyRootFullPath, "00-manifest", "legacy-marker.txt");
+        Directory.CreateDirectory(Path.GetDirectoryName(markerPath)!);
+        File.WriteAllText(markerPath, "frozen legacy run");
+
+        var repaired = new GenerationRunWorkspaceService().OpenOrRepair(
+            batchId,
+            paths.AssetDirectory,
+            legacyRootRelativePath);
+
+        Equal(legacyRootRelativePath, repaired.RootRelativePath,
+            "旧 Generated/GAssetForge/Runs/<batch> 冻结路径必须保持原值");
+        Equal(legacyRootFullPath, repaired.RootFullPath,
+            "OpenOrRepair 必须原地打开旧 Run");
+        True(File.Exists(markerPath),
+            "原地修复不得覆盖旧 Run 中已存在的审计文件");
+        foreach (var requiredDirectory in new[]
+                 {
+                     "00-manifest",
+                     "10-style-reference",
+                     "20-prompts",
+                     "25-region-edit",
+                     "30-model-output",
+                     "35-normalized-input",
+                     "40-background-removed",
+                     "50-final",
+                     "90-diagnostics"
+                 })
+        {
+            True(Directory.Exists(Path.Combine(legacyRootFullPath, requiredDirectory)),
+                $"旧 Run 原地修复后应补齐 {requiredDirectory}");
+        }
+
+        var canonicalCopy = ResolveArtifactPath(
+            paths.AssetDirectory,
+            ProjectAssetLayout.BuildAiRunRelativePath(
+                ProjectAssetLayout.GeneralCategory,
+                batchId));
+        False(Directory.Exists(canonicalCopy),
+            "旧冻结 Run 原地修复时不得创建 AI/General 副本");
+    }
+
+    private static async Task RetryReferenceMirroringRejectsRunJunctionAsync(string dataRoot)
+    {
+        var paths = new WorkspacePaths(Path.Combine(dataRoot, "retry-reference-run-junction"));
+        var parentBatchId = Guid.NewGuid().ToString("N");
+        var parentRootRelativePath = $"Generated/GAssetForge/Runs/{parentBatchId}";
+        var parentRoot = ResolveArtifactPath(paths.AssetDirectory, parentRootRelativePath);
+        Directory.CreateDirectory(parentRoot);
+        var outsideReferenceRoot = Path.Combine(dataRoot, "outside-run-references");
+        Directory.CreateDirectory(outsideReferenceRoot);
+        File.WriteAllText(Path.Combine(outsideReferenceRoot, "outside.png"), "not a model reference");
+        var linkedReferenceRoot = Path.Combine(parentRoot, "10-style-reference");
+        try
+        {
+            Directory.CreateSymbolicLink(linkedReferenceRoot, outsideReferenceRoot);
+        }
+        catch (Exception exception) when (exception is
+            UnauthorizedAccessException or
+            IOException or
+            PlatformNotSupportedException or
+            NotSupportedException)
+        {
+            return;
+        }
+
+        try
+        {
+            var service = new GenerationRunWorkspaceService();
+            var retry = service.Prepare(
+                Guid.NewGuid().ToString("N"),
+                paths.AssetDirectory,
+                ProjectAssetLayout.TilemapCategory);
+            var previousDelivery = new GenerationDeliveryPlan
+            {
+                AssetRoot = paths.AssetDirectory,
+                Workspace = new GenerationRunWorkspacePlan
+                {
+                    RunId = parentBatchId,
+                    RootPath = parentRootRelativePath
+                }
+            };
+
+            await ThrowsAsync<InvalidDataException>(
+                () => service.MirrorExistingRunReferencesAsync(retry, previousDelivery),
+                "重试参考复制必须拒绝冻结 Run 中经过目录联接的 reference 根");
+        }
+        finally
+        {
+            if (Directory.Exists(linkedReferenceRoot))
+            {
+                Directory.Delete(linkedReferenceRoot);
             }
         }
     }
@@ -593,19 +697,32 @@ internal static class GeneratedOutputSubmissionSmokeTests
         string dataRoot,
         JsonGenerationTaskStore store)
     {
-        var assetRoot = Path.Combine(dataRoot, "Assets");
-        Directory.CreateDirectory(assetRoot);
+        var paths = new WorkspacePaths(dataRoot);
+        var assetRoot = paths.AssetDirectory;
         var batchId = Guid.NewGuid().ToString("N");
         var itemId = Guid.NewGuid().ToString("N");
         var suggestedBaseName = "opaque-direct-submit-v001";
         var workspaceService = new GenerationRunWorkspaceService();
-        var run = workspaceService.Prepare(batchId, assetRoot);
+        var run = workspaceService.Prepare(
+            batchId,
+            assetRoot,
+            ProjectAssetLayout.TilemapCategory);
+        Equal(
+            ProjectAssetLayout.BuildAiRunRelativePath(ProjectAssetLayout.TilemapCategory, batchId),
+            run.RootRelativePath,
+            "无背景剔除夹具 Run 应落入 AI/Tilemap/<batch>");
         var workspace = workspaceService.CreateOutputPlan(run, itemId, suggestedBaseName);
-        var targetPath =
-            $"{run.RootRelativePath}/50-final/{itemId}/{suggestedBaseName}.png";
-        var outputDirectory = Path.GetDirectoryName(
-                targetPath.Replace('/', Path.DirectorySeparatorChar))
-            ?.Replace('\\', '/') ?? string.Empty;
+        var outputDirectory = ProjectAssetLayout.BuildFinalBatchRelativePath(
+            ProjectAssetLayout.TilemapCategory,
+            batchId);
+        var finalBatchDirectory = Path.Combine(
+            paths.FinalAssetDirectory,
+            ProjectAssetLayout.TilemapCategory,
+            batchId);
+        Directory.CreateDirectory(finalBatchDirectory);
+        Equal(finalBatchDirectory, ResolveArtifactPath(assetRoot, outputDirectory),
+            "无背景剔除夹具应使用 WorkspacePaths.FinalAssetDirectory");
+        var targetPath = $"{outputDirectory}/{suggestedBaseName}.png";
         var constraints = MaterialGenerationConstraintComposer.Compose(
             new GenerationConstraintPackage
             {
@@ -670,20 +787,33 @@ internal static class GeneratedOutputSubmissionSmokeTests
         double? diamondAngle = null,
         double? rotationAngle = null)
     {
-        var assetRoot = Path.Combine(dataRoot, "Assets");
-        Directory.CreateDirectory(assetRoot);
+        var paths = new WorkspacePaths(dataRoot);
+        var assetRoot = paths.AssetDirectory;
         var batchId = Guid.NewGuid().ToString("N");
         var itemId = Guid.NewGuid().ToString("N");
         var suggestedBaseName = "tilemap-submit-output-v001";
         var workspaceService = new GenerationRunWorkspaceService();
-        var run = workspaceService.Prepare(batchId, assetRoot);
+        var run = workspaceService.Prepare(
+            batchId,
+            assetRoot,
+            ProjectAssetLayout.TilemapCategory);
+        Equal(
+            ProjectAssetLayout.BuildAiRunRelativePath(ProjectAssetLayout.TilemapCategory, batchId),
+            run.RootRelativePath,
+            "submit_generation_output 夹具 Run 应落入 AI/Tilemap/<batch>");
         var workspace = workspaceService.CreateOutputPlan(run, itemId, suggestedBaseName);
         var normalizedPath = workspaceService.CreateNormalizedPath(run, itemId, suggestedBaseName);
-        var targetPath =
-            $"{run.RootRelativePath}/50-final/{itemId}/{suggestedBaseName}.png";
-        var outputDirectory = Path.GetDirectoryName(
-                targetPath.Replace('/', Path.DirectorySeparatorChar))
-            ?.Replace('\\', '/') ?? string.Empty;
+        var outputDirectory = ProjectAssetLayout.BuildFinalBatchRelativePath(
+            ProjectAssetLayout.TilemapCategory,
+            batchId);
+        var finalBatchDirectory = Path.Combine(
+            paths.FinalAssetDirectory,
+            ProjectAssetLayout.TilemapCategory,
+            batchId);
+        Directory.CreateDirectory(finalBatchDirectory);
+        Equal(finalBatchDirectory, ResolveArtifactPath(assetRoot, outputDirectory),
+            "submit_generation_output 夹具应使用 WorkspacePaths.FinalAssetDirectory");
+        var targetPath = $"{outputDirectory}/{suggestedBaseName}.png";
         var basePackage = TilemapConstraintPackageBuilder.Build(new TilemapGenerationConstraintInput
         {
             ArtWidth = OutputSize,

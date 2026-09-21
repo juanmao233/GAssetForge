@@ -121,12 +121,91 @@ public sealed class AssetRootService(WorkspacePaths paths)
         }
     }
 
+    /// <summary>
+    /// Rejects any existing symbolic link, junction or reparse point between a trusted root and
+    /// a candidate. The candidate may be a file, directory, or a not-yet-created descendant.
+    /// </summary>
+    public static void EnsureExistingPathSegmentsAreNotReparsePoints(
+        string trustedRoot,
+        string candidatePath)
+    {
+        var root = Normalize(trustedRoot);
+        var candidate = Path.GetFullPath(candidatePath);
+        if (!Directory.Exists(root) || !IsWithinRoot(root, candidate))
+        {
+            throw new InvalidDataException("路径不在现有受信根目录内。");
+        }
+
+        EnsureNotReparsePoint(root);
+        var segments = Path.GetRelativePath(root, candidate).Split(
+            new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+            StringSplitOptions.RemoveEmptyEntries);
+        var current = root;
+        for (var index = 0; index < segments.Length; index++)
+        {
+            current = Path.Combine(current, segments[index]);
+            var isDirectory = Directory.Exists(current);
+            var isFile = File.Exists(current);
+            if (!isDirectory && !isFile)
+            {
+                break;
+            }
+
+            EnsureNotReparsePoint(current);
+            if (isFile && index < segments.Length - 1)
+            {
+                throw new IOException($"路径中间段被文件占用：{current}");
+            }
+        }
+    }
+
+    /// <summary>
+    /// Creates a directory below a trusted root one segment at a time while rejecting files and
+    /// reparse points. This prevents lexical in-root paths from escaping through a junction.
+    /// </summary>
+    public static void EnsureManagedDirectory(string trustedRoot, string targetDirectory)
+    {
+        var root = Normalize(trustedRoot);
+        var target = Normalize(targetDirectory);
+        if (!Directory.Exists(root) || !IsWithinRoot(root, target))
+        {
+            throw new InvalidDataException("受管目录试图离开现有受信根目录。");
+        }
+
+        EnsureNotReparsePoint(root);
+        if (PathEquals(root, target))
+        {
+            return;
+        }
+
+        var current = root;
+        foreach (var segment in Path.GetRelativePath(root, target).Split(
+                     new[] { Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar },
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            current = Path.Combine(current, segment);
+            if (File.Exists(current))
+            {
+                throw new IOException($"受管目录路径被文件占用：{current}");
+            }
+
+            if (!Directory.Exists(current))
+            {
+                Directory.CreateDirectory(current);
+            }
+
+            EnsureNotReparsePoint(current);
+        }
+    }
+
     private string EnsureDefaultRoot()
     {
         try
         {
             Directory.CreateDirectory(paths.AssetDirectory);
-            Directory.CreateDirectory(paths.GeneratedAssetDirectory);
+            Directory.CreateDirectory(paths.AiAssetDirectory);
+            Directory.CreateDirectory(paths.FinalAssetDirectory);
+            Directory.CreateDirectory(paths.UserAssetDirectory);
             return Normalize(paths.AssetDirectory);
         }
         catch (Exception exception) when (exception is
@@ -141,4 +220,12 @@ public sealed class AssetRootService(WorkspacePaths paths)
 
     private static string Normalize(string path) =>
         Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+
+    private static void EnsureNotReparsePoint(string path)
+    {
+        if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
+        {
+            throw new InvalidDataException($"受管路径不能经过符号链接或目录联接：{path}");
+        }
+    }
 }

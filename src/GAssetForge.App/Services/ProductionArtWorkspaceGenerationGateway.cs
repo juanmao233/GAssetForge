@@ -1,6 +1,7 @@
 using GAssetForge.App.Services.AgentRuntime;
 using GAssetForge.App.ViewModels;
 using GAssetForge.Core.Generation;
+using GAssetForge.Core.Projects;
 using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.IO;
@@ -29,6 +30,7 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
     private readonly WorkbenchConsoleService _console;
     private readonly string _dataRoot;
     private readonly SemaphoreSlim _publicationGate = new(1, 1);
+    private readonly SemaphoreSlim _retryPublicationGate = new(1, 1);
     private readonly ConcurrentDictionary<string, PendingGeneration> _pendingByBatch =
         new(StringComparer.Ordinal);
     private readonly object _activeTurnLock = new();
@@ -76,6 +78,9 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
         : $"Agent 尚未达到可执行状态：{_agentConnection.StatusText}";
 
     public event EventHandler? StateChanged;
+
+    public event EventHandler<ArtWorkspaceDeferredGenerationCompletedEventArgs>?
+        DeferredGenerationCompleted;
 
     public async Task<ArtWorkspaceGenerationResult> GenerateAsync(
         ArtWorkspaceGenerationRequest frozenRequest,
@@ -130,7 +135,10 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
                 Percentage = 18d
             });
 
-            runWorkspace = _runWorkspaceService.Prepare(batchId, request.AssetRoot);
+            runWorkspace = _runWorkspaceService.Prepare(
+                batchId,
+                request.AssetRoot,
+                ProjectAssetLayout.ArtWorkspaceCategory);
             await _runWorkspaceService.MirrorStyleReferencesAsync(
                     runWorkspace,
                     referenceSnapshot,
@@ -142,7 +150,7 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
                 batchId);
             var finalDirectoryPath = ResolveAssetPath(request.AssetRoot, finalOutputDirectory);
             EnsureDirectoryPathIsSafe(request.AssetRoot, finalDirectoryPath);
-            Directory.CreateDirectory(finalDirectoryPath);
+            AssetRootService.EnsureManagedDirectory(request.AssetRoot, finalDirectoryPath);
 
             var suggestedBaseName =
                 $"art_workspace_{batchId[..8]}_{request.RequestId[..8]}";
@@ -413,10 +421,12 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
                     });
                     break;
                 case GenerationBatchDispatchEnqueueResult.QueueStopped:
+                    const string queueStoppedMessage =
+                        "Agent 调度队列已经停止；原持久任务与 owner 保持等待，恢复调度后续派同一 taskId。";
                     progress?.Report(new ArtWorkspaceGenerationProgress
                     {
                         State = "interrupted",
-                        Message = "Agent 调度队列已经停止；原持久任务与 owner 保持等待，恢复调度后续派同一 taskId。",
+                        Message = queueStoppedMessage,
                         AgentDescription = BuildFrozenRequestDescription(request, targetFullPath),
                         Percentage = 35d
                     });
@@ -424,6 +434,7 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
                         "ArtWorkspace",
                         $"美术工作区批次 {batchId[..8]} 暂未进入已停止的 Agent 队列；" +
                         "原 taskId 与 owner 已保留，不创建替代任务。 ");
+                    DetachUiWaiter(pending, queueStoppedMessage);
                     break;
                 default:
                     throw new ArgumentOutOfRangeException(nameof(enqueueResult), enqueueResult, null);
@@ -454,6 +465,7 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
                     Percentage = 35d
                 });
                 _console.WriteError("ArtWorkspace", interruptedMessage, exception);
+                DetachUiWaiter(pending, interruptedMessage);
                 return await pending.Completion.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
             }
 
@@ -564,6 +576,7 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
                 "ArtWorkspace",
                 $"美术工作区批次 {pending.BatchId[..8]} 已中断但仍保留 owner；" +
                 "等待 Agent 恢复后续派原 taskId，不创建替代任务。");
+            DetachUiWaiter(pending, interruptedMessage);
             return;
         }
 
@@ -608,10 +621,11 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
             var message = task?.Status switch
             {
                 GenerationTaskStatus.Failed =>
-                    task.FailureMessage ?? reconciliation.FailureDetail ?? "图片生成任务失败。",
+                    DescribeFailedTask(task, reconciliation.FailureDetail),
                 _ => reconciliation.FailureDetail ?? completion.FailureMessage ??
                      "Agent Turn 已结束，但没有得到可验证的最终图片。"
             };
+            message += $" 诊断编号：批次 {pending.BatchId} / 任务 {pending.TaskId}。";
             result = new ArtWorkspaceGenerationResult
             {
                 IsSuccess = false,
@@ -624,16 +638,74 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
             {
                 State = "failed",
                 Message = message,
-                AgentDescription = agentDescription,
+                AgentDescription = message,
                 Percentage = 100d
             });
         }
 
-        pending.TryComplete(result);
+        var completedOriginalWaiter = pending.TryComplete(result);
         _pendingByBatch.TryRemove(pending.BatchId, out _);
+        if (!completedOriginalWaiter && pending.UiWaiterWasDetached && pending.AcceptResult)
+        {
+            RaiseDeferredGenerationCompleted(pending, result);
+        }
+    }
+
+    internal static string DescribeFailedTask(GenerationTask task, string? fallbackDetail = null)
+    {
+        ArgumentNullException.ThrowIfNull(task);
+        var originalError = string.IsNullOrWhiteSpace(task.FailureMessage)
+            ? fallbackDetail ?? "Agent 未提供失败详情。"
+            : task.FailureMessage;
+        var code = task.FailureCode ?? "generation_failed";
+        var stage = task.FailureStage ?? "generation";
+        var isImageRequest = string.Equals(code, "image_generation_failed", StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(code, "image_delivery_fallback_failed", StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(stage, "image_generation", StringComparison.OrdinalIgnoreCase) ||
+                             string.Equals(stage, "image.cli_fallback", StringComparison.OrdinalIgnoreCase);
+        var missingImageApiKey = originalError.Contains("OPENAI_API_KEY", StringComparison.OrdinalIgnoreCase) &&
+                                 (originalError.Contains("未配置", StringComparison.Ordinal) ||
+                                  originalError.Contains("missing", StringComparison.OrdinalIgnoreCase) ||
+                                  originalError.Contains("not configured", StringComparison.OrdinalIgnoreCase) ||
+                                  originalError.Contains("not set", StringComparison.OrdinalIgnoreCase));
+        var isImageNetworkFailure = isImageRequest &&
+            (originalError.Contains("network error", StringComparison.OrdinalIgnoreCase) ||
+             originalError.Contains("error sending request", StringComparison.OrdinalIgnoreCase) ||
+             originalError.Contains("connection reset", StringComparison.OrdinalIgnoreCase) ||
+             originalError.Contains("connection refused", StringComparison.OrdinalIgnoreCase) ||
+             originalError.Contains("timed out", StringComparison.OrdinalIgnoreCase) ||
+             originalError.Contains("timeout", StringComparison.OrdinalIgnoreCase));
+        var explanation = missingImageApiKey
+            ? "图片生成备用通道未配置 OPENAI_API_KEY，当前不可用。" +
+              "请先配置 Agent 子进程的 Image API 环境，再手动重新发送指令。"
+            : isImageNetworkFailure
+                ? "图片生成服务网络连接失败，任务未交付可验证图片。" +
+                  "请检查 Agent 的网络和代理连通性，再手动重新发送指令。"
+                : isImageRequest
+                    ? "图片生成或交付失败。请根据原始错误处理生成环境后，手动重新发送指令。"
+                    : "美术任务已失败。请根据失败分类和原始错误处理后，手动重新发送指令。";
+        return $"{explanation}{Environment.NewLine}" +
+               $"失败分类：{code} · 阶段：{stage}{Environment.NewLine}" +
+               $"原始错误：{originalError}";
     }
 
     private async Task<bool> TryScheduleRegionEditRetryAsync(
+        GenerationTask failedTask,
+        PendingGeneration pending)
+    {
+        await _retryPublicationGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            return pending.AcceptResult &&
+                await TryScheduleRegionEditRetryCoreAsync(failedTask, pending).ConfigureAwait(false);
+        }
+        finally
+        {
+            _retryPublicationGate.Release();
+        }
+    }
+
+    private async Task<bool> TryScheduleRegionEditRetryCoreAsync(
         GenerationTask failedTask,
         PendingGeneration pending)
     {
@@ -646,6 +718,7 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
                 "image_delivery_fallback_failed",
                 StringComparison.Ordinal);
         if (failedTask.Status != GenerationTaskStatus.Failed ||
+            failedTask.DispatchIntent?.Requested == false ||
             failedTask.FailureRetryable != true ||
             !retryableRegionEditFailure ||
             GenerationFailureClassifier.IsAgentInfrastructureFailureCode(failedTask.FailureCode) ||
@@ -680,7 +753,10 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
         string normalizedPath;
         try
         {
-            runWorkspace = _runWorkspaceService.Prepare(retryBatchId, previousDelivery.AssetRoot);
+            runWorkspace = _runWorkspaceService.Prepare(
+                retryBatchId,
+                previousDelivery.AssetRoot,
+                ProjectAssetLayout.ArtWorkspaceCategory);
             await _runWorkspaceService.MirrorExistingRunReferencesAsync(
                     runWorkspace,
                     previousDelivery,
@@ -693,7 +769,7 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
                 previousDelivery.AssetRoot,
                 finalOutputDirectory);
             EnsureDirectoryPathIsSafe(previousDelivery.AssetRoot, finalDirectoryPath);
-            Directory.CreateDirectory(finalDirectoryPath);
+            AssetRootService.EnsureManagedDirectory(previousDelivery.AssetRoot, finalDirectoryPath);
             var targetRelativePath = $"{finalOutputDirectory}/{suggestedBaseName}.png";
             var targetFullPath = ResolveAssetPath(previousDelivery.AssetRoot, targetRelativePath);
             if (File.Exists(targetFullPath) || Directory.Exists(targetFullPath))
@@ -865,6 +941,7 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
                 Percentage = 35d
             });
             _console.WriteError("ArtWorkspace", interrupted, exception);
+            DetachUiWaiter(pending, interrupted);
             return true;
         }
 
@@ -892,13 +969,15 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
                 });
                 break;
             case GenerationBatchDispatchEnqueueResult.QueueStopped:
+                const string stoppedRetryMessage =
+                    "Agent 调度队列已经停止；region-edit retry child 与 owner 保留，可继续发送其它指令。";
                 pending.Progress?.Report(new ArtWorkspaceGenerationProgress
                 {
                     State = "interrupted",
-                    Message =
-                        "Agent 调度队列已经停止；region-edit retry child、owner 与原 UI waiter 均保留。",
+                    Message = stoppedRetryMessage,
                     Percentage = 35d
                 });
+                DetachUiWaiter(pending, stoppedRetryMessage);
                 break;
             default:
                 throw new ArgumentOutOfRangeException(nameof(enqueueResult), enqueueResult, null);
@@ -1022,14 +1101,19 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
             }
         }
 
-        pending.TryComplete(new ArtWorkspaceGenerationResult
+        var result = new ArtWorkspaceGenerationResult
         {
             IsSuccess = false,
             AgentDescription = pending.LastAgentMessage ?? string.Empty,
             ErrorMessage = message,
             BatchId = pending.BatchId,
             TaskId = pending.TaskId
-        });
+        };
+        var completedOriginalWaiter = pending.TryComplete(result);
+        if (!completedOriginalWaiter && pending.UiWaiterWasDetached && pending.AcceptResult)
+        {
+            RaiseDeferredGenerationCompleted(pending, result);
+        }
     }
 
     internal void ReportDispatchInterrupted(string batchId, string message)
@@ -1059,7 +1143,45 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
         _console.WriteWarning(
             "ArtWorkspace",
             $"美术工作区批次 {pending.BatchId[..8]} 已暂停；" +
-            "原持久任务、owner 与 UI waiter 均保留，等待续派同一 taskId。 " + message);
+            "原持久任务与 owner 保留，当前对话已释放，可续派同一 taskId。 " + message);
+        DetachUiWaiter(pending, message);
+    }
+
+    private static void DetachUiWaiter(PendingGeneration pending, string message)
+    {
+        pending.DetachUiWaiter(new ArtWorkspaceGenerationResult
+        {
+            IsSuccess = false,
+            IsDeferred = true,
+            AgentDescription = pending.LastAgentMessage ?? string.Empty,
+            ErrorMessage = message,
+            BatchId = pending.BatchId,
+            TaskId = pending.TaskId
+        });
+    }
+
+    private void RaiseDeferredGenerationCompleted(
+        PendingGeneration pending,
+        ArtWorkspaceGenerationResult result)
+    {
+        if (!pending.TryMarkDeferredNotificationSent())
+        {
+            return;
+        }
+
+        try
+        {
+            DeferredGenerationCompleted?.Invoke(
+                this,
+                new ArtWorkspaceDeferredGenerationCompletedEventArgs(pending.Request, result));
+        }
+        catch (Exception exception)
+        {
+            _console.WriteError(
+                "ArtWorkspace",
+                $"后台美术任务 {pending.TaskId[..8]} 已结束，但通知当前工作区失败：{exception.Message}",
+                exception);
+        }
     }
 
     internal void CancelProjectWaiters(string projectRoot, string reason)
@@ -1082,6 +1204,16 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
             });
             _pendingByBatch.TryRemove(pending.BatchId, out _);
         }
+    }
+
+    internal async Task WaitForPublicationIdleAsync(CancellationToken cancellationToken)
+    {
+        // Reset first cancels the UI request and invalidates pending owners. Drain both initial
+        // publication and any already-started retry before snapshotting durable tasks to suspend.
+        await _publicationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        _publicationGate.Release();
+        await _retryPublicationGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        _retryPublicationGate.Release();
     }
 
     private void OnAgentConnectionPropertyChanged(object? sender, PropertyChangedEventArgs e)
@@ -1159,8 +1291,15 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
         var frame = request.OutputFrame ?? throw new ArgumentException("输出框快照不能为空。", nameof(request));
         var outputRelativeDirectory = NormalizeOutputDirectory(frame.OutputRelativeDirectory);
         var outputDirectoryPath = ResolveAssetPath(assetRoot, outputRelativeDirectory);
+        var finalRoot = ProjectAssetLayout.GetFinalRootFullPath(assetRoot);
+        if (!AssetRootService.IsWithinRoot(finalRoot, outputDirectoryPath))
+        {
+            throw new InvalidDataException("美术工作区最终产物分类必须位于 Assets/Final 内。 ");
+        }
+
         if (!string.IsNullOrWhiteSpace(frame.OutputDirectoryPath) &&
-            !AssetRootService.PathEquals(frame.OutputDirectoryPath, outputDirectoryPath))
+            !AssetRootService.PathEquals(frame.OutputDirectoryPath, outputDirectoryPath) &&
+            !IsLegacyArtWorkspaceOutputPath(assetRoot, frame.OutputDirectoryPath))
         {
             throw new InvalidDataException("输出框绝对目录与冻结的 Assets 相对目录不一致。 ");
         }
@@ -1385,7 +1524,7 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
         var normalized = (value ?? string.Empty).Trim().Replace('\\', '/').Trim('/');
         if (string.Equals(normalized, "Assets", StringComparison.OrdinalIgnoreCase))
         {
-            return string.Empty;
+            return ProjectAssetLayout.FinalDirectoryName;
         }
 
         if (normalized.StartsWith("Assets/", StringComparison.OrdinalIgnoreCase))
@@ -1393,13 +1532,55 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
             normalized = normalized["Assets/".Length..];
         }
 
-        return string.IsNullOrWhiteSpace(normalized)
-            ? "Generated/ArtWorkspace"
-            : GenerationInputValidator.NormalizeRelativeAssetPath(normalized);
+        if (string.IsNullOrWhiteSpace(normalized) ||
+            string.Equals(normalized, "Generated/ArtWorkspace", StringComparison.OrdinalIgnoreCase))
+        {
+            return ProjectAssetLayout.FinalDirectoryName;
+        }
+
+        const string legacyPrefix = "Generated/ArtWorkspace/";
+        if (normalized.StartsWith(legacyPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            normalized = $"{ProjectAssetLayout.FinalDirectoryName}/{normalized[legacyPrefix.Length..]}";
+        }
+
+        var canonical = GenerationInputValidator.NormalizeRelativeAssetPath(normalized);
+        if (!string.Equals(canonical, ProjectAssetLayout.FinalDirectoryName, StringComparison.OrdinalIgnoreCase) &&
+            !canonical.StartsWith($"{ProjectAssetLayout.FinalDirectoryName}/", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new InvalidDataException("美术工作区输出目录必须位于 Assets/Final 内。 ");
+        }
+
+        return canonical;
     }
 
-    private static string BuildFinalOutputDirectory(string outputDirectory, string batchId) =>
-        $"{outputDirectory}/{batchId}/Final";
+    private static string BuildFinalOutputDirectory(string outputDirectory, string batchId)
+    {
+        var normalized = NormalizeOutputDirectory(outputDirectory);
+        var collection = string.Equals(
+            normalized,
+            ProjectAssetLayout.FinalDirectoryName,
+            StringComparison.OrdinalIgnoreCase)
+            ? null
+            : normalized[(ProjectAssetLayout.FinalDirectoryName.Length + 1)..];
+        return ProjectAssetLayout.BuildFinalBatchRelativePath(
+            ProjectAssetLayout.ArtWorkspaceCategory,
+            batchId,
+            collection);
+    }
+
+    private static bool IsLegacyArtWorkspaceOutputPath(string assetRoot, string candidate)
+    {
+        try
+        {
+            var legacyRoot = Path.GetFullPath(Path.Combine(assetRoot, "Generated", "ArtWorkspace"));
+            return AssetRootService.IsWithinRoot(legacyRoot, Path.GetFullPath(candidate));
+        }
+        catch (Exception exception) when (exception is ArgumentException or NotSupportedException or PathTooLongException)
+        {
+            return false;
+        }
+    }
 
     private static string NormalizeExistingDirectory(string value, string label)
     {
@@ -1459,7 +1640,7 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
 
     private static void EnsureDirectoryPathIsSafe(string rootPath, string targetDirectory)
     {
-        EnsureExistingSegmentsAreNotReparsePoints(rootPath, targetDirectory);
+        AssetRootService.EnsureExistingPathSegmentsAreNotReparsePoints(rootPath, targetDirectory);
         if (File.Exists(targetDirectory))
         {
             throw new IOException($"输出目录路径被文件占用：{targetDirectory}");
@@ -1621,6 +1802,12 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
 
         public bool AcceptResult { get; set; } = true;
 
+        public bool UiWaiterWasDetached => Volatile.Read(ref _uiWaiterWasDetached) != 0;
+
+        private int _uiWaiterWasDetached;
+
+        private int _deferredNotificationSent;
+
         public void Rebind(
             string nextBatchId,
             string nextTaskId,
@@ -1636,5 +1823,14 @@ internal sealed class ProductionArtWorkspaceGenerationGateway : IArtWorkspaceGen
 
         public bool TryComplete(ArtWorkspaceGenerationResult result) =>
             Completion.TrySetResult(result);
+
+        public bool DetachUiWaiter(ArtWorkspaceGenerationResult result)
+        {
+            Interlocked.Exchange(ref _uiWaiterWasDetached, 1);
+            return Completion.TrySetResult(result);
+        }
+
+        public bool TryMarkDeferredNotificationSent() =>
+            Interlocked.Exchange(ref _deferredNotificationSent, 1) == 0;
     }
 }

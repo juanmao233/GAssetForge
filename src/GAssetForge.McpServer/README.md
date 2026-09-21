@@ -162,9 +162,10 @@ HTTP 默认端口为 `43120`，`--expected-agent` 支持 `codex` 与 `opencode`�
 精确画幅、相机方位/仰角/滚转、物距、焦距、投影派生数据、生成角度描述和共用背景合同。Agent 对每个 task 只执行
 `claim_generation_task → 真实内置 ImageGen → savedPath 有值时 submit_generation_output / savedPath 为空时 run_image_delivery_fallback`；任务间并发由 Agent Host 默认调度，
 不再读取页面并行数。模型返回的 `sourcePath` 可以位于 Codex 临时目录，服务会原样归档到当前项目
-`Assets/Generated/GAssetForge/Runs/<batchId>/30-model-output`，再写入 `35-normalized-input`、
-`40-background-removed` 和冻结的最终 `targetPaths`，并自动完成任务登记。Assets 根作为输出位置时，正式结果分别
-位于 `Generated/Tilemap/<batchId>/Final` 或 `Generated/Icon/<batchId>/Final`。
+`Assets/AI/<Tilemap|Icon>/<batchId>/30-model-output`，再写入 `35-normalized-input`、
+`40-background-removed` 和冻结的最终 `targetPaths`，并自动完成任务登记。默认正式结果分别位于
+`Final/Tilemap/<batchId>` 或 `Final/Icon/<batchId>`；用户选择 Final 下的集合时，集合目录位于业务分类之前。
+旧 `Assets/Generated` 与任务中已冻结的 workspace/target path 继续原地恢复，不迁移或重写。
 
 Art Workspace 的单区域 token 使用显式 `region-edit` 合同。`claim_generation_task` 返回唯一 base、mask、
 像素范围和保留策略；Agent 直接调用 `run_image_delivery_fallback`，Harness 固定执行

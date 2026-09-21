@@ -103,7 +103,7 @@ public sealed class ArtWorkspaceOutputFrame
 
     public string BackgroundHex { get; set; } = "#20242C";
 
-    public string OutputRelativeDirectory { get; set; } = "Assets/Generated/ArtWorkspace";
+    public string OutputRelativeDirectory { get; set; } = "Assets/Final";
 }
 
 public sealed class ArtWorkspaceManagedAsset

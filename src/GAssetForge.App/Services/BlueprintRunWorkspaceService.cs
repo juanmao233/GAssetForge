@@ -156,8 +156,11 @@ public sealed class BlueprintRunWorkspaceService : IBlueprintExecutionDispatcher
             throw new InvalidDataException($"蓝图运行只能发布到有效的 GAssetForge 项目：{reason}");
         }
 
+        // Legacy projects may predate the canonical AI root. Create only the empty managed
+        // container after the project has passed validation; historical Generated data stays put.
+        EnsureManagedDirectory(projectPaths.AssetDirectory, projectPaths.AiAssetDirectory);
         return new RunStorageTarget(
-            projectPaths.GeneratedAssetDirectory,
+            projectPaths.AiAssetDirectory,
             projectPaths.BlueprintRunDirectory);
     }
 

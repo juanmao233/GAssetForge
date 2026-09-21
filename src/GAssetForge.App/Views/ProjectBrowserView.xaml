@@ -152,8 +152,8 @@
                                             Command="{Binding RefreshCommand}"
                                             Style="{StaticResource ProjectToolbarButtonStyle}" />
                                     <Button x:Name="CreateAssetFolderButton"
-                                            Content="新建文件夹"
-                                            ToolTip="在当前目录创建文件夹"
+                                            Content="新建用户文件夹"
+                                            ToolTip="在 User 内容区创建文件夹；浏览 AI/Final 时会自动转到 User"
                                             Command="{Binding CreateFolderCommand}"
                                             Style="{StaticResource ProjectToolbarButtonStyle}" />
                                     <Button x:Name="OpenAssetFolderButton"
@@ -362,7 +362,7 @@
                                            Foreground="{DynamicResource App.AccentBrush}"
                                            FontSize="10"
                                            FontWeight="SemiBold"
-                                           Text="● 输出" />
+                                           Text="● 目录" />
                                 <TextBlock VerticalAlignment="Center"
                                            Foreground="{DynamicResource App.TextSecondaryBrush}"
                                            FontSize="10"

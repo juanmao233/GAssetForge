@@ -98,6 +98,12 @@ public sealed record ArtWorkspaceGenerationResult
 {
     public bool IsSuccess { get; init; }
 
+    /// <summary>
+    /// The current UI wait ended after dispatch was interrupted, while the durable task and frozen
+    /// target remain owned by the gateway for a later resume. This is not a terminal task failure.
+    /// </summary>
+    public bool IsDeferred { get; init; }
+
     public string AgentDescription { get; init; } = string.Empty;
 
     public string[] OutputPaths { get; init; } = [];
@@ -107,6 +113,17 @@ public sealed record ArtWorkspaceGenerationResult
     public string? BatchId { get; init; }
 
     public string? TaskId { get; init; }
+}
+
+public sealed class ArtWorkspaceDeferredGenerationCompletedEventArgs(
+    ArtWorkspaceGenerationRequest request,
+    ArtWorkspaceGenerationResult result) : EventArgs
+{
+    public ArtWorkspaceGenerationRequest Request { get; } =
+        request ?? throw new ArgumentNullException(nameof(request));
+
+    public ArtWorkspaceGenerationResult Result { get; } =
+        result ?? throw new ArgumentNullException(nameof(result));
 }
 
 public interface IArtWorkspaceGenerationGateway
@@ -120,6 +137,12 @@ public interface IArtWorkspaceGenerationGateway
     string StatusText { get; }
 
     event EventHandler? StateChanged;
+
+    /// <summary>
+    /// Raised when a durable task whose original UI waiter was released after an interruption later
+    /// reaches a real terminal state in the same application process.
+    /// </summary>
+    event EventHandler<ArtWorkspaceDeferredGenerationCompletedEventArgs>? DeferredGenerationCompleted;
 
     Task<ArtWorkspaceGenerationResult> GenerateAsync(
         ArtWorkspaceGenerationRequest frozenRequest,

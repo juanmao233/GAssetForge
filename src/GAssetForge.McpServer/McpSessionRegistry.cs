@@ -1,10 +1,12 @@
 using System.Collections.Concurrent;
+using GAssetForge.Core.Generation;
 
 namespace GAssetForge.McpServer;
 
 internal sealed class McpSessionRegistry
 {
-    public static readonly TimeSpan DefaultSessionTtl = TimeSpan.FromSeconds(90);
+    public static readonly TimeSpan DefaultSessionTtl = TimeSpan.FromSeconds(
+        GenerationMcpRuntimePolicy.HttpSessionIdleTimeoutSeconds);
 
     private readonly ConcurrentDictionary<string, McpSessionState> _sessions =
         new(StringComparer.Ordinal);

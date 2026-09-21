@@ -21,9 +21,13 @@ public enum CodexAgentAuthenticationState
 
 public sealed class CodexAgentRuntimeService : IAsyncDisposable
 {
-    private static readonly TimeSpan McpReadyTimeout = TimeSpan.FromSeconds(20);
+    private readonly TimeSpan _mcpReadyTimeout;
+    private readonly AgentMcpReadinessTracker _mcpReadiness = new();
     private readonly SemaphoreSlim _sessionGate = new(1, 1);
     private readonly object _configurationLock = new();
+    private readonly object _operationLock = new();
+    private CancellationTokenSource _stopSignal = new();
+    private int _stopRequests;
     private readonly Func<IAgentSessionTransport> _appServerFactory;
     private readonly Func<IAgentSessionTransport> _execFactory;
     private readonly Func<string> _pathEnvironmentProvider;
@@ -34,7 +38,6 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
     private Uri? _sessionMcpEndpoint;
     private string? _sessionEnvironmentFingerprint;
     private string? _sessionSecret;
-    private TaskCompletionSource<bool>? _mcpReadyCompletion;
     private bool _disposed;
 
     public CodexAgentRuntimeService(string codexExecutablePath = "codex")
@@ -50,7 +53,8 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
         Func<IAgentSessionTransport> appServerFactory,
         Func<IAgentSessionTransport> execFactory,
         Func<string>? pathEnvironmentProvider = null,
-        Func<IReadOnlyDictionary<string, string?>>? environmentVariablesProvider = null)
+        Func<IReadOnlyDictionary<string, string?>>? environmentVariablesProvider = null,
+        TimeSpan? mcpReadyTimeout = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(codexExecutablePath);
         _codexExecutablePath = codexExecutablePath;
@@ -60,6 +64,8 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
                                    ProcessEnvironmentSnapshot.BuildFreshPathEnvironment;
         _environmentVariablesProvider = environmentVariablesProvider ??
                                         ProcessEnvironmentSnapshot.BuildFreshAgentEnvironmentVariables;
+        _mcpReadyTimeout = mcpReadyTimeout ?? TimeSpan.FromSeconds(20);
+        ArgumentOutOfRangeException.ThrowIfLessThanOrEqual(_mcpReadyTimeout, TimeSpan.Zero);
     }
 
     public CodexAgentTransportMode TransportMode { get; private set; }
@@ -72,7 +78,11 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
 
     public bool IsTurnRunning => State == AgentSessionTransportState.RunningTurn;
 
-    public bool McpReady { get; private set; }
+    public bool McpReady => _mcpReadiness.IsReady;
+
+    public string ReadinessStateSummary =>
+        $"transport={State};mode={TransportMode};auth={AuthenticationState};" +
+        $"mcp={_mcpReadiness.State};thread={_mcpReadiness.ThreadId ?? ThreadId ?? "none"}";
 
     public AgentAccountState? Account { get; private set; }
 
@@ -158,9 +168,12 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
         }
 
         await _sessionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var callerCancellationToken = cancellationToken;
         try
         {
             ObjectDisposedException.ThrowIf(_disposed, this);
+            using var operationCancellation = CreateSessionOperationCancellation(callerCancellationToken);
+            cancellationToken = operationCancellation.Token;
             var environmentVariables = new Dictionary<string, string?>(
                 _environmentVariablesProvider(),
                 StringComparer.OrdinalIgnoreCase);
@@ -180,7 +193,8 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
                 if (TransportMode == CodexAgentTransportMode.AppServer &&
                     AuthenticationState == CodexAgentAuthenticationState.Required)
                 {
-                    await RefreshAccountCoreAsync(cancellationToken).ConfigureAwait(false);
+                    await RefreshAccountCoreAsync(cancellationToken).WaitAsync(cancellationToken).ConfigureAwait(false);
+                    cancellationToken.ThrowIfCancellationRequested();
                     if (AuthenticationState == CodexAgentAuthenticationState.Required)
                     {
                         return;
@@ -190,7 +204,6 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
                 await EnsureRequestedThreadAsync(resumeThreadId, cancellationToken).ConfigureAwait(false);
                 if (TransportMode == CodexAgentTransportMode.AppServer && !McpReady)
                 {
-                    _mcpReadyCompletion ??= NewMcpReadyCompletion();
                     await WaitForMcpReadyAsync(cancellationToken).ConfigureAwait(false);
                 }
 
@@ -198,6 +211,7 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
             }
 
             await StopTransportAsync(CancellationToken.None).ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
             var options = new AgentSessionStartOptions
             {
                 ExecutablePath = CodexExecutablePath,
@@ -213,8 +227,9 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
 
             LastError = null;
             _sessionSecret = mcpServer.TokenEnvironmentVariableValue;
-            McpReady = false;
-            _mcpReadyCompletion = NewMcpReadyCompletion();
+            WriteFacadeLog(AgentLogLevel.Information,
+                CodexProcessLaunch.DescribeNetworkEnvironment(environmentVariables));
+            BeginReadinessCycle(allowUnscoped: true, cancellationToken);
             Account = null;
             AuthenticationState = CodexAgentAuthenticationState.Unknown;
             try
@@ -224,7 +239,8 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
                 _transport = appServer;
                 await appServer.StartAsync(options, cancellationToken).ConfigureAwait(false);
                 TransportMode = CodexAgentTransportMode.AppServer;
-                await RefreshAccountCoreAsync(cancellationToken).ConfigureAwait(false);
+                await RefreshAccountCoreAsync(cancellationToken).WaitAsync(cancellationToken).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
                 if (AuthenticationState == CodexAgentAuthenticationState.Required)
                 {
                     WriteFacadeLog(
@@ -269,7 +285,6 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
                 _transport = exec;
                 await exec.StartAsync(options, cancellationToken).ConfigureAwait(false);
                 TransportMode = CodexAgentTransportMode.ExecFallback;
-                _mcpReadyCompletion = null;
                 Account = null;
                 AuthenticationState = CodexAgentAuthenticationState.Unknown;
                 if (!string.IsNullOrWhiteSpace(resumeThreadId))
@@ -285,6 +300,12 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
             _sessionWorkingDirectory = normalizedWorkingDirectory;
             _sessionMcpEndpoint = mcpServer.Endpoint;
             _sessionEnvironmentFingerprint = environmentFingerprint;
+        }
+        catch (OperationCanceledException) when (
+            !callerCancellationToken.IsCancellationRequested && IsStopRequested())
+        {
+            throw CreateReadinessException("agent_transport_stopped", "runtime",
+                "Agent Runtime 正在停止，会话准备已取消，未继续创建线程或提交 Turn。", ThreadId);
         }
         finally
         {
@@ -318,8 +339,13 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         await _sessionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        var callerCancellationToken = cancellationToken;
+        object? readinessCycle = null;
+        var threadBound = false;
         try
         {
+            using var operationCancellation = CreateSessionOperationCancellation(callerCancellationToken);
+            cancellationToken = operationCancellation.Token;
             var transport = RequireCapability(
                 AgentTransportCapabilities.ExplicitThreadStart,
                 "创建独立线程");
@@ -329,9 +355,34 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
                     "Codex Agent Runtime 尚未处于可创建独立线程的 Ready 状态。");
             }
 
-            var result = await transport.StartThreadAsync(cancellationToken).ConfigureAwait(false);
+            await WaitForExecutionReadinessAsync(cancellationToken).ConfigureAwait(false);
+            readinessCycle = TransportMode == CodexAgentTransportMode.AppServer
+                ? BeginReadinessCycle(allowUnscoped: false, cancellationToken)
+                : null;
+            var result = await transport.StartThreadAsync(cancellationToken)
+                .WaitAsync(cancellationToken).ConfigureAwait(false);
+            if (readinessCycle is not null)
+            {
+                _mcpReadiness.Bind(readinessCycle, result.ThreadId);
+                threadBound = true;
+                await WaitForMcpReadyAsync(cancellationToken).ConfigureAwait(false);
+            }
             LastError = null;
             return result;
+        }
+        catch (OperationCanceledException) when (
+            !callerCancellationToken.IsCancellationRequested && IsStopRequested())
+        {
+            throw CreateReadinessException("agent_transport_stopped", "runtime",
+                "Agent Runtime 正在停止，新线程准备已取消。", ThreadId);
+        }
+        catch (OperationCanceledException) when (
+            callerCancellationToken.IsCancellationRequested && readinessCycle is not null && !threadBound)
+        {
+            const string message = "新线程创建请求已取消，但 thread/start 尚未返回；远端创建结果未知，必须重新连接 Agent。";
+            _mcpReadiness.Stop("agent_thread_start_cancelled", message);
+            LastError = message;
+            throw;
         }
         catch (Exception exception) when (exception is not OperationCanceledException)
         {
@@ -378,14 +429,77 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
 
     public async Task StopAsync(CancellationToken cancellationToken = default)
     {
-        await _sessionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        CancellationTokenSource stopSignal;
+        lock (_operationLock)
+        {
+            _stopRequests++;
+            stopSignal = _stopSignal;
+        }
+
+        // A fresh-thread operation holds the session gate while waiting for ready.
+        // Wake that waiter before acquiring the gate, otherwise Stop waits for its timeout.
+        _mcpReadiness.Stop("agent_transport_stopped", "Agent Runtime 已停止，当前线程不再等待 MCP 初始化。");
+        stopSignal.Cancel();
+        var gateEntered = false;
         try
         {
+            await _sessionGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            gateEntered = true;
             await StopTransportAsync(cancellationToken).ConfigureAwait(false);
         }
         finally
         {
-            _sessionGate.Release();
+            if (gateEntered)
+            {
+                _sessionGate.Release();
+            }
+
+            lock (_operationLock)
+            {
+                if (--_stopRequests == 0)
+                {
+                    _stopSignal = new CancellationTokenSource();
+                    stopSignal.Dispose();
+                }
+            }
+        }
+    }
+
+    private CancellationTokenSource CreateSessionOperationCancellation(CancellationToken callerToken)
+    {
+        lock (_operationLock)
+        {
+            if (_stopRequests != 0)
+            {
+                throw CreateReadinessException("agent_transport_stopped", "runtime",
+                    "Agent Runtime 正在停止，不能启动新的会话准备。", ThreadId);
+            }
+
+            return CancellationTokenSource.CreateLinkedTokenSource(callerToken, _stopSignal.Token);
+        }
+    }
+
+    private bool IsStopRequested()
+    {
+        lock (_operationLock)
+        {
+            return _stopRequests != 0;
+        }
+    }
+
+    private object BeginReadinessCycle(bool allowUnscoped, CancellationToken cancellationToken)
+    {
+        lock (_operationLock)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (_stopRequests != 0)
+            {
+                throw CreateReadinessException("agent_transport_stopped", "runtime",
+                    "Agent Runtime 正在停止，不能创建新的 MCP 就绪周期。", ThreadId);
+            }
+
+            return _mcpReadiness.Begin(allowUnscoped);
         }
     }
 
@@ -409,6 +523,7 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
         string? resumeThreadId,
         CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var transport = _transport ??
                         throw new InvalidOperationException("Codex Agent Runtime 尚未接入。");
         if (!string.IsNullOrWhiteSpace(resumeThreadId))
@@ -417,14 +532,17 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
             {
                 try
                 {
-                    await transport.ResumeThreadAsync(resumeThreadId, cancellationToken).ConfigureAwait(false);
+                    await SelectThreadAsync(
+                        () => transport.ResumeThreadAsync(resumeThreadId, cancellationToken), cancellationToken)
+                        .ConfigureAwait(false);
                 }
                 catch (AgentRpcException exception)
                 {
                     WriteFacadeLog(
                         AgentLogLevel.Warning,
                         $"Codex 线程 {resumeThreadId} 无法恢复，将创建新线程：{exception.Message}");
-                    await transport.StartThreadAsync(cancellationToken).ConfigureAwait(false);
+                    await SelectThreadAsync(() => transport.StartThreadAsync(cancellationToken), cancellationToken)
+                        .ConfigureAwait(false);
                 }
             }
 
@@ -433,43 +551,93 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
 
         if (string.IsNullOrWhiteSpace(transport.CurrentThreadId))
         {
-            await transport.StartThreadAsync(cancellationToken).ConfigureAwait(false);
+            await SelectThreadAsync(() => transport.StartThreadAsync(cancellationToken), cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        _mcpReadiness.BindInitialThread(transport.CurrentThreadId);
+    }
+
+    private async Task SelectThreadAsync(
+        Func<Task<AgentThreadResult>> selectThread, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var cycle = TransportMode == CodexAgentTransportMode.AppServer &&
+                    !string.IsNullOrWhiteSpace(ThreadId)
+            ? BeginReadinessCycle(allowUnscoped: false, cancellationToken)
+            : null;
+        var result = await selectThread().WaitAsync(cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (cycle is not null)
+        {
+            _mcpReadiness.Bind(cycle, result.ThreadId);
+        }
+        else
+        {
+            _mcpReadiness.BindInitialThread(result.ThreadId);
+        }
+    }
+
+    public async Task WaitForExecutionReadinessAsync(CancellationToken cancellationToken = default)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!IsConnected)
+        {
+            throw CreateReadinessException("agent_transport_stopped", "runtime",
+                "Agent Runtime 当前未运行，无法准备生成 Turn。", ThreadId);
+        }
+
+        if (TransportMode == CodexAgentTransportMode.AppServer)
+        {
+            await WaitForMcpReadyAsync(cancellationToken).ConfigureAwait(false);
         }
     }
 
     private async Task WaitForMcpReadyAsync(CancellationToken cancellationToken)
     {
-        if (McpReady)
-        {
-            return;
-        }
-
-        var completion = _mcpReadyCompletion ??= NewMcpReadyCompletion();
+        _mcpReadiness.BindInitialThread(ThreadId);
         using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeout.CancelAfter(McpReadyTimeout);
+        timeout.CancelAfter(_mcpReadyTimeout);
         try
         {
-            var ready = await completion.Task.WaitAsync(timeout.Token).ConfigureAwait(false);
-            if (!ready)
+            var failure = await _mcpReadiness.WaitAsync(timeout.Token).ConfigureAwait(false);
+            if (failure is not null)
             {
-                throw new AgentMcpStartupException(
-                    LastError ?? "GAssetForge MCP 未能进入 ready 状态。");
+                throw CreateReadinessException(failure.Code,
+                    failure.Code == "agent_thread_start_cancelled" ? "thread.start" :
+                    failure.Code.StartsWith("agent_transport_", StringComparison.Ordinal)
+                        ? "runtime" : "mcp.readiness",
+                    failure.Message, failure.ThreadId);
             }
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            throw new AgentMcpStartupException(
-                $"等待 gasset_forge MCP ready 超时（{McpReadyTimeout.TotalSeconds:0} 秒）。");
+            throw CreateReadinessException("agent_mcp_ready_timeout", "mcp.readiness",
+                $"等待当前线程的 gasset_forge MCP ready 超时（{_mcpReadyTimeout.TotalSeconds:0.##} 秒）；Turn 尚未提交。",
+                _mcpReadiness.ThreadId ?? ThreadId);
         }
     }
 
-    private static TaskCompletionSource<bool> NewMcpReadyCompletion() =>
-        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private AgentReadinessException CreateReadinessException(
+        string code, string stage, string message, string? threadId) =>
+        new(code, stage, Sanitize(message), threadId, ReadinessStateSummary,
+            code == "agent_thread_start_cancelled"
+                ? "请重新连接 Agent 以确认可执行会话，再继续原任务；不要重复创建任务。"
+                : "原生成任务保持不变；请检查当前线程的 MCP 初始化日志，连接恢复后继续原任务。");
 
     private async Task<AgentAccountState> RefreshAccountCoreAsync(CancellationToken cancellationToken)
     {
         var transport = RequireCapability(AgentTransportCapabilities.AccountRead, "读取账号");
-        Account = await transport.ReadAccountAsync(cancellationToken).ConfigureAwait(false);
+        var account = await transport.ReadAccountAsync(cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!ReferenceEquals(transport, _transport))
+        {
+            throw CreateReadinessException("agent_transport_stopped", "runtime",
+                "原 Agent Runtime 已结束，忽略其迟到的账号状态。", null);
+        }
+
+        Account = account;
         AuthenticationState = Account.IsAuthenticated
             ? CodexAgentAuthenticationState.Authenticated
             : Account.RequiresOpenAiAuth
@@ -512,6 +680,7 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
 
     private async Task StopTransportAsync(CancellationToken cancellationToken)
     {
+        _mcpReadiness.Stop("agent_transport_stopped", "Agent Runtime 已停止，当前线程不再等待 MCP 初始化。");
         var transport = _transport;
         _transport = null;
         if (transport is not null)
@@ -528,8 +697,6 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
         }
 
         TransportMode = CodexAgentTransportMode.None;
-        McpReady = false;
-        _mcpReadyCompletion = null;
         Account = null;
         AuthenticationState = CodexAgentAuthenticationState.Unknown;
         _sessionWorkingDirectory = null;
@@ -543,6 +710,15 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
         if (eventArgs.State == AgentSessionTransportState.Faulted)
         {
             LastError = eventArgs.Detail is null ? null : Sanitize(eventArgs.Detail);
+        }
+
+        if (ReferenceEquals(sender, _transport) && eventArgs.State is
+            AgentSessionTransportState.Stopped or AgentSessionTransportState.Faulted)
+        {
+            _mcpReadiness.Stop(
+                eventArgs.State == AgentSessionTransportState.Faulted
+                    ? "agent_transport_faulted" : "agent_transport_stopped",
+                eventArgs.Detail is null ? "Agent Runtime 已停止。" : Sanitize(eventArgs.Detail));
         }
 
         StateChanged?.Invoke(this, eventArgs);
@@ -559,23 +735,15 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
 
     private void OnTransportMcpStatusChanged(object? sender, AgentMcpStatusChangedEventArgs eventArgs)
     {
-        if (ProductIdentity.IsKnownMcpServerName(eventArgs.ServerName))
+        if (ReferenceEquals(sender, _transport) &&
+            ProductIdentity.IsKnownMcpServerName(eventArgs.ServerName))
         {
-            McpReady = string.Equals(eventArgs.Status, "ready", StringComparison.OrdinalIgnoreCase);
-            if (McpReady)
+            var accepted = _mcpReadiness.Observe(
+                eventArgs.ThreadId, eventArgs.Status,
+                eventArgs.Error is null ? null : Sanitize(eventArgs.Error));
+            if (accepted && eventArgs.Status is "failed" or "cancelled" or "canceled")
             {
-                _mcpReadyCompletion?.TrySetResult(true);
-            }
-
-            if (string.Equals(eventArgs.Status, "failed", StringComparison.OrdinalIgnoreCase))
-            {
-                LastError = Sanitize(eventArgs.Error ?? "GAssetForge MCP 启动失败。");
-                _mcpReadyCompletion?.TrySetResult(false);
-            }
-            else if (string.Equals(eventArgs.Status, "cancelled", StringComparison.OrdinalIgnoreCase))
-            {
-                LastError = Sanitize(eventArgs.Error ?? "GAssetForge MCP 启动已取消。");
-                _mcpReadyCompletion?.TrySetResult(false);
+                LastError = Sanitize(eventArgs.Error ?? "GAssetForge MCP 初始化失败或被取消。");
             }
         }
 
@@ -588,6 +756,13 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
     {
         if (exception is OperationCanceledException && userCancellationToken.IsCancellationRequested)
         {
+            return false;
+        }
+
+        if (exception is AgentReadinessException)
+        {
+            // MCP readiness is not an authentication or app-server compatibility failure.
+            // Preserve its diagnostic identity and the original task instead of starting another transport.
             return false;
         }
 
@@ -636,5 +811,6 @@ public sealed class CodexAgentRuntimeService : IAsyncDisposable
         await StopAsync().ConfigureAwait(false);
         _disposed = true;
         _sessionGate.Dispose();
+        _stopSignal.Dispose();
     }
 }

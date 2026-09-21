@@ -3,6 +3,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using GAssetForge.App.Services;
 using GAssetForge.Core;
 
 namespace GAssetForge.App.Services.AgentRuntime;
@@ -13,6 +14,9 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
     private static readonly JsonElement EmptyObject = JsonSerializer.SerializeToElement(new { });
     private static readonly Regex GenerationTaskIdLinePattern = new(
         @"(?m)^-\s+(?<taskId>[0-9a-fA-F]{32})\s*$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+    private static readonly Regex GenerationClaimIdentityLinePattern = new(
+        @"(?m)^[ \t]+(?<taskId>[0-9a-fA-F]{32})[ \t]+=>[ \t]+`(?<agentId>[^`\r\n]+)`[ \t]*\r?$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
     private static readonly HashSet<string> ApprovedGAssetForgeTools = new(
         StringComparer.Ordinal)
@@ -42,7 +46,9 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
     private string? _activeTurnId;
     private string? _runtimeVersion;
     private Exception? _protocolFailure;
-    private HashSet<string> _activeGenerationTaskIds = new(StringComparer.Ordinal);
+    private IReadOnlyDictionary<string, string> _activeGenerationClaimants =
+        new Dictionary<string, string>(StringComparer.Ordinal);
+    private TaskCompletionSource<bool>? _activeTurnBinding;
     private bool _stopping;
     private bool _disposed;
 
@@ -186,6 +192,9 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
                     _lifetimeCancellation = lifetimeCancellation;
                     _currentThreadId = null;
                     _activeTurnId = null;
+                    _activeGenerationClaimants =
+                        new Dictionary<string, string>(StringComparer.Ordinal);
+                    _activeTurnBinding = null;
                     _protocolFailure = null;
                 }
 
@@ -412,10 +421,15 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
             throw new InvalidOperationException("Codex 线程尚未就绪。");
         }
 
+        var generationClaimants = ExtractGenerationClaimants(prompt);
+        var turnBinding = new TaskCompletionSource<bool>(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        string? publishedTurnId = null;
         SetState(AgentSessionTransportState.RunningTurn, "Codex 正在执行素材生成任务");
         lock (_stateLock)
         {
-            _activeGenerationTaskIds = ExtractGenerationTaskIds(prompt);
+            _activeGenerationClaimants = generationClaimants;
+            _activeTurnBinding = turnBinding;
         }
 
         try
@@ -439,6 +453,7 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
             }
 
             var turnId = ReadRequiredString(turn, "id", "Codex turn/start 响应缺少 turn.id。");
+            publishedTurnId = turnId;
             var waiter = _turnWaiters.GetOrAdd(
                 turnId,
                 _ => new TaskCompletionSource<AgentTurnResult>(
@@ -447,8 +462,14 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
             lock (_stateLock)
             {
                 _activeTurnId = turnId;
+                if (ReferenceEquals(_activeTurnBinding, turnBinding))
+                {
+                    _activeTurnBinding = null;
+                }
+
                 protocolFailure = _protocolFailure;
             }
+            turnBinding.TrySetResult(true);
 
             if (protocolFailure is not null)
             {
@@ -458,6 +479,7 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
             if (_earlyTurnCompletions.TryRemove(turnId, out var earlyCompletion))
             {
                 waiter.TrySetResult(earlyCompletion);
+                PublishTurnCompleted(earlyCompletion);
             }
 
             WriteLog(AgentLogLevel.Information, $"Codex Turn {turnId} 已发布。");
@@ -470,11 +492,25 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
         }
         finally
         {
+            if (publishedTurnId is not null)
+            {
+                _turnWaiters.TryRemove(publishedTurnId, out _);
+            }
+
+            // Only one turn/start can bind at a time. Unmatched early completions cannot belong
+            // to a future turn, and canceled turns must not retain abandoned waiter entries.
+            _earlyTurnCompletions.Clear();
             lock (_stateLock)
             {
                 _activeTurnId = null;
-                _activeGenerationTaskIds = new HashSet<string>(StringComparer.Ordinal);
+                _activeGenerationClaimants =
+                    new Dictionary<string, string>(StringComparer.Ordinal);
+                if (ReferenceEquals(_activeTurnBinding, turnBinding))
+                {
+                    _activeTurnBinding = null;
+                }
             }
+            turnBinding.TrySetResult(false);
 
             if (IsRunning && !_stopping)
             {
@@ -521,15 +557,9 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
         switch (method)
         {
             case "thread/started":
-                if (parameters.TryGetProperty("thread", out var thread) &&
-                    !string.IsNullOrWhiteSpace(ReadString(thread, "id")))
-                {
-                    lock (_stateLock)
-                    {
-                        _currentThreadId = ReadString(thread, "id");
-                    }
-                }
-
+                // Notifications are observations, not thread-selection commands. A previous
+                // thread's delayed event must not retarget the next Turn or revive a stopped
+                // bookmark. Only explicit thread/start and thread/resume RPC responses select it.
                 break;
             case "turn/completed":
                 HandleTurnCompleted(parameters);
@@ -552,7 +582,7 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
         }
     }
 
-    private Task<object?> HandleServerRequestAsync(
+    private async Task<object?> HandleServerRequestAsync(
         string method,
         JsonElement parameters,
         CancellationToken cancellationToken)
@@ -563,6 +593,7 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
             throw new NotSupportedException($"GAssetForge 尚未处理 app-server 请求：{method}");
         }
 
+        await WaitForActiveTurnBindingAsync(cancellationToken).ConfigureAwait(false);
         var decision = EvaluateGAssetForgeElicitation(parameters);
         WriteLog(
             decision.Accepted ? AgentLogLevel.Information : AgentLogLevel.Warning,
@@ -576,7 +607,25 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
             ["content"] = decision.Accepted ? new Dictionary<string, object?>() : null,
             ["_meta"] = null
         };
-        return Task.FromResult<object?>(response);
+        return response;
+    }
+
+    private Task WaitForActiveTurnBindingAsync(CancellationToken cancellationToken)
+    {
+        Task? bindingTask = null;
+        lock (_stateLock)
+        {
+            if (_state == AgentSessionTransportState.RunningTurn &&
+                string.IsNullOrWhiteSpace(_activeTurnId) &&
+                _activeTurnBinding is not null)
+            {
+                bindingTask = _activeTurnBinding.Task;
+            }
+        }
+
+        return bindingTask is null
+            ? Task.CompletedTask
+            : bindingTask.WaitAsync(cancellationToken);
     }
 
     private McpElicitationDecision EvaluateGAssetForgeElicitation(JsonElement parameters)
@@ -602,13 +651,16 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
 
         string? activeThreadId;
         string? activeTurnId;
-        HashSet<string> activeTaskIds;
+        IReadOnlyDictionary<string, string> activeClaimants;
         AgentSessionTransportState state;
         lock (_stateLock)
         {
             activeThreadId = _currentThreadId;
             activeTurnId = _activeTurnId;
-            activeTaskIds = new HashSet<string>(_activeGenerationTaskIds, StringComparer.Ordinal);
+            activeClaimants = _activeGenerationClaimants.ToDictionary(
+                pair => pair.Key,
+                pair => pair.Value,
+                StringComparer.Ordinal);
             state = _state;
         }
 
@@ -667,23 +719,40 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
         }
 
         var taskId = ReadString(toolParameters, "taskId") ?? ReadString(toolParameters, "task_id");
-        if (string.IsNullOrWhiteSpace(taskId) || !activeTaskIds.Contains(taskId))
+        if (string.IsNullOrWhiteSpace(taskId) ||
+            !activeClaimants.TryGetValue(taskId, out var expectedAgentId))
         {
             return McpElicitationDecision.Decline("taskId 不属于当前批次", toolName, taskId);
         }
 
         var agentId = ReadString(toolParameters, "agentId") ?? ReadString(toolParameters, "agent_id");
         if (string.IsNullOrWhiteSpace(agentId) ||
-            !agentId.StartsWith("codex", StringComparison.OrdinalIgnoreCase))
+            !string.Equals(agentId, expectedAgentId, StringComparison.Ordinal))
         {
-            return McpElicitationDecision.Decline("agentId 不是 Codex 执行器", toolName, taskId);
+            return McpElicitationDecision.Decline(
+                "agentId 与当前任务冻结的受管 claimant 不一致",
+                toolName,
+                taskId);
         }
 
         return McpElicitationDecision.Accept(toolName, taskId);
     }
 
-    private static HashSet<string> ExtractGenerationTaskIds(string prompt)
+    private static IReadOnlyDictionary<string, string> ExtractGenerationClaimants(string prompt)
     {
+        var headerLength = GenerationAgentPromptBuilder.GenerationBatchPromptHeader.Length;
+        var hasLfHeader = prompt.Length > headerLength && prompt[headerLength] == '\n';
+        var hasCrLfHeader = prompt.Length > headerLength + 1 &&
+            prompt[headerLength] == '\r' &&
+            prompt[headerLength + 1] == '\n';
+        if (!prompt.StartsWith(
+                GenerationAgentPromptBuilder.GenerationBatchPromptHeader,
+                StringComparison.Ordinal) ||
+            (!hasLfHeader && !hasCrLfHeader))
+        {
+            return new Dictionary<string, string>(StringComparer.Ordinal);
+        }
+
         var taskIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (Match match in GenerationTaskIdLinePattern.Matches(prompt))
         {
@@ -694,7 +763,36 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
             }
         }
 
-        return taskIds;
+        var claimants = new Dictionary<string, string>(StringComparer.Ordinal);
+        var ambiguousTaskIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (Match match in GenerationClaimIdentityLinePattern.Matches(prompt))
+        {
+            var taskId = match.Groups["taskId"].Value;
+            var agentId = match.Groups["agentId"].Value.Trim();
+            if (!taskIds.Contains(taskId) || ambiguousTaskIds.Contains(taskId))
+            {
+                continue;
+            }
+
+            if (!GenerationManagedAgentIdentity.IsManagedClaimantForTask(taskId, agentId))
+            {
+                claimants.Remove(taskId);
+                ambiguousTaskIds.Add(taskId);
+                continue;
+            }
+
+            if (claimants.TryGetValue(taskId, out var existingAgentId) &&
+                !string.Equals(existingAgentId, agentId, StringComparison.Ordinal))
+            {
+                claimants.Remove(taskId);
+                ambiguousTaskIds.Add(taskId);
+                continue;
+            }
+
+            claimants[taskId] = agentId;
+        }
+
+        return claimants;
     }
 
     private static string ShortId(string? value)
@@ -743,34 +841,50 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
         }
 
         var completion = new AgentTurnResult(threadId, turnId, status, error, turn.Clone());
+        bool canBindEarlyCompletion;
+        lock (_stateLock)
+        {
+            var isCurrentThread = string.Equals(threadId, _currentThreadId, StringComparison.Ordinal);
+            var isActiveTurn = string.Equals(turnId, _activeTurnId, StringComparison.Ordinal);
+            canBindEarlyCompletion = isCurrentThread && _activeTurnBinding is not null;
+            if (!isCurrentThread || (!isActiveTurn && !canBindEarlyCompletion))
+            {
+                // A canceled turn can still send its terminal notification after a new batch
+                // has started. It cannot replace that batch's thread bookmark or visible state.
+                _turnWaiters.TryRemove(turnId, out _);
+                _earlyTurnCompletions.TryRemove(turnId, out _);
+                return;
+            }
+
+            if (isActiveTurn)
+            {
+                _activeTurnId = null;
+            }
+        }
+
         if (_turnWaiters.TryRemove(turnId, out var waiter))
         {
             waiter.TrySetResult(completion);
         }
-        else
+        else if (canBindEarlyCompletion)
         {
             _earlyTurnCompletions[turnId] = completion;
+            // Until turn/start returns its ID, an old same-thread notification is indistinguishable
+            // from an early valid one. Notify the UI only when that exact ID is subsequently bound.
+            return;
         }
 
-        lock (_stateLock)
-        {
-            if (string.Equals(_activeTurnId, turnId, StringComparison.Ordinal))
-            {
-                _activeTurnId = null;
-            }
+        PublishTurnCompleted(completion);
+    }
 
-            if (!string.IsNullOrWhiteSpace(threadId))
-            {
-                _currentThreadId = threadId;
-            }
-        }
-
+    private void PublishTurnCompleted(AgentTurnResult completion)
+    {
         TurnCompleted?.Invoke(this, new AgentTurnCompletedEventArgs(completion));
         WriteLog(
             completion.IsSuccess ? AgentLogLevel.Information : AgentLogLevel.Error,
             completion.IsSuccess
-                ? $"Codex Turn {turnId} 已完成。"
-                : $"Codex Turn {turnId} 结束：{status}；{error ?? "无错误详情"}");
+                ? $"Codex Turn {completion.TurnId} 已完成。"
+                : $"Codex Turn {completion.TurnId} 结束：{completion.Status}；{completion.ErrorMessage ?? "无错误详情"}");
     }
 
     private void HandleMcpStatus(JsonElement parameters)
@@ -1062,6 +1176,7 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
 
     private void ClearRuntimeReferences()
     {
+        TaskCompletionSource<bool>? turnBinding;
         lock (_stateLock)
         {
             _process = null;
@@ -1069,9 +1184,15 @@ public sealed class CodexAppServerTransport : IAgentSessionTransport
             _lifetimeCancellation = null;
             _currentThreadId = null;
             _activeTurnId = null;
+            _activeGenerationClaimants =
+                new Dictionary<string, string>(StringComparer.Ordinal);
+            turnBinding = _activeTurnBinding;
+            _activeTurnBinding = null;
             _runtimeVersion = null;
             _protocolFailure = null;
         }
+
+        turnBinding?.TrySetResult(false);
     }
 
     public async ValueTask DisposeAsync()

@@ -1,6 +1,8 @@
 using System.IO;
+using System.Reflection;
 using System.Text;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 
 namespace GAssetForge.App.Services;
 
@@ -29,6 +31,10 @@ public sealed record WorkbenchLogContext
     public string? ExpectedPath { get; init; }
     public string? ObservedPath { get; init; }
     public string? ErrorCode { get; init; }
+    public string? FailureStage { get; init; }
+    public string? RecoveryHint { get; init; }
+    public string? ReadinessState { get; init; }
+    public string? ExceptionType { get; init; }
     public string? BlueprintGraphId { get; init; }
     public string? BlueprintNodeId { get; init; }
     public string? BlueprintStepId { get; init; }
@@ -43,11 +49,16 @@ public sealed record WorkbenchLogContext
             string.IsNullOrWhiteSpace(Stage) ? null : $"stage={Stage}",
             string.IsNullOrWhiteSpace(Status) ? null : $"status={Status}",
             ElapsedMilliseconds is null ? null : $"elapsed={ElapsedMilliseconds}ms",
+            string.IsNullOrWhiteSpace(AgentThreadId) ? null : $"thread={AgentThreadId}",
             string.IsNullOrWhiteSpace(AgentTurnId) ? null : $"turn={AgentTurnId}",
             string.IsNullOrWhiteSpace(BlueprintGraphId) ? null : $"graph={BlueprintGraphId}",
             string.IsNullOrWhiteSpace(BlueprintNodeId) ? null : $"node={BlueprintNodeId}",
             string.IsNullOrWhiteSpace(BlueprintStepId) ? null : $"step={BlueprintStepId}",
-            string.IsNullOrWhiteSpace(ErrorCode) ? null : $"error={ErrorCode}"
+            string.IsNullOrWhiteSpace(ErrorCode) ? null : $"error={ErrorCode}",
+            string.IsNullOrWhiteSpace(FailureStage) ? null : $"failureStage={FailureStage}",
+            string.IsNullOrWhiteSpace(ReadinessState) ? null : $"readiness={ReadinessState}",
+            string.IsNullOrWhiteSpace(ExceptionType) ? null : $"exception={ExceptionType}",
+            string.IsNullOrWhiteSpace(RecoveryHint) ? null : $"建议：{RecoveryHint}"
         }.Where(value => value is not null));
 }
 
@@ -61,6 +72,9 @@ public sealed record WorkbenchLogEntry(
     string Details = "",
     WorkbenchLogContext? Context = null)
 {
+    /// <summary>Time received by the log bus; Timestamp is the original source event time.</summary>
+    public DateTimeOffset RecordedAt { get; init; } = Timestamp;
+
     public string TimestampText => Timestamp.ToLocalTime().ToString("HH:mm:ss.fff");
 
     public string LevelText => Level switch
@@ -93,6 +107,21 @@ public sealed record WorkbenchLogEntry(
                 ? null
                 : Details.Replace('\r', ' ').Replace('\n', ' ').Trim()
         }.Where(value => !string.IsNullOrWhiteSpace(value)));
+
+    // The log bus has already redacted every value before creating this entry.
+    // Keep export at the entry boundary so clipboard and details use the same data.
+    public string ExportText => string.Join(
+        Environment.NewLine,
+        new[]
+        {
+            $"#{Sequence} [{LevelText}] {Source}",
+            $"发生时间：{Timestamp:O}",
+            $"记录时间：{RecordedAt:O}",
+            Message,
+            Context?.Summary,
+            Context is null ? null : $"结构化上下文：{JsonSerializer.Serialize(Context)}",
+            string.IsNullOrWhiteSpace(Details) ? null : Details
+        }.Where(value => !string.IsNullOrWhiteSpace(value)));
 }
 
 public sealed class WorkbenchLogEntryEventArgs(WorkbenchLogEntry entry) : EventArgs
@@ -124,18 +153,38 @@ public interface IWorkbenchLogRedactionRegistry
     bool RegisterSensitiveValue(string sensitiveValue);
 }
 
+public interface IWorkbenchStructuredLogSink : IWorkbenchLogSink
+{
+    void WriteStructured(
+        WorkbenchLogLevel level,
+        string source,
+        string message,
+        WorkbenchLogContext context,
+        DateTimeOffset? timestamp = null,
+        Exception? exception = null);
+}
+
 /// <summary>
 /// Thread-safe, UI-independent logging bus shared by workbench modules.
 /// Entries are published synchronously to subscribers and persisted as JSONL
 /// in a per-process session file that can be inspected while the app is running.
 /// </summary>
 public sealed class WorkbenchConsoleService :
-    IWorkbenchLogSink,
+    IWorkbenchStructuredLogSink,
     IWorkbenchLogRedactionRegistry,
     IDisposable
 {
     private const int DefaultBufferCapacity = 10_000;
     private const string RedactionMarker = "[REDACTED]";
+    private const string FileLoggingRecoveryHint =
+        "日志仍保存在当前工作台内存中，请及时复制所需日志；检查日志目录权限与磁盘空间后重启软件以恢复文件记录。";
+    // Match explicit credential assignments, not ordinary text about authentication.
+    private static readonly Regex CredentialAssignmentPattern = new(
+        """(?<prefix>\b(?:api[_-]?key|OPENAI_API_KEY|access[_-]?token|refresh[_-]?token|client[_-]?secret)\b["']?\s*[:=]\s*["']?)(?<secret>[^\s"',;&<>]+)""",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
+    private static readonly Regex AuthorizationPattern = new(
+        """(?<prefix>\b(?:authorization|proxy-authorization)\b["']?\s*[:=]\s*["']?(?:Bearer|Basic)\s+)(?<secret>[A-Za-z0-9._~+/=-]+)""",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.NonBacktracking);
 
     private readonly object _gate = new();
     private readonly Queue<WorkbenchLogEntry> _entries;
@@ -160,6 +209,7 @@ public sealed class WorkbenchConsoleService :
         LogDirectory = Path.Combine(paths.RootDirectory, "Logs");
         SessionLogPath = CreateSessionLogPath(LogDirectory);
 
+        Exception? initializationFailure = null;
         try
         {
             Directory.CreateDirectory(LogDirectory);
@@ -168,22 +218,35 @@ public sealed class WorkbenchConsoleService :
                 FileMode.CreateNew,
                 FileAccess.Write,
                 FileShare.ReadWrite | FileShare.Delete);
-            _sessionWriter = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false))
-            {
-                AutoFlush = true
-            };
+            _sessionWriter = new StreamWriter(stream, new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            _sessionWriter.AutoFlush = true;
         }
-        catch (Exception exception) when (exception is IOException or UnauthorizedAccessException or NotSupportedException)
+        catch (Exception exception) when (IsFileLoggingException(exception))
         {
-            FileLoggingError = exception.Message;
+            initializationFailure = exception;
+            FileLoggingError = RedactLocked(exception.Message);
+            var writer = _sessionWriter;
+            _sessionWriter = null;
+            DisposeWriterSafely(writer);
         }
 
-        Write(
-            WorkbenchLogLevel.Information,
-            "Workbench",
-            IsFileLoggingAvailable
-                ? $"指令日志会话已启动：{Path.GetFileName(SessionLogPath)}"
-                : $"指令日志会话已启动，但会话文件不可用：{FileLoggingError}");
+        if (IsFileLoggingAvailable)
+        {
+            var assembly = typeof(WorkbenchConsoleService).Assembly;
+            var version = assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion ??
+                          assembly.GetName().Version?.ToString() ?? "unknown";
+            WriteStructured(WorkbenchLogLevel.Information, "Workbench",
+                $"指令日志会话已启动：{Path.GetFileName(SessionLogPath)}" +
+                $" · version={version} · build={assembly.ManifestModule.ModuleVersionId:D}" +
+                $" · process={Environment.ProcessId} · executable={Environment.ProcessPath ?? "unknown"}",
+                new WorkbenchLogContext { Stage = "workbench.start", Status = "initialized" });
+        }
+        else
+        {
+            WriteStructured(WorkbenchLogLevel.Warning, "Workbench",
+                $"会话日志文件不可用，已降级为内存日志：{FileLoggingError}",
+                CreateFileLoggingFailureContext(), exception: initializationFailure);
+        }
     }
 
     public event EventHandler<WorkbenchLogEntryEventArgs>? EntryPublished;
@@ -271,6 +334,7 @@ public sealed class WorkbenchConsoleService :
         message ??= string.Empty;
 
         WorkbenchLogEntry entry;
+        WorkbenchLogEntry? persistenceWarning = null;
         lock (_gate)
         {
             if (_disposed)
@@ -278,26 +342,62 @@ public sealed class WorkbenchConsoleService :
                 return;
             }
 
+            var recordedAt = DateTimeOffset.Now;
+            if (exception is not null && string.IsNullOrWhiteSpace(context?.ExceptionType))
+            {
+                context = (context ?? new WorkbenchLogContext()) with
+                {
+                    ExceptionType = exception.GetType().FullName
+                };
+            }
+
             entry = new WorkbenchLogEntry(
                 Interlocked.Increment(ref _sequence),
                 _bufferEpoch,
-                timestamp ?? DateTimeOffset.Now,
+                timestamp ?? recordedAt,
                 level,
                 RedactLocked(source),
                 RedactLocked(message),
                 RedactLocked(exception?.ToString() ?? string.Empty),
-                RedactContextLocked(context));
-
-            _entries.Enqueue(entry);
-            while (_entries.Count > _bufferCapacity)
+                RedactContextLocked(context))
             {
-                _entries.Dequeue();
-            }
+                RecordedAt = recordedAt
+            };
 
-            WriteSessionLineLocked(entry);
+            EnqueueLocked(entry);
+            if (WriteSessionLineLocked(entry) is { } persistenceFailure)
+            {
+                var warningTime = DateTimeOffset.Now;
+                persistenceWarning = new WorkbenchLogEntry(
+                    Interlocked.Increment(ref _sequence), _bufferEpoch, warningTime,
+                    WorkbenchLogLevel.Warning, "Workbench",
+                    "会话日志文件写入失败，已降级为内存日志；当前任务不会因此中断。",
+                    RedactLocked(persistenceFailure.ToString()),
+                    RedactContextLocked(CreateFileLoggingFailureContext() with
+                    {
+                        ExceptionType = persistenceFailure.GetType().FullName
+                    }))
+                {
+                    RecordedAt = warningTime
+                };
+                EnqueueLocked(persistenceWarning);
+            }
         }
 
         PublishEntry(entry);
+        if (persistenceWarning is not null)
+        {
+            PublishEntry(persistenceWarning);
+        }
+    }
+
+    private void EnqueueLocked(WorkbenchLogEntry entry)
+    {
+        _entries.Enqueue(entry);
+        while (_entries.Count > _bufferCapacity)
+        {
+            _entries.Dequeue();
+        }
     }
 
     public void WriteTrace(string source, string message, DateTimeOffset? timestamp = null) =>
@@ -356,7 +456,7 @@ public sealed class WorkbenchConsoleService :
             BufferCleared = null;
         }
 
-        writer?.Dispose();
+        DisposeWriterSafely(writer);
     }
 
     private static string CreateSessionLogPath(string logDirectory)
@@ -367,20 +467,22 @@ public sealed class WorkbenchConsoleService :
         return Path.Combine(logDirectory, $"workbench-{timestamp}-p{processId}-{uniqueSuffix}.jsonl");
     }
 
-    private void WriteSessionLineLocked(WorkbenchLogEntry entry)
+    private Exception? WriteSessionLineLocked(WorkbenchLogEntry entry)
     {
         if (_sessionWriter is null)
         {
-            return;
+            return null;
         }
 
         try
         {
             var json = JsonSerializer.Serialize(new
             {
+                schemaVersion = 2,
                 sequence = entry.Sequence,
                 epoch = entry.Epoch,
                 timestamp = entry.Timestamp,
+                recordedAt = entry.RecordedAt,
                 level = entry.Level.ToString(),
                 source = entry.Source,
                 message = entry.Message,
@@ -388,12 +490,43 @@ public sealed class WorkbenchConsoleService :
                 context = entry.Context
             });
             _sessionWriter.WriteLine(json);
+            return null;
         }
-        catch (Exception exception) when (exception is IOException or ObjectDisposedException or UnauthorizedAccessException)
+        catch (Exception exception) when (IsFileLoggingException(exception))
         {
-            FileLoggingError = exception.Message;
-            _sessionWriter.Dispose();
+            FileLoggingError = RedactLocked(exception.Message);
+            var writer = _sessionWriter;
             _sessionWriter = null;
+            // Dispose may flush the same failed stream again. It must not replace the
+            // original failure or propagate into generation and conversation code.
+            DisposeWriterSafely(writer);
+            return exception;
+        }
+    }
+
+    private WorkbenchLogContext CreateFileLoggingFailureContext() => new()
+    {
+        Stage = "LogPersistence",
+        FailureStage = "LogPersistence",
+        Status = "MemoryOnly",
+        ErrorCode = "LOG_FILE_UNAVAILABLE",
+        RecoveryHint = FileLoggingRecoveryHint,
+        ExpectedPath = SessionLogPath
+    };
+
+    private static bool IsFileLoggingException(Exception exception) =>
+        exception is IOException or ObjectDisposedException or UnauthorizedAccessException or
+            NotSupportedException or System.Security.SecurityException;
+
+    private static void DisposeWriterSafely(StreamWriter? writer)
+    {
+        try
+        {
+            writer?.Dispose();
+        }
+        catch (Exception exception) when (IsFileLoggingException(exception))
+        {
+            // Logging shutdown must never interrupt the application being diagnosed.
         }
     }
 
@@ -404,7 +537,15 @@ public sealed class WorkbenchConsoleService :
             value = value.Replace(sensitiveValue, RedactionMarker, StringComparison.Ordinal);
         }
 
-        return value;
+        return RedactCommonCredentials(value);
+    }
+
+    internal static string RedactCommonCredentials(string value)
+    {
+        value = CredentialAssignmentPattern.Replace(value,
+            match => match.Groups["prefix"].Value + RedactionMarker);
+        return AuthorizationPattern.Replace(value,
+            match => match.Groups["prefix"].Value + RedactionMarker);
     }
 
     private WorkbenchLogContext? RedactContextLocked(WorkbenchLogContext? context) =>
@@ -423,6 +564,10 @@ public sealed class WorkbenchConsoleService :
                 ExpectedPath = RedactNullableLocked(context.ExpectedPath),
                 ObservedPath = RedactNullableLocked(context.ObservedPath),
                 ErrorCode = RedactNullableLocked(context.ErrorCode),
+                FailureStage = RedactNullableLocked(context.FailureStage),
+                RecoveryHint = RedactNullableLocked(context.RecoveryHint),
+                ReadinessState = RedactNullableLocked(context.ReadinessState),
+                ExceptionType = RedactNullableLocked(context.ExceptionType),
                 BlueprintGraphId = RedactNullableLocked(context.BlueprintGraphId),
                 BlueprintNodeId = RedactNullableLocked(context.BlueprintNodeId),
                 BlueprintStepId = RedactNullableLocked(context.BlueprintStepId)

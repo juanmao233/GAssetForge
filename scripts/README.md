@@ -40,4 +40,7 @@ dotnet publish .\src\GAssetForge.App\GAssetForge.App.csproj -c Release -p:Publis
 dist\GAssetForge-win-x64
 ```
 
-完整发行包还会包含 MCP 接入说明、配置示例、第三方许可文本和 `SHA256SUMS.txt`。
+完整发行包还会包含 MCP 接入说明、生成诊断、配置示例、项目 MIT `LICENSE`、第三方许可文本和 `SHA256SUMS.txt`。
+
+脚本可直接从本仓库构建便携包，不依赖仓库外的发布工具。建议每次选择新的输出目录，避免混入旧文件。
+`dist/` 与其他生成目录不提交到 Git；若分享二进制包，请一并保留许可文本和校验和。

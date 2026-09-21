@@ -67,6 +67,10 @@ internal static class ProcessEnvironmentSnapshot
             variables[name] = ReadFreshEnvironmentVariable(name);
         }
 
+        var systemProxy = WindowsSystemProxyEnvironment.HasExplicitProxy(variables)
+            ? null
+            : WindowsSystemProxyEnvironment.ReadCurrentUserSettings();
+        WindowsSystemProxyEnvironment.ApplyFallback(variables, systemProxy);
         return variables;
     }
 

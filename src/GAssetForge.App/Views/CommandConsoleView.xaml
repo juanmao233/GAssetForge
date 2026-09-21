@@ -219,7 +219,8 @@
                                     MinWidth="82"
                                     Binding="{Binding TimestampText}"
                                     ElementStyle="{StaticResource ConsoleTextStyle}" />
-                <DataGridTemplateColumn Header="类型" Width="88" MinWidth="68">
+                <DataGridTemplateColumn Header="类型" Width="88" MinWidth="68"
+                                        ClipboardContentBinding="{Binding LevelText}">
                     <DataGridTemplateColumn.CellTemplate>
                         <DataTemplate>
                             <StackPanel Orientation="Horizontal">
@@ -246,6 +247,7 @@
                                     Width="1.2*"
                                     MinWidth="120"
                                     Binding="{Binding DetailsSummary}"
+                                    ClipboardContentBinding="{Binding ExportText}"
                                     ElementStyle="{StaticResource ConsoleTextStyle}" />
             </DataGrid.Columns>
         </DataGrid>

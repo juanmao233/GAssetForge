@@ -36,7 +36,7 @@ internal static class AssetGenerationSpreadsheetWorkflowSmokeTests
         try
         {
             var generation = shell.AssetGeneration;
-            var inheritedOutputDirectory = Path.Combine(paths.GeneratedAssetDirectory, "Imported");
+            var inheritedOutputDirectory = Path.Combine(paths.FinalAssetDirectory, "Imported");
             Directory.CreateDirectory(inheritedOutputDirectory);
             var originalDraft = generation.DraftRows.Single();
             originalDraft.Description = "现有任务";

@@ -2,6 +2,7 @@
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:conv="clr-namespace:GAssetForge.App.Converters"
+             xmlns:vm="clr-namespace:GAssetForge.App.ViewModels"
              MinWidth="420"
              MinHeight="300"
              Focusable="True">
@@ -9,6 +10,7 @@
         <BooleanToVisibilityConverter x:Key="BooleanToVisibilityConverter" />
         <conv:StringToBrushConverter x:Key="StringToBrushConverter" />
         <conv:DoubleToCornerRadiusConverter x:Key="DoubleToCornerRadiusConverter" />
+        <conv:NormalizedShapePointsConverter x:Key="NormalizedShapePointsConverter" />
 
         <DataTemplate x:Key="PageTemplate">
             <Border Background="#11151B" />
@@ -44,6 +46,28 @@
                            TextWrapping="Wrap"
                            VerticalAlignment="Center" />
             </Border>
+        </DataTemplate>
+
+        <DataTemplate x:Key="RectangleShapeTemplate">
+            <Rectangle Fill="{Binding Model.Style.Fill, Converter={StaticResource StringToBrushConverter}, ConverterParameter=#367FD8}"
+                       Stroke="{Binding Model.Style.Border, Converter={StaticResource StringToBrushConverter}, ConverterParameter=#83B9F7}"
+                       StrokeThickness="1"
+                       RadiusX="{Binding Radius}"
+                       RadiusY="{Binding Radius}" />
+        </DataTemplate>
+
+        <DataTemplate x:Key="CircleShapeTemplate">
+            <Ellipse Fill="{Binding Model.Style.Fill, Converter={StaticResource StringToBrushConverter}, ConverterParameter=#367FD8}"
+                     Stroke="{Binding Model.Style.Border, Converter={StaticResource StringToBrushConverter}, ConverterParameter=#83B9F7}"
+                     StrokeThickness="1" />
+        </DataTemplate>
+
+        <DataTemplate x:Key="PolygonShapeTemplate">
+            <Polygon Points="{Binding Model.Shape.Points, Converter={StaticResource NormalizedShapePointsConverter}}"
+                     Stretch="Fill"
+                     Fill="{Binding Model.Style.Fill, Converter={StaticResource StringToBrushConverter}, ConverterParameter=#367FD8}"
+                     Stroke="{Binding Model.Style.Border, Converter={StaticResource StringToBrushConverter}, ConverterParameter=#83B9F7}"
+                     StrokeThickness="1" />
         </DataTemplate>
 
         <DataTemplate x:Key="TopBarTemplate">
@@ -542,9 +566,33 @@
                               Background="Transparent"
                               ClipToBounds="True"
                               AllowDrop="True"
+                              Focusable="True"
                               PreviewMouseLeftButtonDown="CanvasSurface_OnPreviewMouseLeftButtonDown"
+                              PreviewMouseMove="CanvasSurface_OnPreviewMouseMove"
+                              PreviewMouseLeftButtonUp="CanvasSurface_OnPreviewMouseLeftButtonUp"
+                              LostMouseCapture="CanvasSurface_OnLostMouseCapture"
+                              PreviewKeyDown="CanvasSurface_OnPreviewKeyDown"
                               PreviewDragOver="CanvasSurface_OnPreviewDragOver"
                               Drop="CanvasSurface_OnDrop">
+                            <Grid.Style>
+                                <Style TargetType="Grid">
+                                    <Setter Property="Cursor" Value="Arrow" />
+                                    <Style.Triggers>
+                                        <DataTrigger Binding="{Binding ActiveTool}" Value="{x:Static vm:EditorTool.Text}">
+                                            <Setter Property="Cursor" Value="IBeam" />
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding ActiveTool}" Value="{x:Static vm:EditorTool.Rectangle}">
+                                            <Setter Property="Cursor" Value="Cross" />
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding ActiveTool}" Value="{x:Static vm:EditorTool.Circle}">
+                                            <Setter Property="Cursor" Value="Cross" />
+                                        </DataTrigger>
+                                        <DataTrigger Binding="{Binding ActiveTool}" Value="{x:Static vm:EditorTool.Polygon}">
+                                            <Setter Property="Cursor" Value="Cross" />
+                                        </DataTrigger>
+                                    </Style.Triggers>
+                                </Style>
+                            </Grid.Style>
                             <ItemsControl ItemsSource="{Binding CanvasLayers}"
                                           Width="{Binding CanvasWidth}"
                                           Height="{Binding CanvasHeight}"
@@ -580,11 +628,21 @@
                                                 BorderBrush="Transparent"
                                                 BorderThickness="2"
                                                 CornerRadius="{Binding Radius, Converter={StaticResource DoubleToCornerRadiusConverter}}"
-                                                Cursor="SizeAll"
                                                 PreviewMouseLeftButtonDown="Layer_OnPreviewMouseLeftButtonDown"
                                                 PreviewMouseMove="Layer_OnPreviewMouseMove"
                                                 PreviewMouseLeftButtonUp="Layer_OnPreviewMouseLeftButtonUp"
                                                 LostMouseCapture="Layer_OnLostMouseCapture">
+                                            <Border.Style>
+                                                <Style TargetType="Border">
+                                                    <Setter Property="Cursor" Value="Arrow" />
+                                                    <Style.Triggers>
+                                                        <DataTrigger Binding="{Binding DataContext.ActiveTool, RelativeSource={RelativeSource AncestorType={x:Type UserControl}}}"
+                                                                     Value="{x:Static vm:EditorTool.Move}">
+                                                            <Setter Property="Cursor" Value="SizeAll" />
+                                                        </DataTrigger>
+                                                    </Style.Triggers>
+                                                </Style>
+                                            </Border.Style>
                                             <ContentControl Content="{Binding}" Margin="-1">
                                                 <ContentControl.Style>
                                                     <Style TargetType="ContentControl">
@@ -592,6 +650,15 @@
                                                         <Style.Triggers>
                                                             <DataTrigger Binding="{Binding IsText}" Value="True">
                                                                 <Setter Property="ContentTemplate" Value="{StaticResource TextTemplate}" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding ShapeType}" Value="rectangle">
+                                                                <Setter Property="ContentTemplate" Value="{StaticResource RectangleShapeTemplate}" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding ShapeType}" Value="circle">
+                                                                <Setter Property="ContentTemplate" Value="{StaticResource CircleShapeTemplate}" />
+                                                            </DataTrigger>
+                                                            <DataTrigger Binding="{Binding ShapeType}" Value="polygon">
+                                                                <Setter Property="ContentTemplate" Value="{StaticResource PolygonShapeTemplate}" />
                                                             </DataTrigger>
                                                             <DataTrigger Binding="{Binding ComponentType}" Value="page">
                                                                 <Setter Property="ContentTemplate" Value="{StaticResource PageTemplate}" />
@@ -643,6 +710,36 @@
                                     </DataTemplate>
                                 </ItemsControl.ItemTemplate>
                             </ItemsControl>
+                            <Canvas x:Name="ShapeCreationOverlay"
+                                    Width="{Binding CanvasWidth}"
+                                    Height="{Binding CanvasHeight}"
+                                    HorizontalAlignment="Left"
+                                    VerticalAlignment="Top"
+                                    IsHitTestVisible="False"
+                                    Panel.ZIndex="10000">
+                                <Rectangle x:Name="RectangleShapePreview"
+                                           Visibility="Collapsed"
+                                           Fill="#40367FD8"
+                                           Stroke="#B9D8FF"
+                                           StrokeThickness="2"
+                                           StrokeDashArray="5,3"
+                                           RadiusX="8"
+                                           RadiusY="8" />
+                                <Ellipse x:Name="CircleShapePreview"
+                                         Visibility="Collapsed"
+                                         Fill="#40367FD8"
+                                         Stroke="#B9D8FF"
+                                         StrokeThickness="2"
+                                         StrokeDashArray="5,3" />
+                                <Polygon x:Name="PolygonShapePreview"
+                                         Visibility="Collapsed"
+                                         Points="0.5,0 0.933,0.25 0.933,0.75 0.5,1 0.067,0.75 0.067,0.25"
+                                         Stretch="Fill"
+                                         Fill="#40367FD8"
+                                         Stroke="#B9D8FF"
+                                         StrokeThickness="2"
+                                         StrokeDashArray="5,3" />
+                            </Canvas>
                         </Grid>
                     </Border>
                 </Grid>

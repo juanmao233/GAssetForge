@@ -3,6 +3,8 @@
 **/obj/
 dist/
 artifacts/
+/GAssetForge.exe
+/.GAssetForge.exe.installing
 TestResults/
 coverage/
 *.coverage

@@ -9,9 +9,100 @@ internal static class GenerationBatchTurnReconcilerSmokeTests
 {
     public static async Task RunAllAsync()
     {
+        await FailedSubmissionDoesNotClaimTurnEndedAsync();
+        await StructuredReadinessFailurePreservesOriginalTaskAndDiagnosticsAsync();
+        await CompletedTurnKeepsActualImageNetworkFailureVisibleAsync();
         await TransportStreamDisconnectKeepsPendingTasksForRecoveryAsync();
         await CompletedTurnWithoutClaimsKeepsPendingTasksForRecoveryAsync();
         await TerminalTasksStayImmutableAndActiveClaimsRemainUnresolvedAsync();
+    }
+
+    private static async Task StructuredReadinessFailurePreservesOriginalTaskAndDiagnosticsAsync()
+    {
+        var testRoot = CreateTestRoot();
+        try
+        {
+            var store = new JsonGenerationTaskStore(testRoot);
+            var batchId = Guid.NewGuid().ToString("N");
+            var original = (await store.CreateBatchAsync(CreateBatchRequest(batchId, 1))).Single();
+            var exception = new AgentReadinessException("agent_mcp_initialization_timeout", "mcp_readiness",
+                "fixture 工具初始化未完成", "thread-current", "mcp=starting; epoch=2", "等待初始化完成后恢复原任务。");
+            var diagnostic = GenerationDispatchFailure.FromException(exception, "session_preparation");
+            var result = await new GenerationBatchTurnReconciler(store).ReconcileAsync(
+                batchId, null, exception.Message, diagnostic: diagnostic);
+            True(ReferenceEquals(diagnostic, result.Diagnostic), "收束不能丢失 typed 诊断及 Exception");
+            Equal(exception.OccurredAt, result.OccurredAt, "收束保留实际异常发生时间");
+            True(result.FailureDetail?.Contains(exception.Code, StringComparison.Ordinal) == true,
+                "最终用户提示需要稳定错误码");
+            True(result.FailureDetail?.Contains(exception.RecoveryHint, StringComparison.Ordinal) == true,
+                "最终用户提示需要与就绪故障对应的恢复建议");
+            False(result.FailureDetail?.Contains("Turn 已结束", StringComparison.Ordinal) == true,
+                "结构化 readiness 失败不得谎报 Turn 已完成或已结束");
+            var persisted = (await store.ListBatchAsync(batchId)).Single();
+            Equal(original.Id, persisted.Id, "收束诊断必须使用原任务 ID");
+            Equal(original.Revision, persisted.Revision, "收束诊断不得改变原任务");
+        }
+        finally
+        {
+            DeleteTestRoot(testRoot);
+        }
+    }
+
+    private static async Task FailedSubmissionDoesNotClaimTurnEndedAsync()
+    {
+        var testRoot = CreateTestRoot();
+        try
+        {
+            var store = new JsonGenerationTaskStore(testRoot);
+            var batchId = Guid.NewGuid().ToString("N");
+            var original = (await store.CreateBatchAsync(CreateBatchRequest(batchId, 1))).Single();
+            const string cause = "Agent 会话尚未达到可执行状态。请先启动会话并完成认证与 MCP 工具初始化。";
+            var result = await new GenerationBatchTurnReconciler(store).ReconcileAsync(batchId, null, cause);
+            False(result.FailureDetail?.Contains("Turn 已结束", StringComparison.Ordinal) == true,
+                "没有 Turn 结果的调度拒绝不得虚报 Agent Turn 已结束");
+            True(result.FailureDetail?.Contains(cause, StringComparison.Ordinal) == true,
+                "汇总必须保留调度入口原始错误");
+            var persisted = (await store.ListBatchAsync(batchId)).Single();
+            Equal(original.Id, persisted.Id, "调度失败仍只保留原任务，不建立替代任务");
+            Equal(original.Revision, persisted.Revision, "诊断不得改写 Pending 任务修订或状态");
+            Equal(GenerationTaskStatus.Pending, persisted.Status, "未启动任务必须保持 Pending");
+        }
+        finally
+        {
+            DeleteTestRoot(testRoot);
+        }
+    }
+
+    private static async Task CompletedTurnKeepsActualImageNetworkFailureVisibleAsync()
+    {
+        var testRoot = CreateTestRoot();
+        try
+        {
+            var store = new JsonGenerationTaskStore(testRoot);
+            var batchId = Guid.NewGuid().ToString("N");
+            var task = (await store.CreateBatchAsync(CreateBatchRequest(batchId, 1))).Single();
+            await store.ClaimAsync(task.Id, "network-failure-fixture");
+            const string actualError = "image generation failed: network error: error sending request for url (https://chatgpt.com/backend-api/codex/images/generations)";
+            var failed = await store.FailAsync(task.Id, "network-failure-fixture", new GenerationTaskFailure
+            {
+                Message = actualError,
+                Code = "image_generation_failed",
+                Stage = "image_generation",
+                Retryable = true
+            });
+            var result = await new GenerationBatchTurnReconciler(store).ReconcileAsync(batchId,
+                new AgentTurnResult("thread-fixture", "turn-fixture", "completed", null), null);
+            Equal(1, result.FailedCount, "Turn completed 不能掩盖已落盘的生成失败");
+            True(result.FailureDetail?.Contains("image_generation_failed", StringComparison.Ordinal) == true,
+                "正常结束的 Turn 汇总必须显示持久失败码");
+            True(result.FailureDetail?.Contains(actualError, StringComparison.Ordinal) == true,
+                "工作台最终汇总不能吞掉真实绘图网络错误");
+            Equal(failed.Revision, (await store.GetAsync(task.Id))!.Revision, "汇总失败原因不得改写任务");
+        }
+        finally
+        {
+            DeleteTestRoot(testRoot);
+        }
     }
 
     private static async Task TransportStreamDisconnectKeepsPendingTasksForRecoveryAsync()

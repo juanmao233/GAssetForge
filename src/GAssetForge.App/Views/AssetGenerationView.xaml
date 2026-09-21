@@ -914,9 +914,9 @@
                                                                 Padding="0"
                                                                 Command="{Binding DataContext.UseProjectCurrentDirectoryForRowCommand, RelativeSource={RelativeSource AncestorType={x:Type UserControl}}}"
                                                                 CommandParameter="{Binding}"
-                                                                Content="当前"
+                                                                Content="Final"
                                                                 FontSize="9"
-                                                                ToolTip="使用 Project 面板当前目录" />
+                                                                ToolTip="使用项目 Assets/Final 根目录" />
                                                         <Button Grid.Column="2"
                                                                 Width="30"
                                                                 Height="28"
@@ -972,11 +972,11 @@
                                     <StackPanel DockPanel.Dock="Right" Orientation="Horizontal">
                                         <Button x:Name="UseProjectOutputButton"
                                                 Command="{Binding UseProjectCurrentDirectoryCommand}"
-                                                Content="选中行使用项目目录"
+                                                Content="选中行使用 Final 根目录"
                                                 Style="{StaticResource GenerationSmallButtonStyle}" />
                                         <Button x:Name="ChooseGenerationOutputButton"
                                                 Command="{Binding ChooseOutputDirectoryCommand}"
-                                                Content="选择选中行目录…"
+                                                Content="选择 Final 分类目录…"
                                                 Style="{StaticResource GenerationSmallButtonStyle}" />
                                     </StackPanel>
                                     <TextBlock VerticalAlignment="Center"

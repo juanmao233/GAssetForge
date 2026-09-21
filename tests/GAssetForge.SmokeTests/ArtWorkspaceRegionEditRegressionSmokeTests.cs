@@ -513,7 +513,7 @@ internal static class ArtWorkspaceRegionEditRegressionSmokeTests
         var fixture = await PublishRegionEditTaskAsync(
             temporaryRoot,
             "region-edit-automatic-retry",
-            "Generated/ArtWorkspace/Characters");
+            "Final/Characters");
         await fixture.Store.ClaimAsync(fixture.Task.Id, AgentId);
         var failed = await fixture.Store.FailAsync(
             fixture.Task.Id,
@@ -572,10 +572,10 @@ internal static class ArtWorkspaceRegionEditRegressionSmokeTests
         var targetSeparator = childTargetPath.LastIndexOf('/');
         True(targetSeparator > 0, "通用恢复 retry child 必须保留 Assets 相对目标目录");
         Equal(
-            $"Generated/ArtWorkspace/Characters/{child.BatchId}/Final",
+            $"Final/Characters/ArtWorkspace/{child.BatchId}",
             childTargetPath[..targetSeparator],
             "art-workspace 通用恢复 retry 必须保留自定义输出前缀并替换父 batch 目录，" +
-            "不能嵌套到父 Final/ArtWorkspace");
+            "不能嵌套到父批次目录");
         True(
             childTargetPath[(targetSeparator + 1)..].StartsWith(
                 $"art_workspace_{child.BatchId![..8]}_",
@@ -617,7 +617,7 @@ internal static class ArtWorkspaceRegionEditRegressionSmokeTests
         var paths = new WorkspacePaths(Path.Combine(root, "app-data"));
         var projectRoot = Path.Combine(root, "project");
         var assetRoot = Path.Combine(projectRoot, "Assets");
-        var sourceDirectory = Path.Combine(assetRoot, "ArtWorkspace", "References");
+        var sourceDirectory = Path.Combine(assetRoot, "User", "ArtWorkspace", "References");
         Directory.CreateDirectory(sourceDirectory);
         var currentPath = Path.Combine(sourceDirectory, "current.png");
         var oldBluePath = Path.Combine(sourceDirectory, "history-blue-a.png");
@@ -781,9 +781,9 @@ internal static class ArtWorkspaceRegionEditRegressionSmokeTests
         Equal(0, retryDelivery!.StagingPaths.Length,
             "无背景剔除的 region-edit retry 必须保持 StagingPaths=[]");
         Equal(
-            $"Generated/ArtWorkspace/{retryTask.BatchId}/Final",
+            $"Final/ArtWorkspace/{retryTask.BatchId}",
             retryDelivery.OutputDirectory,
-            "Gateway retry child 必须使用独立 ArtWorkspace child Final 目录");
+            "Gateway retry child 必须使用独立且无尾随 Final 的 ArtWorkspace 目录");
         if (failureMode == GatewayFailureMode.TransientDelivery)
         {
             True(
@@ -868,13 +868,13 @@ internal static class ArtWorkspaceRegionEditRegressionSmokeTests
     private static async Task<PublishedFixture> PublishRegionEditTaskAsync(
         string temporaryRoot,
         string testName,
-        string outputRelativeDirectory = "Generated/ArtWorkspace")
+        string outputRelativeDirectory = "Final")
     {
         var root = Path.Combine(temporaryRoot, testName, Guid.NewGuid().ToString("N"));
         var paths = new WorkspacePaths(Path.Combine(root, "app-data"));
         var projectRoot = Path.Combine(root, "project");
         var assetRoot = Path.Combine(projectRoot, "Assets");
-        var sourceDirectory = Path.Combine(assetRoot, "ArtWorkspace", "References");
+        var sourceDirectory = Path.Combine(assetRoot, "User", "ArtWorkspace", "References");
         Directory.CreateDirectory(sourceDirectory);
         var currentPath = Path.Combine(sourceDirectory, "current.png");
         var oldBluePath = Path.Combine(sourceDirectory, "history-blue-a.png");
@@ -902,7 +902,7 @@ internal static class ArtWorkspaceRegionEditRegressionSmokeTests
             (batchId, taskIds, _) =>
             {
                 publishedSource.TrySetResult((batchId, taskIds.Single()));
-                return GenerationBatchDispatchEnqueueResult.QueueStopped;
+                return GenerationBatchDispatchEnqueueResult.Enqueued;
             },
             console,
             isConnected: static () => true,
@@ -923,6 +923,11 @@ internal static class ArtWorkspaceRegionEditRegressionSmokeTests
         var published = await publishedSource.Task.WaitAsync(Timeout);
         var task = await store.GetAsync(published.TaskId)
             ?? throw new InvalidOperationException("找不到已发布的局部编辑持久任务。");
+        True(MaterialGenerationConstraintComposer.TryReadDelivery(task.Constraints, out var delivery) &&
+             delivery?.Workspace is not null,
+            "局部编辑任务应冻结完整运行区合同");
+        Equal($"AI/ArtWorkspace/{published.BatchId}", delivery!.Workspace!.RootPath,
+            "局部编辑运行区应位于 Assets/AI/ArtWorkspace/<batch>");
         cancellation.Cancel();
         await ExpectCanceledAsync(generation);
         return new PublishedFixture(
@@ -943,7 +948,7 @@ internal static class ArtWorkspaceRegionEditRegressionSmokeTests
         string currentSha256,
         string oldBluePath,
         string olderBluePath,
-        string outputRelativeDirectory = "Generated/ArtWorkspace")
+        string outputRelativeDirectory = "Final")
     {
         var tokenId = Guid.NewGuid().ToString("N");
         return new ArtWorkspaceGenerationRequest

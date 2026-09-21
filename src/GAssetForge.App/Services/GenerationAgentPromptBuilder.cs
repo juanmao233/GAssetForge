@@ -7,6 +7,8 @@ namespace GAssetForge.App.Services;
 public static class GenerationAgentPromptBuilder
 {
     public const string McpServerName = ProductIdentity.McpServerName;
+    internal const string GenerationBatchPromptHeader =
+        "执行 GAssetForge 已发布的游戏美术素材生成批次。";
 
     public static string Build(IReadOnlyCollection<string> taskIds) =>
         BuildCore(taskIds, null, null);
@@ -58,7 +60,7 @@ public static class GenerationAgentPromptBuilder
         }
 
         var prompt = new StringBuilder();
-        prompt.AppendLine("执行 GAssetForge 已发布的游戏美术素材生成批次。");
+        prompt.AppendLine(GenerationBatchPromptHeader);
         prompt.AppendLine($"默认只使用名为 `{McpServerName}` 的 MCP Server 读取并更新这些任务；只有提示明确提供 GAssetForge 官方本地任务桥接 CLI 时，才允许通过该桥接调用同名工具：");
         foreach (var taskId in normalizedIds)
         {

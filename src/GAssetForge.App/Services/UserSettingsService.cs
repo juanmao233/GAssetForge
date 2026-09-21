@@ -108,7 +108,16 @@ public sealed class UserSettingsModel
     public string? PixelAlignmentLastOutputDirectory { get; set; }
 }
 
-public sealed class UserSettingsService
+public interface IUserSettingsService
+{
+    WorkspacePaths Paths { get; }
+
+    UserSettingsModel Load();
+
+    void Save(UserSettingsModel settings);
+}
+
+public sealed class UserSettingsService : IUserSettingsService
 {
     private readonly WorkspacePaths _paths;
     private static readonly JsonSerializerOptions Options = new()

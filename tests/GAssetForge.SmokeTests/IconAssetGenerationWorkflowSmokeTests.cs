@@ -4,6 +4,7 @@ using System.IO;
 using GAssetForge.App.Services;
 using GAssetForge.App.ViewModels;
 using GAssetForge.Core.Generation;
+using GAssetForge.Core.Projects;
 
 namespace GAssetForge.SmokeTests;
 
@@ -40,7 +41,7 @@ internal static class IconAssetGenerationWorkflowSmokeTests
             var style = shell.ArtStyleLibrary.SelectedGroup
                 ?? throw new InvalidOperationException("Icon 素材生成 smoke 缺少默认风格组。");
             style.Description = "低饱和手绘奇幻游戏 Icon，硬边高光与清晰轮廓";
-            var outputDirectory = Path.Combine(paths.GeneratedAssetDirectory, "IconItems");
+            var outputDirectory = Path.Combine(paths.FinalAssetDirectory, "IconItems");
             Directory.CreateDirectory(outputDirectory);
             var row = generation.DraftRows.Single();
             row.Description = "单个银质机械钥匙 Icon";
@@ -106,10 +107,26 @@ internal static class IconAssetGenerationWorkflowSmokeTests
                  task.Constraints.Prompt.Contains("不得添加 Tilemap", StringComparison.Ordinal),
                 "Icon 发布任务应使用物品描述并明确隔离 Tilemap 语义");
             True(MaterialGenerationConstraintComposer.TryReadDelivery(task.Constraints, out var delivery) &&
-                 delivery is not null &&
-                 delivery.TargetPaths.Single().Contains("/Icon/", StringComparison.Ordinal) &&
-                 Path.GetFileName(delivery.TargetPaths.Single()).StartsWith("icon_", StringComparison.Ordinal),
-                "Icon 首次生成应落入独立 Icon 分类目录与文件名前缀");
+                 delivery is not null,
+                "Icon 首次生成应冻结 delivery");
+            var expectedRunRoot = ProjectAssetLayout.BuildAiRunRelativePath(
+                ProjectAssetLayout.IconCategory,
+                published.BatchId);
+            var expectedFinalDirectory = ProjectAssetLayout.BuildFinalBatchRelativePath(
+                ProjectAssetLayout.IconCategory,
+                published.BatchId,
+                "IconItems");
+            Equal(expectedRunRoot, delivery!.Workspace?.RootPath,
+                "Icon 首次生成 Run 应落入 AI/Icon/<batch>");
+            Equal(expectedFinalDirectory, delivery.OutputDirectory,
+                "Icon 首次生成最终目录应落入 Final/IconItems/Icon/<batch>");
+            True(delivery.TargetPaths.Single().StartsWith(
+                     $"{expectedFinalDirectory}/icon_",
+                     StringComparison.Ordinal) &&
+                 !delivery.TargetPaths.Single().Contains(
+                     $"/{published.BatchId}/Final/",
+                     StringComparison.Ordinal),
+                "Icon 最终文件应直接位于分类批次目录，不得在 batch 后尾随 Final");
 
             shell.IconDesign.CameraAzimuthDegrees = 75d;
             shell.IconDesign.ImageWidth = 1024;

@@ -18,15 +18,30 @@ public sealed class ProjectPaths
         ArgumentException.ThrowIfNullOrWhiteSpace(projectRoot);
         RootDirectory = Normalize(projectRoot);
         AssetDirectory = Path.Combine(RootDirectory, "Assets");
-        GeneratedAssetDirectory = Path.Combine(AssetDirectory, "Generated");
+        AiAssetDirectory = ProjectAssetLayout.GetAiRootFullPath(AssetDirectory);
+        FinalAssetDirectory = ProjectAssetLayout.GetFinalRootFullPath(AssetDirectory);
+        UserAssetDirectory = ProjectAssetLayout.GetUserRootFullPath(AssetDirectory);
+        LegacyGeneratedAssetDirectory = Path.Combine(
+            AssetDirectory,
+            ProjectAssetLayout.LegacyGeneratedDirectoryName);
+        GeneratedAssetDirectory = LegacyGeneratedAssetDirectory;
         PackagesDirectory = Path.Combine(RootDirectory, "Packages");
         ProjectSettingsDirectory = Path.Combine(RootDirectory, "ProjectSettings");
         BlueprintDirectory = Path.Combine(ProjectSettingsDirectory, "Blueprints");
         ArtWorkspaceDirectory = Path.Combine(ProjectSettingsDirectory, "ArtWorkspace");
         ArtWorkspacePath = Path.Combine(ArtWorkspaceDirectory, "art-workspace.v1.json");
         ArtWorkspaceBackupPath = $"{ArtWorkspacePath}.bak";
-        ArtWorkspaceReferenceDirectory = Path.Combine(AssetDirectory, "ArtWorkspace", "References");
-        BlueprintRunDirectory = Path.Combine(GeneratedAssetDirectory, "GAssetForge", "BlueprintRuns");
+        ArtWorkspaceReferenceDirectory = Path.Combine(
+            UserAssetDirectory,
+            ProjectAssetLayout.ArtWorkspaceCategory,
+            "References");
+        LegacyArtWorkspaceReferenceDirectory = Path.Combine(
+            AssetDirectory,
+            ProjectAssetLayout.ArtWorkspaceCategory,
+            "References");
+        BlueprintRunDirectory = Path.Combine(
+            AiAssetDirectory,
+            ProjectAssetLayout.BlueprintCategory);
         var canonicalManifestPath = Path.Combine(ProjectSettingsDirectory, ManifestFileName);
         var legacyManifestPath = Path.Combine(ProjectSettingsDirectory, LegacyManifestFileName);
         var useLegacyManifest =
@@ -43,6 +58,16 @@ public sealed class ProjectPaths
 
     public string AssetDirectory { get; }
 
+    public string AiAssetDirectory { get; }
+
+    public string FinalAssetDirectory { get; }
+
+    public string UserAssetDirectory { get; }
+
+    /// <summary>Historical Assets/Generated location retained for compatibility reads.</summary>
+    public string LegacyGeneratedAssetDirectory { get; }
+
+    /// <summary>Compatibility alias for <see cref="LegacyGeneratedAssetDirectory"/>.</summary>
     public string GeneratedAssetDirectory { get; }
 
     public string PackagesDirectory { get; }
@@ -58,6 +83,8 @@ public sealed class ProjectPaths
     public string ArtWorkspaceBackupPath { get; }
 
     public string ArtWorkspaceReferenceDirectory { get; }
+
+    public string LegacyArtWorkspaceReferenceDirectory { get; }
 
     public string BlueprintRunDirectory { get; }
 
@@ -156,7 +183,9 @@ public sealed class ProjectWorkspaceService
             EnsureNotReparsePoint(stagingRoot, "项目暂存目录");
 
             var stagingPaths = new ProjectPaths(stagingRoot);
-            Directory.CreateDirectory(stagingPaths.GeneratedAssetDirectory);
+            Directory.CreateDirectory(stagingPaths.AiAssetDirectory);
+            Directory.CreateDirectory(stagingPaths.FinalAssetDirectory);
+            Directory.CreateDirectory(stagingPaths.UserAssetDirectory);
             Directory.CreateDirectory(stagingPaths.PackagesDirectory);
             Directory.CreateDirectory(stagingPaths.ProjectSettingsDirectory);
 
@@ -377,7 +406,6 @@ public sealed class ProjectWorkspaceService
 
         EnsureNotReparsePoint(paths.RootDirectory, "项目目录");
         EnsureRequiredDirectory(paths.RootDirectory, paths.AssetDirectory, "Assets");
-        EnsureRequiredDirectory(paths.RootDirectory, paths.GeneratedAssetDirectory, "Assets/Generated");
         EnsureRequiredDirectory(paths.RootDirectory, paths.PackagesDirectory, "Packages");
         EnsureRequiredDirectory(paths.RootDirectory, paths.ProjectSettingsDirectory, "ProjectSettings");
         EnsureRequiredProjectFilePair(

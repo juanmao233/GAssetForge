@@ -5,6 +5,90 @@ development track; versioning policy will be finalized before the first public r
 
 ## Unreleased
 
+### Added
+
+- Added structured generation diagnostics with stable failure codes, operation stages, original
+  exceptions, readiness snapshots, batch/task/thread correlation, and recovery guidance. JSONL v2
+  records both event time and log-write time; console copy exports the complete redacted diagnostic.
+- File-log failures now fall back to a visible in-memory warning without interrupting generation.
+
+- Added “清除对话并停止任务” to Art Workspace: clears persisted chat, stops only the current
+  project's art dispatches, and preserves the draft, canvas references, frozen Runs, and outputs.
+- Added a generated root `GAssetForge.exe` engineering entry backed by a tracked launcher project.
+  It incrementally builds the current App and MCP Server before launch, records a local build log,
+  and fails closed instead of silently starting a stale `dist` executable.
+- Added a read-only repository text-format check for LF, strict UTF-8 without BOM, and final
+  newlines, and run it in CI before restore.
+- Added native vector shape tools to the Page UI workspace for rectangles, circles, and regular
+  polygons, including drag previews, single-transaction Undo/Redo, Schema v2 persistence, Prefab
+  cloning, and bounded polygon geometry validation.
+- Added the centralized `ProjectAssetLayout` path Module so ViewModels, Gateways, repositories, and
+  the Harness share one validated Interface for project asset categories and boundaries.
+
+### Changed
+
+- Reorganized new project asset writes into three predictable roots: category-specific AI Runs and
+  diagnostics under `Assets/AI`, validated deliverables under `Assets/Final`, and user-created or
+  imported content under `Assets/User`. Art Workspace references now use
+  `Assets/User/ArtWorkspace/References`, Blueprint audits use `Assets/AI/Blueprint`, and the global
+  style library uses `Assets/User/StyleLibrary` below the application data root.
+- Existing `Assets/Generated`, `Assets/ArtWorkspace/References`, and frozen task workspace/target
+  paths remain readable and repairable in place; project activation does not bulk-move or rewrite
+  historical tasks.
+
+### Fixed
+
+- Each generation thread now waits for its own GAssetForge MCP readiness cycle. Previous-thread
+  readiness, delayed notifications, canceled thread creation, and stopping-session callbacks cannot
+  prematurely release a new batch. Initialization failures preserve the original Pending tasks.
+- Dispatch progress no longer claims a Turn was submitted or ended without supporting runtime
+  evidence. Preparation, submission, execution, and durable image-task failures remain distinct;
+  art-chat errors include diagnostic IDs instead of universally suggesting a prompt rewrite.
+
+- Agent subprocesses now consistently inherit an enabled Windows manual proxy when no explicit
+  proxy environment is configured, while preserving explicit values and bypassing loopback MCP.
+  Proxy/API diagnostics report configuration presence only, not secrets or unverified reachability.
+- App-owned Codex sessions disable the obsolete MCP alias without editing global Codex settings,
+  avoiding duplicate authentication errors beside the current authenticated GAssetForge server.
+- A normally completed Agent turn now reports failed image tasks and their durable error codes in
+  the final summary. Art conversation failures close their progress deterministically and explain
+  image-service network failures without claiming unavailable API fallback or retrying silently.
+- Restart recovery no longer auto-dispatches orphaned Art Workspace conversations. Restored
+  unfinished messages are marked interrupted, and cancellation releases the UI command even when
+  a provider ignores it. Cleared requests cannot import late results into a new conversation.
+- Manual art reset persistently withdraws dispatch intent before canceling queued/active batches,
+  drains in-flight publication and retry creation, and prevents late failures from spawning an
+  automatic retry. Other projects and workflows retain their existing queue behavior.
+- A late completion from a canceled Codex turn no longer replaces the new thread bookmark or
+  publishes a false completion for the next turn; legitimate early completions still resolve once.
+- Art Workspace conversation history is now selectable and copyable, including an explicit safe
+  whole-message copy action and standard cut/copy/paste commands in the instruction editor; copied
+  image tokens expose only their visible labels, never managed paths, IDs, hashes, or coordinates.
+- Queue stops and Codex response-stream interruptions now release the Art Workspace UI waiter and
+  send gate without discarding the durable task, frozen target, or batch owner. A terminal result
+  arriving later in the same application session updates the original conversation message and is
+  imported exactly once, while the user can continue composing another instruction.
+- Automatic Codex Runtime discovery now checks the current Desktop install and its revision
+  directories in addition to npm, PATH, and legacy locations, probes every usable candidate, and
+  selects the newest parsed CLI version instead of letting an older npm shim shadow a compatible
+  runtime.
+- Long image-generation calls no longer outlive their own HTTP MCP session: the shared idle lease is
+  now 20 minutes for the 15-minute managed tool timeout. Recovery also accepts historical Art
+  Workspace delivery contracts with an empty `stagingPaths` array and repairs their frozen Run in
+  place without rewriting legacy targets.
+- Asset creation, retry reference mirroring, and Project navigation now validate every existing
+  path segment and reject symbolic links or directory junctions before reading or writing; an empty
+  or damaged canonical style-library directory also no longer hides a valid legacy library.
+- Fixed an App Server ordering race where an MCP elicitation arriving immediately after the
+  `turn/start` response could be declined before the active Turn ID was bound. Generation approval
+  now also requires the exact frozen managed claimant for that task and stays fail-closed for
+  ordinary conversation prompts.
+- User-settings write failures now keep the editor usable while surfacing a `Settings/Error` entry
+  in the Workbench Console and session diagnostics instead of disappearing silently.
+- Updated MCP initialization guidance to use the current `submit_generation_output` and
+  `run_image_delivery_fallback` path without requiring tools hidden by a client's allowlist or
+  asking the Agent to write directly into `Assets`.
+
 ## 1.0.26t1 - 2026-08-28
 
 ### Added

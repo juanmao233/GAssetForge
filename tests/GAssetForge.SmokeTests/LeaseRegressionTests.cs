@@ -12,7 +12,18 @@ internal static class LeaseRegressionTests
     public static void HttpSessionsExpireAfterInactivityDeterministically()
     {
         var time = new ManualTimeProvider(new DateTimeOffset(2026, 8, 20, 7, 0, 0, TimeSpan.Zero));
-        var sessions = new McpSessionRegistry(time, TimeSpan.FromSeconds(90));
+        Equal(
+            TimeSpan.FromSeconds(GenerationMcpRuntimePolicy.HttpSessionIdleTimeoutSeconds),
+            McpSessionRegistry.DefaultSessionTtl,
+            "HTTP MCP 默认 idle TTL 应与共享生成工具超时策略一致");
+        Equal(true, McpSessionRegistry.DefaultSessionTtl >= TimeSpan.FromMinutes(20),
+            "HTTP MCP 默认 idle TTL 不得短于 20 分钟");
+        Equal(true,
+            McpSessionRegistry.DefaultSessionTtl >
+            TimeSpan.FromSeconds(GenerationMcpRuntimePolicy.ToolTimeoutSeconds),
+            "HTTP MCP 默认 idle TTL 应覆盖最长生成工具调用并保留安全余量");
+
+        var sessions = new McpSessionRegistry(time);
         var session = sessions.CreateSession();
         session.RecordInitialize("2025-06-18", "Codex Lease Tests", "1.0.0");
         session.CompleteInitialization();
@@ -22,10 +33,10 @@ internal static class LeaseRegressionTests
         Equal(true, sessions.GetActiveSessions().Any(candidate => candidate.IsInitialized),
             "活跃握手会话应令健康状态可判定为 connected");
 
-        time.Advance(TimeSpan.FromSeconds(89));
+        time.Advance(McpSessionRegistry.DefaultSessionTtl - TimeSpan.FromSeconds(1));
         Equal(true, sessions.TryGetActive(sessionId, out _), "TTL 内的请求应续期会话活动时间");
 
-        time.Advance(TimeSpan.FromSeconds(89));
+        time.Advance(McpSessionRegistry.DefaultSessionTtl - TimeSpan.FromSeconds(1));
         Equal(1, sessions.GetActiveSessions().Length, "请求续期后的会话不应提前过期");
 
         time.Advance(TimeSpan.FromSeconds(2));
@@ -36,7 +47,7 @@ internal static class LeaseRegressionTests
         requestExpiredSession.RecordInitialize("2025-06-18", "Codex Lease Tests", "1.0.0");
         requestExpiredSession.CompleteInitialization();
         var requestExpiredSessionId = sessions.Add(requestExpiredSession);
-        time.Advance(TimeSpan.FromSeconds(91));
+        time.Advance(McpSessionRegistry.DefaultSessionTtl + TimeSpan.FromSeconds(1));
 
         Equal(false, sessions.TryGetActive(requestExpiredSessionId, out _),
             "请求路径本身也应清理超时会话");

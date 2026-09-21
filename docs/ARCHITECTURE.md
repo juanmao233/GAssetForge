@@ -25,6 +25,10 @@ GAssetForge.McpServer
   Context            读取桌面端当前设置与有效 Assets 根目录
   Generation Tools   暴露认领、模型源文件提交、兼容后处理、完成与失败回传
   Submission         软件导入模型原图、归一化、剔色、校验并原子提交最终资产
+
+GAssetForge.EngineeringLauncher
+  Root Entry         生成根目录 GAssetForge.exe；增量构建当前 App/MCP 后启动 Debug apphost
+  Fail-closed        构建失败时记录 artifacts 日志并停止，禁止回退旧 dist
 ```
 
 ## 核心原则
@@ -54,19 +58,38 @@ AvalonDock 的模块接口只承担面板拓扑、大小、停靠位置、隐藏
 
 `MainWindow` 维护面板注册表。布局恢复时，`AvalonDockLayoutService` 仅根据 `ContentId` 把真实 WPF View 重新挂接到布局模型；恢复失败则重建默认布局。工具栏上下文和属性栏上下文相互独立：稳定的 `ui-properties` host 根据当前活动 dock 页装载单实例属性模块。UI、Tilemap、美术工作区、Icon、背景剔除、图片描边和像素对齐分别使用自己的 Properties View；无专用属性的页面显示稳定空状态。因此属性切换不需要创建第二个属性 ContentId，也不会改变已保存布局结构。`art-workspace` 是独立中央文档而不是 `WorkflowKind`，激活它不会改写项目 manifest 中的初始业务模板。
 
+### 项目资产三分区 Interface
+
+`ProjectAssetLayout` 是项目路径规则的统一 Module/Interface，在一个位置提供分类、规范化、边界校验与路径
+构造；ViewModel、Gateway、Harness 和 repository 不得各自拼接业务目录。这个较深的 Module 形成稳定 Seam，
+使新工作具有高 Leverage 和 Locality：
+
+```text
+Assets/
+  AI/<ArtWorkspace|Tilemap|Icon>/<batchId>/...  Run、Prompt、中间图与诊断
+  AI/Blueprint/<runId>/...                     蓝图计划与审计
+  Final/[自定义集合/]<category>/<batchId>/...  Harness 校验后的最终产物
+  User/...                                      用户创建或导入的项目内容
+  User/ArtWorkspace/References/...              美术工作区受管参考图
+```
+
+新项目会建立 `AI`、`Final`、`User` 三个根，业务子目录按需建立。旧 `Assets/Generated`、
+`Assets/ArtWorkspace/References` 与任务中已经冻结的 workspace/target path 是兼容读取别名：恢复或续作必须
+使用原路径，不批量搬迁、不把历史任务改写到新目录；新写入才使用 canonical Interface。
+
 ### 独立状态生命周期
 
 | 状态 | 适配器 | 生命周期 |
 | --- | --- | --- |
 | 项目清单 | `ProjectWorkspaceService` | `<ProjectRoot>\ProjectSettings\gassetforge.project.json`；项目身份、工作流与 Tilemap 参数 |
 | UI 编辑数据 | `JsonProjectRepository` | `<ProjectRoot>\ProjectSettings\ui-project.pfui.json`；自动保存、备份、导入、导出、Undo / Redo |
-| 美术工作区 | `JsonArtWorkspaceRepository` | `<ProjectRoot>\ProjectSettings\ArtWorkspace\art-workspace.v1.json`；画布、视口、输出框、受管图片摆放与创作意图；参考图复制到 `<ProjectRoot>\Assets\ArtWorkspace\References` |
+| 美术工作区 | `JsonArtWorkspaceRepository` | `<ProjectRoot>\ProjectSettings\ArtWorkspace\art-workspace.v1.json`；画布、视口、输出框、受管图片摆放与创作意图；新参考图复制到 `<ProjectRoot>\Assets\User\ArtWorkspace\References`，旧路径继续可读 |
 | 停靠布局 | `AvalonDockLayoutService` | 窗口关闭保存、启动恢复、可独立重置 |
 | 用户设置 | `UserSettingsService` | 主题、最近项目、Agent/MCP 配置、Codex thread ID + 工作目录、素材生成草稿、背景/棋盘格剔除、图片描边、Icon 相机参数与像素对齐偏好 |
-| 美术风格素材库 | `JsonArtStyleLibraryRepository` | 风格组、人工提示词、统一提示词样本与当前选择即时原子保存；参考图片复制到受管目录 |
+| 美术风格素材库 | `JsonArtStyleLibraryRepository` | 应用全局 `<AppDataRoot>\Assets\User\StyleLibrary`；风格组、人工提示词、统一提示词样本与当前选择即时原子保存，参考图片复制到受管目录 |
 | 风格提示词分析请求 | `AgentArtStylePromptAnalysisService` | Agent 工作目录下 `.gassetforge\style-analysis\<requestId>` 的一次性 request/result/diagnostics；不作为风格库真相源 |
 | AI 生成任务 | `JsonGenerationTaskStore` | 本地跨进程持久化单图任务、原子状态迁移、风格快照与冻结交付计划 |
-| 生成 Run | `GenerationRunWorkspaceService` | `<Assets>\Generated\GAssetForge\Runs\<batchId>`；manifest、提示、参考图、模型原图、中间结果与 timeline |
+| 生成 Run | `GenerationRunWorkspaceService` | `<Assets>\AI\<category>\<batchId>`；manifest、提示、参考图、模型原图、中间结果与 timeline |
 | 图像工具预览 | `ImageProcessingPreviewCache` | `%LocalAppData%\GAssetForge\Desktop\Workspace\ImageProcessingPreviews`；短期、唯一、非项目资产的 PNG 缓存 |
 | 工作台日志 | `WorkbenchConsoleService` | `%LocalAppData%\GAssetForge\Desktop\Logs\workbench-*.jsonl`；Agent、Turn、工具和调度阶段的结构化会话日志 |
 
@@ -83,8 +106,9 @@ Shell 会在一次项目激活中协调项目清单、UI repository、Project Br
 `CurrentWorkflow` 分离：切到美术工作区会切换工具栏和属性栏，但不会把它注册成新建项目模板，也不会修改
 项目 manifest 的 workflow key。
 
-项目工作区 JSON 保存画布尺寸、视口、输出框、图片变换、选择状态和对话记录。导入图片先复制到
-`Assets\ArtWorkspace\References`，JSON 只记录位于受管项目根内的相对路径、哈希、媒体类型和像素尺寸；
+项目工作区 JSON 保存画布尺寸、视口、输出框、图片变换、选择状态和对话记录。新导入图片先复制到
+`Assets\User\ArtWorkspace\References`，JSON 只记录位于受管项目根内的相对路径、哈希、媒体类型和像素尺寸；
+旧 `Assets\ArtWorkspace\References` 保持可读且不自动迁移；
 无项目状态使用应用 Workspace 下的 `ArtWorkspaceDrafts` 作为隔离草稿。主文件和 `.bak` 独立恢复，路径会
 拒绝绝对地址、目录逃逸和重解析点。导入采用可取消后台流水线，项目切换和保存不会与在途复制竞态；
 工作区最多承载 128 个活动图片对象，预览按 640 px 最大边解码并使用有界版本缓存，避免合法大型素材把
@@ -101,6 +125,14 @@ WPF 进程推入不可控内存占用。属性页的画布图片列表是选择�
 token；`插入所选图片` 在当前光标处插入一个独立 token，并立即冻结当时的图片身份以及整图或局部框选，
 所以用户可以明确写出 A 图护甲、B 图发型、C 图角色，同图也能以不同局部重复插入。之后切换画布选择或修改
 框选不会改变既有 token；token 对应图片被隐藏、删除、修改、丢失或越出受管边界时提交 fail-closed。
+
+对话区提供“清除对话并停止任务”：先使当前请求与后台结果上下文失效，再等待初次发布及区域编辑重试发布
+收束；在任务库原子撤销当前项目美术任务的 `DispatchIntent.Requested`，随后定向取消排队项和活动 Turn。
+任务状态、认领者、冻结合同、Run、Final 产物、画布图片和当前输入草稿保持不变；只清除并立即保存对话历史。
+取消不会依赖上游发送 `turn/completed` 才释放本地等待；已清除请求的迟到进度或结果不得回填新会话。
+重启加载的未完成消息标记为 `interrupted`，无本次会话 owner 的旧美术批次不自动续派，避免占用共享 Agent；
+普通工作流的自动恢复策略不变，同次会话仍有 owner 的中断任务仍可恢复。清理期间禁止再次发送或切换项目，
+若持久化暂停或运行时停止失败，界面保留历史并显示错误供重试，不伪报停止成功。
 
 ViewModel 发布时保留 text/image token 的原始顺序，同时冻结输出框几何与像素尺寸、项目 `Assets` 根，以及
 所有可见参考图的 SHA-256、位置、尺寸、旋转、透明度和层级。每个图片 token 解析为独立引用；局部框选额外
@@ -121,13 +153,13 @@ CLI edit，不先执行一次整图 ImageGen；fallback 固定使用唯一 `--im
 composite 和差异诊断路径；父尝试的缓存文件只能用于审计，不能作为后继尝试的现成模型结果。
 
 实时 Agent 文本只更新对话和进度，不作为完成依据；只有 MCP 提交的本地 PNG 经过 Harness
-归档、归一化、验证和原子提交并令任务达到 `Completed` 后，ViewModel 才保留 Generated 原件、复制受管预览
-到 `Assets\ArtWorkspace\References`，并按冻结输出框位置与尺寸放入画布。路径逃逸、重解析点和项目切换后的
+归档、归一化、验证和原子提交并令任务达到 `Completed` 后，ViewModel 才在 `Assets\Final` 保留权威原件、
+复制受管预览到 `Assets\User\ArtWorkspace\References`，并按冻结输出框位置与尺寸放入画布。路径逃逸、重解析点和项目切换后的
 迟到结果都会被拒绝。
 
 `ArtStyleLibraryView` 是 ContentId 为 `art-style-library` 的跨工作流共享面板。每个风格组保存稳定 ID、名称、
-描述、人工 AI 风格提示词、可选统一提示词样本和多张参考图片元数据；图片导入后以稳定文件名复制到
-`Assets\StyleLibrary\assets\<group-id>`。清单只保存受控相对路径，并校验扩展名、媒体类型、哈希和目录边界。
+描述、人工 AI 风格提示词、可选统一提示词样本和多张参考图片元数据；图片导入后以稳定文件名复制到应用全局
+`Assets\User\StyleLibrary\assets\<group-id>`。清单只保存受控相对路径，并校验扩展名、媒体类型、哈希和目录边界。
 顶部“视图”菜单使用可勾选开关同步该面板的显示/隐藏状态。当前选中的风格组与素材会随清单持久化，
 后续生成流程可直接把它们转换为 provider-neutral 风格约束。统一样本不会覆盖人工提示词；它保存提示词、
 摘要、SHA-256 来源指纹、UTC 生成时间、分析器身份/版本、请求 ID 和分析时覆盖的素材 ID。
@@ -272,9 +304,10 @@ ExcelDataReader 只把 `.xlsx/.xls/.csv/.tsv` 转为有界、惰性的 workbook/
 交给当前 Agent Host 的默认调度，不再把页面“并行图片数”作为生成协议的一部分。页面默认开启统一提示词
 优先：选中组存在新鲜样本时，任务冻结 `sourceMode=unified-prompt-only`、样本文本、来源指纹和生成时间，参考图
 集合为空，也不会创建或镜像参考图快照；样本缺失、过期或用户关闭开关时，明确回退到描述、人工提示词和当前
-参考图快照。交付计划始终冻结任务创建时的绝对 Assets 根、项目内运行路径和唯一最终目标路径。Assets 根作为行
-输出位置时，Tilemap 与 Icon 分别交付到 `Generated/Tilemap/<batchId>/Final` 和
-`Generated/Icon/<batchId>/Final`；选择 Assets 内子目录时在该目录下追加同样的业务分类。任务队列不写入 UI
+参考图快照。交付计划始终冻结任务创建时的绝对 Assets 根、项目内运行路径和唯一最终目标路径。新任务只允许
+在 `Assets/Final` 选择最终产物集合；默认分别交付到 `Final/Tilemap/<batchId>` 和
+`Final/Icon/<batchId>`，选择其下自定义集合时形成 `Final/<collection>/<category>/<batchId>`。对应 Run 由
+`ProjectAssetLayout` 分别放入 `AI/Tilemap/<batchId>` 或 `AI/Icon/<batchId>`。任务队列不写入 UI
 项目 Schema、Undo/Redo 或 AvalonDock 布局，也不依赖 Agent 或 MCP HTTP 会话持续在线。
 
 ### 客户端 + Harness + Skill + MCP/ACP 分层
@@ -386,10 +419,10 @@ Agent 不再自行创建目录、扫描目标、搬运文件、调整尺寸、�
 `GeneratedOutputSubmissionService` 和本地后处理器执行。只有没有 `delivery.workspace` 的历史任务继续使用
 旧多图/staging 合同。
 
-每次发布先在当前项目 Assets 内创建以下 Run；中间文件保留供人工检查和性能分析：
+每次发布先通过 `ProjectAssetLayout` 在当前项目 Assets 内按工作流分类创建以下 Run；中间文件保留供人工检查和性能分析：
 
 ```text
-Assets/Generated/GAssetForge/Runs/<batchId>/
+Assets/AI/<ArtWorkspace|Tilemap|Icon>/<batchId>/
   00-manifest/run.v1.json
   10-style-reference/
   20-prompts/
@@ -402,8 +435,9 @@ Assets/Generated/GAssetForge/Runs/<batchId>/
 ```
 
 `00-manifest/run.v1.json` 将每个 `itemId`、`taskId`、表格行、变体序号、模型原图、归一化图、剔色图和最终
-目标关联起来。`50-final` 是 Run 内预建的最终阶段分类 seam；权威交付文件仍按用户选定位置写入
-`<输出目录>/Tilemap/<batchId>/Final/*.png` 或 `<输出目录>/Icon/<batchId>/Final/*.png`，并由任务冻结的
+目标关联起来。`50-final` 是 Run 内预建的最终阶段分类 seam；权威交付文件仍按用户选定集合写入
+`Assets/Final/[自定义集合/]/Tilemap/<batchId>/*.png` 或
+`Assets/Final/[自定义集合/]/Icon/<batchId>/*.png`，并由任务冻结的
 `delivery.targetPaths` 决定，避免回落到 Codex 默认 `generated_images` 或用户后来切换的项目。
 
 “生成产物”并不等待整个批次结束才刷新。轮询会同时检查 `30-model-output`、`35-normalized-input`、
@@ -430,6 +464,7 @@ Assets/Generated/GAssetForge/Runs/<batchId>/
 
 每个新任务还冻结可选 `DispatchIntent`。只有明确记录 `Requested=true` 的 Pending 批次才允许在应用重启、
 项目切换或 Agent 再次 Ready 后恢复自动派发；旧任务和“仅发布本地队列/人工接力”任务不会被升级后意外拉起。
+美术工作区还要求本次会话存在 live owner；仅保留了历史对话的批次不会在重启后自动占用共享 Agent。
 恢复器复用原 task ID 与冻结交付路径，补齐缺失的 Run 分类目录、prompt 和 manifest，再按 batch ID 幂等入队；
 入队返回 `Enqueued`、`AlreadyScheduled` 或 `QueueStopped`，只有真实新入队才记录一次恢复日志；恢复扫描仅在
 Agent 连接 false→true 时触发，不响应每秒健康轮询或普通 thread 书签变化。同一进程中的正常发布与恢复扫描即使
@@ -487,7 +522,8 @@ loopback 且不返回认证信息。该端口仍不得经代理或端口转发�
 磁盘根目录、已存在目标、Windows 保留设备名和 reparse point 会被拒绝，失败时清理 staging 目录。
 
 正式项目激活后，`JsonProjectRepository` 切换到项目内 UI 文件，Project 面板固定以
-`<ProjectRoot>\Assets` 为根并默认选中 `Assets\Generated`，且禁止从 Project 面板跳出项目资产边界。
+`<ProjectRoot>\Assets` 为根并默认选中 `Assets\User`，且禁止从 Project 面板跳出项目资产边界；创建文件夹只
+作用于用户内容区，`AI` 与 `Final` 仍可浏览但由 Harness 管理。
 `user-settings.json` 保存 `lastProjectPath`。启动时若项目目录、manifest、UI 数据和必要子目录通过验证，Shell
 会恢复业务主视图、项目级 Tilemap 参数、UI repository、美术工作区 repository 与 Project 面板；路径失效或主文件和备份均无效时
 不会激活该项目，也不会删除原目录。更完整的目录与恢复契约见 [项目工作区说明](PROJECTS.md)。
@@ -500,7 +536,7 @@ loopback 且不返回认证信息。该端口仍不得经代理或端口转发�
 美术工作区制作不属于 `WorkflowKind`，与美术风格素材库、蓝图窗口和 MCP 连接面板一样作为跨工作流共享模块独立复用。蓝图窗口提供系统起始、说明、
 Harness 工具、功能集合与 If 逻辑节点，支持端点和有向无环连线、画布平移缩放、节点整理及项目级 JSON
 持久化。图文件显式版本化、限制为 8 MiB，并拒绝越界路径与重解析点。开始执行时先冻结带类型化路由的版本化计划并独立复验，
-再把计划和审计时间线落入项目 `Assets/Generated/GAssetForge/BlueprintRuns`；`run-state.v1.json` 最后写入并作为 planned 提交标记，
+再把计划和审计时间线落入项目 `Assets/AI/Blueprint/<runId>`；`run-state.v1.json` 最后写入并作为 planned 提交标记，
 在真实 Adapter 接入前不会误触发 Agent 或图片处理。详细合同见 [蓝图 Harness 协议](blueprint-harness-protocol.md)。
 
 蓝图编辑器把持久图与交互瞬态分离：节点放置虚影和端口牵引线不会写入 Graph，第二次左键确认后才创建节点；输入、输出端点均可作为牵线起点，最终统一规范为 Output → Input。默认鼠标只负责选择、滚轮缩放及右/中键平移，右键双击恢复 `(0,0,1)` 视口；对象移动工具会拦截节点整卡输入并拖动对象。添加按钮与画布空白区共享四类型右键工具组，常驻工具栏不再占用独立类型下拉框。

@@ -28,9 +28,20 @@ public sealed class LayerViewModel : ObservableObject
     public bool IsGroup => string.Equals(Model.Kind, "group", StringComparison.Ordinal);
     public bool IsDrawable => Model.Transform is not null;
     public bool IsText => string.Equals(Model.Kind, "text", StringComparison.Ordinal);
+    public bool IsShape => string.Equals(Model.Kind, "shape", StringComparison.Ordinal) && Model.Shape is not null;
     public bool IsPage => string.Equals(Model.Component?.Type, "page", StringComparison.Ordinal);
-    public string ComponentType => Model.Component?.Type ?? Model.Kind;
-    public string TypeLabel => IsGroup ? $"Folder · {Children.Count} 项" : ComponentType;
+    public string ShapeType => Model.Shape?.Type ?? string.Empty;
+    public bool SupportsCornerRadius => !IsShape || string.Equals(ShapeType, UiShapeTypes.Rectangle, StringComparison.Ordinal);
+    public string ComponentType => Model.Shape?.Type ?? Model.Component?.Type ?? Model.Kind;
+    public string TypeLabel => IsGroup
+        ? $"Folder · {Children.Count} 项"
+        : ShapeType switch
+        {
+            UiShapeTypes.Rectangle => "图形 · 矩形",
+            UiShapeTypes.Circle => "图形 · 圆形",
+            UiShapeTypes.Polygon => $"图形 · {Model.Shape?.Points?.Count ?? 0} 边形",
+            _ => ComponentType
+        };
     public int ZIndex { get; internal set; }
 
     public string Name
@@ -93,6 +104,10 @@ public sealed class LayerViewModel : ObservableObject
                     if (layer.Transform is { } transform)
                     {
                         transform.Width = Math.Max(8, value);
+                        if (string.Equals(layer.Shape?.Type, UiShapeTypes.Circle, StringComparison.Ordinal))
+                        {
+                            transform.Height = transform.Width;
+                        }
                     }
                 }, nameof(Width));
             }
@@ -111,6 +126,10 @@ public sealed class LayerViewModel : ObservableObject
                     if (layer.Transform is { } transform)
                     {
                         transform.Height = Math.Max(8, value);
+                        if (string.Equals(layer.Shape?.Type, UiShapeTypes.Circle, StringComparison.Ordinal))
+                        {
+                            transform.Width = transform.Height;
+                        }
                     }
                 }, nameof(Height));
             }
@@ -253,6 +272,10 @@ public sealed class LayerViewModel : ObservableObject
     {
         OnPropertyChanged(nameof(Name));
         OnPropertyChanged(nameof(TypeLabel));
+        OnPropertyChanged(nameof(ComponentType));
+        OnPropertyChanged(nameof(ShapeType));
+        OnPropertyChanged(nameof(IsShape));
+        OnPropertyChanged(nameof(SupportsCornerRadius));
         OnPropertyChanged(nameof(PrimaryText));
         OnPropertyChanged(nameof(SecondaryText));
         OnPropertyChanged(nameof(TertiaryText));

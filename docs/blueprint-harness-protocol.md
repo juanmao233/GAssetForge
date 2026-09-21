@@ -6,7 +6,7 @@
 
 - 图定义：`ProjectSettings/Blueprints/<workflowKey>.gafgraph.json`
 - 图备份：同名 `.bak`
-- 运行目录：`Assets/Generated/GAssetForge/BlueprintRuns/<runId>/`
+- 运行目录：`Assets/AI/Blueprint/<runId>/`
 - 冻结计划：`execution-plan.v1.json`
 - 运行状态：`run-state.v1.json`
 - 时间线：`timeline.v1.jsonl`

@@ -39,6 +39,33 @@ MCP 只承担工具边界，不承担持久 Agent 会话、Turn 调度或进程�
 上下文持久性由 Codex thread 提供。项目内部可以用“MCACP”简称这组 Agent Control + MCP 工具组合，但
 它不是公开标准协议名，也不表示项目实现了一个名为 MCACP 的第三方协议。
 
+### 绘图网络与失败诊断
+
+新建 thread 不代表 MCP 已就绪。每个生成批次创建独立线程后，最多等待 20 秒确认该线程的
+`gasset_forge` MCP ready；不会等待无关插件，不会复用上一线程的成功信号。取消或停止会话会
+释放等待。若 thread/start 返回前被取消，远端创建结果未知，必须显式重新连接，不自动重发。
+
+初始化失败不会被当成认证失败或自动切换备用执行通道；原 Pending 任务和冻结文件保留。
+调度只有收到匹配线程的真实 TurnStarted 通知，才显示“已启动，等待认领”。没有启动确认的
+失败会明确显示“尚未启动／尚未收到启动确认”，不会显示“Agent Turn 已结束”。
+
+日志字段、错误码及复制方法见 [生成诊断与排错](GENERATION-DIAGNOSTICS.md)。
+
+MCP 已握手、任务已认领或 Agent Turn 返回 `completed`，都不表示图片生成服务已经成功。最终汇总会保留
+持久任务的失败码、阶段与原始错误；美术对话终态失败会结束进度并释放发送，不再停留在“等待认领”。
+
+Agent 启动时优先保留显式 HTTP/HTTPS/ALL_PROXY；未配置时仅读取 Windows 当前用户已启用的手动代理，
+转成子进程环境变量。不会改写注册表、全局环境或用户 Codex 配置；PAC 不做不可靠的静态转换。NO_PROXY
+保留原配置并补充 loopback，防止本地认证 MCP 流量经过外部代理。日志只报告配置是否存在，不打印代理地址、
+凭据或 API key；“已配置代理”不等于“远程绘图可用”。代理变化在下一次新建/重连 Agent 会话时生效。
+
+本软件管理的子进程显式启用 `gasset_forge`、禁用历史别名 `perspective_forge`，避免旧 Endpoint 产生重复
+认证错误。`mcp_servers.<id>.enabled` 是官方支持的会话配置项，用户全局配置保持不变。
+参见 [官方配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)。
+
+内置 ImageGen 网络失败且未配置 `OPENAI_API_KEY` 时，不存在可用的 CLI API 兜底；ChatGPT 登录与 Image API
+凭据是两条独立通道。应先检查现有网络/代理，再由用户手动重发；本次网络修缮不增加自动图片请求。
+
 ## 推荐接入：桌面端管理 Codex
 
 前提是本机已安装可用的 Codex CLI。推荐流程：
@@ -66,22 +93,23 @@ OpenCode 仍显示为后续适配入口，但当前明确标记为 Adapter 待�
 ### Windows Runtime 选择
 
 当配置的可执行文件为 `codex` 时，桌面端会枚举候选并用 `codex --version` 做真实启动探测，而不是仅检查
-文件是否存在。选择顺序为：
+文件是否存在。用户明确指定的路径始终优先；自动模式会检查：
 
-1. 用户在 Agent 面板中明确指定的 `.cmd`、`.bat` 或 `.exe`；脚本通过 `cmd.exe /d /s /c` 启动。
-2. `%APPDATA%\npm\codex.cmd` / `codex.bat`，即 npm 全局安装的标准 shim，即使桌面进程继承的 PATH
+1. `%APPDATA%\npm\codex.cmd` / `codex.bat`，即 npm 全局安装的标准 shim，即使桌面进程继承的 PATH
    不含 npm 目录也会主动检查。
-3. `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe`，即官方 Windows standalone 安装位置；
-   即使应用启动时继承的 PATH 尚未刷新也会主动检查。
-4. PATH 中可启动的 `codex.cmd` / `codex.bat` shim；由 shim 自行解析其原生 Runtime。
-5. PATH 中包含 `codex-code-mode-host.exe` 配套组件、且可启动的完整 `codex.exe` Runtime。
-6. 应用目录中的完整 Runtime。
-7. PATH 中仍可启动的兼容旧版独立 `codex.exe`。
+2. `%LOCALAPPDATA%\OpenAI\Codex\bin\codex.exe` 及其直接版本子目录中的完整 Desktop Runtime。
+3. `%LOCALAPPDATA%\Programs\OpenAI\Codex\bin\codex.exe` 旧 standalone 安装位置。
+4. PATH 中可启动的 `codex.cmd` / `codex.bat` shim、完整原生 Runtime 和兼容旧版 `codex.exe`。
+5. 应用目录中的完整 Runtime。
 
-自动模式优先选择 npm shim，是因为官方 launcher 能解析自己的原生资源，而 WindowsApps 下看似存在的
-`codex.exe` 可能因应用包执行权限被普通 WPF 进程拒绝。WindowsApps 原始 EXE 会作为明确的跳过项保留在
-诊断中，不会遮蔽可用 shim。探测面板逐项显示来源、完整路径、接受/拒绝/跳过状态及失败原因（例如拒绝
-访问、超时、非零退出码或 stderr）；失败结果不会永久缓存，可在安装或修复 CLI 后点击“重新检测”。
+软件会完成所有可用候选的探测，按解析出的语义版本选择最新 CLI；同版本优先带
+`codex-code-mode-host.exe` 的完整 Runtime。没有版本信息的兼容候选只在不存在已知版本时参与回退。因此旧
+npm shim 不会再遮蔽能支持当前模型的新版 Codex Desktop。WindowsApps 原始 EXE 会作为明确的跳过项保留
+在诊断中，不会遮蔽可用 Runtime。探测面板逐项显示来源、完整路径、接受/拒绝/跳过状态及失败原因（例如
+拒绝访问、超时、非零退出码或 stderr）；失败结果不会永久缓存，可在安装或修复 CLI 后点击“重新检测”。
+
+用户在 Agent 面板中明确指定的 `.cmd`、`.bat` 或 `.exe` 不参与自动排序；脚本通过
+`cmd.exe /d /s /c` 启动，显式路径无效时也不会静默改用其它候选。
 
 手动路径会保存在用户设置中，空值表示恢复自动检测。显式路径无效时不会静默改用其他 PATH 候选，避免
 软件实际运行的 CLI 与用户选择不一致。
@@ -134,8 +162,10 @@ default_tools_approval_mode = "approve"
 生成和本地后处理保留有界余量。因此 Codex 只能看到任务执行所需的八个工具，不能通过这条受管连接创建或枚举任意任务。点击“开始生成”
 就是用户对当前本机批次的显式授权。`default_tools_approval_mode = "approve"` 负责常规自动批准；如果 App
 Server 仍发送 elicitation，Host 仅接受当前 Running Turn 中、`gasset_forge` Server 上、当前 prompt
-所列 task ID 的 `claim_generation_task`、`submit_generation_output`、`run_image_delivery_fallback`、`process_generation_output`、
-`complete_generation_task` 或 `fail_generation_task`，其余请求全部 fail-closed 拒绝。日志只记录脱敏后的
+冻结的 `taskId -> exact managed agentId` 映射对应的 `claim_generation_task`、`submit_generation_output`、
+`run_image_delivery_fallback`、`process_generation_output`、`complete_generation_task` 或
+`fail_generation_task`。紧随 `turn/start` 响应到达的 elicitation 会先等待活动 `turnId` 完成绑定，再按
+thread、Turn、task 和 claimant 一并校验；其余请求全部 fail-closed 拒绝。日志只记录脱敏后的
 工具与短 task ID，不记录
 Bearer Token。
 
@@ -189,10 +219,17 @@ token 对应图片被隐藏、删除、修改、缺失或越出受管边界时�
 `run_image_delivery_fallback`，由 Harness 使用唯一 authoritative base、冻结 Alpha mask 和
 调用 Images Edit API；默认 `gpt-image-2` 对图片输入固有使用高保真模式，因此不会传入其明确拒绝的 `input-fidelity` 参数。非 16px 对齐的 authoritative base 与 mask 会先以整数 `scale=1` 居中 padding 到合法 API 画布，保留 full raw 和 transform JSON，再按同一 offset 无插值裁切回原始像素尺寸。历史画布版本不会进入 `--image`，也不会先重复执行整图 ImageGen。
 无背景剔除的完整画面允许 `stagingPaths=[]`，Harness 会从 `30-model-output` 派生 `35-normalized-input`，保留
-processed 审计副本并原子提交到 `Assets/Generated/ArtWorkspace/<batchId>/Final`。UI 只在持久任务完成且精确
+processed 审计副本并原子提交到 `Assets/Final/ArtWorkspace/<batchId>`；对应 Run 位于
+`Assets/AI/ArtWorkspace/<batchId>`。UI 只在持久任务完成且精确
 冻结目标存在后把图片复制为受管画布预览；Agent 文本或可视图片结果本身不算交付。
 
-“素材生成”页的步骤 2 使用批量表格。每行指定内容描述、生成数量和 Assets 内输出目录：
+对话历史正文与结构化文字片段都可直接选择并复制，每条消息也提供只复制用户可见内容的整条复制入口；
+输入编辑器保留标准剪切、复制、粘贴和全选。若队列停止或 Codex Responses/SSE 流中断，当前 UI waiter 与
+发送门禁会立即释放，但持久任务、冻结目标和 batch owner 继续等待原 taskId 续派。用户可以继续发送下一条
+指令；原任务在同一应用会话内达到真实终态时只通知一次，并更新原消息、自动导入原冻结产物。若应用已经
+重启，Final 原件和任务状态仍保留，但旧对话画布的自动重新挂接需要后续持久 receipt/adoption 机制。
+
+“素材生成”页的步骤 2 使用批量表格。每行指定内容描述、生成数量和 `Assets/Final` 内的输出集合：
 
 - 单行数量为 1–16。
 - 最多 256 行。
@@ -296,10 +333,11 @@ task ID，不能省略 task ID 去领取其他待办。成功返回退出码 `0`
 
 ### 项目内 Run、部分产物与中断续作
 
-客户端在任务发布前创建固定 Run：
+`ProjectAssetLayout` 是资产三分区路径的统一 Module/Interface；客户端、ViewModel、Gateway 与 Harness 均从
+它取得分类路径，不自行拼接业务目录。客户端在任务发布前按工作流创建固定 Run：
 
 ```text
-<Assets>/Generated/GAssetForge/Runs/<batchId>/
+<Assets>/AI/<ArtWorkspace|Tilemap|Icon>/<batchId>/
   00-manifest/run.v1.json
   10-style-reference/
   20-prompts/
@@ -313,17 +351,21 @@ task ID，不能省略 task ID 去领取其他待办。成功返回退出码 `0`
 
 `run.v1.json` 把表格行、变体、`itemId`、`taskId`、各中间文件和最终 `targetPath` 固定关联。Run 内中间物
 默认保留，供检查模型到底返回了什么、软件是否发生缩放、剔色结果是否正确，以及哪一步耗时或失败。
-`50-final` 是预建的最终阶段分类 seam；正式资产仍落到用户为该行指定的位置之下：
+`50-final` 是预建的最终阶段分类 seam；正式资产集中落到用户为该行选择的 Final 集合之下：
 
 ```text
-<所选 Assets 内目录>/Tilemap/<batchId>/Final/*.png
-<所选 Assets 内目录>/Icon/<batchId>/Final/*.png
+<Assets>/Final/[自定义集合/]/Tilemap/<batchId>/*.png
+<Assets>/Final/[自定义集合/]/Icon/<batchId>/*.png
 ```
 
-若用户选择的就是 Assets 根，软件分别使用 `Assets/Generated/Tilemap/<batchId>/Final` 或
-`Assets/Generated/Icon/<batchId>/Final`。权威位置始终来自任务冻结的
+若用户选择的就是 Final 根，软件分别使用 `Assets/Final/Tilemap/<batchId>` 或
+`Assets/Final/Icon/<batchId>`。权威位置始终来自任务冻结的
 `delivery.assetRoot + delivery.targetPaths`，不会回落到 Codex 默认 `generated_images`，也不会随之后的
 Project 切换漂移。
+
+旧 `Assets/Generated`、旧 `Assets/ArtWorkspace/References` 与已经冻结到持久任务中的 workspace/target path
+继续在原位置读取和恢复。恢复器必须以冻结路径为准，不能批量搬迁或把旧任务改写到 `AI`/`Final`；只有新
+Run、新最终交付和新用户导入内容分别写入 `Assets/AI`、`Assets/Final`、`Assets/User`。
 
 “生成产物”窗口会持续扫描四个阶段，不等待整批完成：模型原图、画布归一化图、背景处理图或最终文件任一
 真实落盘后，就立即显示对应卡片并写入 Agent 反馈。卡片按处理中、成功、可重做警告和人工介入失败区分
@@ -369,8 +411,9 @@ HTTP 握手顺序：
 4. 后续 `tools/list`、`tools/call` 与 `DELETE /mcp` 均使用该会话头和 Bearer Token。
 
 缺少或使用错误 Token 返回 `401 Unauthorized`。来自非 loopback 的请求返回 `403 Forbidden`。当前不提供
-`GET /mcp` SSE 流；该方法返回 `405 Method Not Allowed`。HTTP MCP 会话按最近有效请求维持 90 秒活动
-TTL，超时只表示协议工具连接失效，不会删除 Codex thread 或本地 `Pending` 任务。
+`GET /mcp` SSE 流；该方法返回 `405 Method Not Allowed`。HTTP MCP 会话按最近有效请求维持 20 分钟活动
+TTL：它由 15 分钟受管工具上限加 5 分钟传输/响应余量组成，避免合法的长时图片生成在工具返回前丢失自身
+会话。超时只表示协议工具连接失效，不会删除 Codex thread 或本地 `Pending` 任务。
 
 健康响应示例：
 
@@ -558,14 +601,14 @@ complete_generation_task`。
       },
       "rotationAngleEstimate": 0.0,
       "diamondScore": 0.0,
-      "validatedImagePath": "D:\\Project\\Assets\\Generated\\...\\tile.transparent.png"
+      "validatedImagePath": "D:\\Project\\Assets\\AI\\Tilemap\\...\\tile.transparent.png"
     }
   },
   "artifacts": {
-    "modelOutputPaths": ["Generated/GAssetForge/Runs/.../30-model-output/.../tile.model.png"],
-    "normalizedPaths": ["Generated/GAssetForge/Runs/.../35-normalized-input/.../tile.normalized.png"],
-    "processedPaths": ["Generated/GAssetForge/Runs/.../40-background-removed/.../tile.transparent.png"],
-    "targetPaths": ["Generated/Tilemap/.../Final/tile.png"]
+    "modelOutputPaths": ["AI/Tilemap/.../30-model-output/.../tile.model.png"],
+    "normalizedPaths": ["AI/Tilemap/.../35-normalized-input/.../tile.normalized.png"],
+    "processedPaths": ["AI/Tilemap/.../40-background-removed/.../tile.transparent.png"],
+    "targetPaths": ["Final/Tilemap/.../tile.png"]
   }
 }
 ```
@@ -637,25 +680,25 @@ timeout、socket、connection、HTTP 429/5xx 或 temporarily unavailable 证据�
   "parameters": {
     "delivery": {
       "assetRoot": "D:\\ExampleProject\\Assets",
-      "outputDirectory": "Generated/Tilemap/0123456789abcdef0123456789abcdef/Final",
+      "outputDirectory": "Final/Tilemap/0123456789abcdef0123456789abcdef",
       "stagingPaths": [
-        "Generated/GAssetForge/Runs/0123456789abcdef0123456789abcdef/35-normalized-input/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/ground.normalized.png"
+        "AI/Tilemap/0123456789abcdef0123456789abcdef/35-normalized-input/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/ground.normalized.png"
       ],
       "targetPaths": [
-        "Generated/Tilemap/0123456789abcdef0123456789abcdef/Final/ground.png"
+        "Final/Tilemap/0123456789abcdef0123456789abcdef/ground.png"
       ],
       "workspace": {
         "schemaVersion": 1,
         "runId": "0123456789abcdef0123456789abcdef",
-        "rootPath": "Generated/GAssetForge/Runs/0123456789abcdef0123456789abcdef",
-        "manifestPath": "Generated/GAssetForge/Runs/0123456789abcdef0123456789abcdef/00-manifest/run.v1.json",
-        "promptPath": "Generated/GAssetForge/Runs/0123456789abcdef0123456789abcdef/20-prompts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt",
-        "diagnosticsPath": "Generated/GAssetForge/Runs/0123456789abcdef0123456789abcdef/90-diagnostics/stages.v1.jsonl",
+        "rootPath": "AI/Tilemap/0123456789abcdef0123456789abcdef",
+        "manifestPath": "AI/Tilemap/0123456789abcdef0123456789abcdef/00-manifest/run.v1.json",
+        "promptPath": "AI/Tilemap/0123456789abcdef0123456789abcdef/20-prompts/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.txt",
+        "diagnosticsPath": "AI/Tilemap/0123456789abcdef0123456789abcdef/90-diagnostics/stages.v1.jsonl",
         "modelOutputPaths": [
-          "Generated/GAssetForge/Runs/0123456789abcdef0123456789abcdef/30-model-output/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/ground.model.png"
+          "AI/Tilemap/0123456789abcdef0123456789abcdef/30-model-output/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/ground.model.png"
         ],
         "processedPaths": [
-          "Generated/GAssetForge/Runs/0123456789abcdef0123456789abcdef/40-background-removed/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/ground.transparent.png"
+          "AI/Tilemap/0123456789abcdef0123456789abcdef/40-background-removed/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/ground.transparent.png"
         ],
         "preserveIntermediates": true
       }
@@ -729,7 +772,7 @@ timeout、socket、connection、HTTP 429/5xx 或 temporarily unavailable 证据�
 | 日志 | 位置 | 用途 |
 | --- | --- | --- |
 | Workbench 会话日志 | `%LocalAppData%\GAssetForge\Desktop\Logs\workbench-*.jsonl` | 记录 UI 调度阶段、Agent Turn、工具/命令开始与完成、错误和会话级 `elapsedMilliseconds` |
-| 项目 Run timeline | `<Assets>\Generated\GAssetForge\Runs\<batchId>\90-diagnostics\stages.v1.jsonl` | 记录任务与具体文件工序；随项目资产一起保留，便于跨会话审计 |
+| 项目 Run timeline | `<Assets>\AI\<category>\<batchId>\90-diagnostics\stages.v1.jsonl` | 记录任务与具体文件工序；随项目资产一起保留，便于跨会话审计 |
 
 Workbench 结构化上下文可包含 `runId`、`batchId`、`taskId`、`outputIndex`、Agent thread/Turn/item、`stage`、
 `status`、耗时、期望/观察路径和错误码。Reasoning 流不会逐条持久化；Agent 最终消息、工具、命令、item、
@@ -806,8 +849,8 @@ Pending → Claimed → Completed
 - 认领默认使用 30 分钟租约；任务操作会原子回收超时的 `Claimed` 任务为 `Pending`。
 - 页面创建的任务冻结创建时的 `delivery.assetRoot`；之后切换项目不会改写旧任务的交付位置。
 - 新任务是一图一任务，冻结唯一 `targetPaths[0]`、项目内 `workspace` 和 Run manifest；最终路径必须位于
-  用户选择的当前项目 Assets 内。
-- 项目内 Run 根为 `Generated/GAssetForge/Runs/<batchId>`；manifest、参考图、提示、模型原图、归一化
+  用户选择的当前项目 `Assets/Final` 集合内。
+- 项目内 Run 根为 `AI/<ArtWorkspace|Tilemap|Icon>/<batchId>`；manifest、参考图、提示、模型原图、归一化
   图、剔色图和 timeline 均由软件创建并默认保留。
 - 新背景剔除任务的 `delivery.stagingPaths[0]` 必须位于 Run 的 `35-normalized-input`；它由软件写入，不能与
   最终目标重名，也不计入正式产物进度。旧任务仍允许 `.gassetforge-staging`。

@@ -23,7 +23,10 @@
                        TextAlignment="Center" />
         </Border>
 
-        <StackPanel Grid.Row="1" Margin="7,10">
+        <ScrollViewer Grid.Row="1"
+                      VerticalScrollBarVisibility="Auto"
+                      HorizontalScrollBarVisibility="Disabled">
+        <StackPanel Margin="7,10">
             <ToggleButton Height="64"
                           Padding="4"
                           HorizontalContentAlignment="Center"
@@ -71,7 +74,80 @@
                                HorizontalAlignment="Center" />
                 </StackPanel>
             </ToggleButton>
+
+            <ToggleButton x:Name="RectangleToolButton"
+                          Height="58"
+                          Margin="0,10,0,0"
+                          Padding="4"
+                          HorizontalContentAlignment="Center"
+                          Command="{Binding SelectToolCommand}"
+                          CommandParameter="rectangle"
+                          IsChecked="{Binding ActiveTool, Mode=OneWay, Converter={StaticResource EditorToolToBooleanConverter}, ConverterParameter=Rectangle}"
+                          Style="{DynamicResource App.ToggleButtonStyle}"
+                          ToolTip="拖拽创建矩形">
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <TextBlock Text="▭"
+                               FontFamily="Segoe UI Symbol"
+                               FontSize="21"
+                               Foreground="{DynamicResource App.TextPrimaryBrush}"
+                               HorizontalAlignment="Center" />
+                    <TextBlock Margin="0,2,0,0"
+                               Text="矩形"
+                               Foreground="{DynamicResource App.TextPrimaryBrush}"
+                               FontSize="10"
+                               HorizontalAlignment="Center" />
+                </StackPanel>
+            </ToggleButton>
+
+            <ToggleButton x:Name="CircleToolButton"
+                          Height="58"
+                          Margin="0,6,0,0"
+                          Padding="4"
+                          HorizontalContentAlignment="Center"
+                          Command="{Binding SelectToolCommand}"
+                          CommandParameter="circle"
+                          IsChecked="{Binding ActiveTool, Mode=OneWay, Converter={StaticResource EditorToolToBooleanConverter}, ConverterParameter=Circle}"
+                          Style="{DynamicResource App.ToggleButtonStyle}"
+                          ToolTip="拖拽创建圆形">
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <TextBlock Text="○"
+                               FontFamily="Segoe UI Symbol"
+                               FontSize="22"
+                               Foreground="{DynamicResource App.TextPrimaryBrush}"
+                               HorizontalAlignment="Center" />
+                    <TextBlock Margin="0,2,0,0"
+                               Text="圆形"
+                               Foreground="{DynamicResource App.TextPrimaryBrush}"
+                               FontSize="10"
+                               HorizontalAlignment="Center" />
+                </StackPanel>
+            </ToggleButton>
+
+            <ToggleButton x:Name="PolygonToolButton"
+                          Height="58"
+                          Margin="0,6,0,0"
+                          Padding="4"
+                          HorizontalContentAlignment="Center"
+                          Command="{Binding SelectToolCommand}"
+                          CommandParameter="polygon"
+                          IsChecked="{Binding ActiveTool, Mode=OneWay, Converter={StaticResource EditorToolToBooleanConverter}, ConverterParameter=Polygon}"
+                          Style="{DynamicResource App.ToggleButtonStyle}"
+                          ToolTip="拖拽创建规则多边形">
+                <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center">
+                    <TextBlock Text="⬡"
+                               FontFamily="Segoe UI Symbol"
+                               FontSize="20"
+                               Foreground="{DynamicResource App.TextPrimaryBrush}"
+                               HorizontalAlignment="Center" />
+                    <TextBlock Margin="0,2,0,0"
+                               Text="多边形"
+                               Foreground="{DynamicResource App.TextPrimaryBrush}"
+                               FontSize="9"
+                               HorizontalAlignment="Center" />
+                </StackPanel>
+            </ToggleButton>
         </StackPanel>
+        </ScrollViewer>
 
         <Border Grid.Row="2" Margin="8,0,8,10" Padding="8"
                 Background="{DynamicResource App.SurfaceRaisedBrush}"

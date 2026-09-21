@@ -15,6 +15,10 @@ internal sealed record GenerationBatchTurnReconciliationResult(
     int AutoFailedCount,
     string? FailureDetail)
 {
+    public GenerationDispatchFailure? Diagnostic { get; init; }
+
+    public DateTimeOffset OccurredAt { get; init; } = DateTimeOffset.Now;
+
     public bool AllTerminal => TotalCount > 0 && PendingCount == 0 && ClaimedCount == 0;
 }
 
@@ -38,7 +42,8 @@ internal sealed class GenerationBatchTurnReconciler
         string batchId,
         AgentTurnResult? turnResult,
         string? failureMessage,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        GenerationDispatchFailure? diagnostic = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(batchId);
         var initialTasks = await _taskStore.ListBatchAsync(batchId, cancellationToken)
@@ -53,7 +58,11 @@ internal sealed class GenerationBatchTurnReconciler
                 CompletedCount: 0,
                 FailedCount: 0,
                 AutoFailedCount: 0,
-                FailureDetail: $"未找到批次 {batchId} 的生成任务，无法确认终态。");
+                FailureDetail: $"未找到批次 {batchId} 的生成任务，无法确认终态。")
+            {
+                Diagnostic = diagnostic,
+                OccurredAt = diagnostic?.OccurredAt ?? DateTimeOffset.Now
+            };
         }
 
         var turnFailure = AgentTurnFailureClassifier.Classify(turnResult, failureMessage);
@@ -64,7 +73,28 @@ internal sealed class GenerationBatchTurnReconciler
         var completedCount = finalTasks.Count(task => task.Status == GenerationTaskStatus.Completed);
         var failedCount = finalTasks.Count(task => task.Status == GenerationTaskStatus.Failed);
         var detailParts = new List<string>();
-        if (turnFailure?.PreservePendingTasks == true)
+        foreach (var failedTask in finalTasks.Where(task => task.Status == GenerationTaskStatus.Failed).Take(3))
+        {
+            // A provider turn can complete normally after reporting a failed image tool. The
+            // persisted task error must still reach the final workbench summary.
+            detailParts.Add($"任务 {failedTask.Id} 失败 " +
+                $"[{Sanitize(failedTask.FailureCode) ?? "generation_failed"} / " +
+                $"{Sanitize(failedTask.FailureStage) ?? "unknown"}]：" +
+                (Sanitize(failedTask.FailureMessage) ?? "任务未提供失败详情。"));
+        }
+
+        if (failedCount > 3)
+        {
+            detailParts.Add($"另有 {failedCount - 3} 个失败任务，请查看任务记录。");
+        }
+
+        if (diagnostic is not null)
+        {
+            detailParts.Add(pendingCount > 0
+                ? BuildPendingPreservationDetail(turnResult, failureMessage, pendingCount, diagnostic)
+                : diagnostic.UserMessage);
+        }
+        else if (turnFailure?.PreservePendingTasks == true)
         {
             detailParts.Add(BuildTransportInterruptionDetail(turnFailure, turnResult, failureMessage));
         }
@@ -93,15 +123,20 @@ internal sealed class GenerationBatchTurnReconciler
             completedCount,
             failedCount,
             AutoFailedCount: 0,
-            JoinDetails(detailParts));
+            JoinDetails(detailParts))
+        {
+            Diagnostic = diagnostic,
+            OccurredAt = diagnostic?.OccurredAt ?? DateTimeOffset.Now
+        };
     }
 
     private static string BuildPendingPreservationDetail(
         AgentTurnResult? turnResult,
         string? failureMessage,
-        int pendingCount)
+        int pendingCount,
+        GenerationDispatchFailure? diagnostic = null)
     {
-        var turnDetail = BuildPendingFailureDetail(turnResult, failureMessage);
+        var turnDetail = diagnostic?.UserMessage ?? BuildPendingFailureDetail(turnResult, failureMessage);
         return Limit(
             $"{turnDetail} 仍有 {pendingCount} 个任务保持 Pending；" +
             "GAssetForge 未创建替代任务，等待连接恢复或下一次原任务调度。");
@@ -127,12 +162,14 @@ internal sealed class GenerationBatchTurnReconciler
         if (!string.IsNullOrWhiteSpace(explicitFailure))
         {
             return Limit(
-                $"Agent Turn 已结束，但任务未被 Agent 领取或完成。调度失败：{explicitFailure}");
+                turnResult is null
+                    ? $"调度失败，未获得 Agent Turn 的启动或完成结果：{explicitFailure}"
+                    : $"Agent Turn 调度或执行失败，任务未被 Agent 领取或完成：{explicitFailure}");
         }
 
         if (turnResult is null)
         {
-            return "Agent Turn 已结束但未返回结果，任务未被 Agent 领取或完成。";
+            return "未获得 Agent Turn 的启动或完成结果，任务尚未被 Agent 领取或完成。";
         }
 
         var turnId = Sanitize(turnResult.TurnId);

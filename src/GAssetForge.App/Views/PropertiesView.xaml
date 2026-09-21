@@ -156,6 +156,9 @@
                                                         <DataTrigger Binding="{Binding IsDrawable}" Value="False">
                                                             <Setter Property="Visibility" Value="Collapsed" />
                                                         </DataTrigger>
+                                                        <DataTrigger Binding="{Binding SupportsCornerRadius}" Value="False">
+                                                            <Setter Property="Visibility" Value="Collapsed" />
+                                                        </DataTrigger>
                                                     </Style.Triggers>
                                                 </Style>
                                             </Grid.Style>
@@ -201,7 +204,7 @@
                                         Background="{DynamicResource App.SurfaceRaisedBrush}"
                                         CornerRadius="5">
                                     <StackPanel>
-                                        <TextBlock Text="组件类型"
+                                        <TextBlock Text="图层类型"
                                                    Foreground="{DynamicResource App.TextMutedBrush}"
                                                    FontSize="10" />
                                         <TextBlock Margin="0,3,0,0"

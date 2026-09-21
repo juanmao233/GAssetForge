@@ -110,7 +110,7 @@ public sealed class JsonArtWorkspaceRepository
         cancellationToken.ThrowIfCancellationRequested();
         var source = ValidateSourceImage(sourcePath);
         var target = ResolveTarget(projectRoot);
-        EnsureManagedDirectory(target.StorageRoot, target.ReferenceDirectory);
+        EnsureManagedDirectory(target.StorageRoot, target.WriteReferenceDirectory);
         var sourceHash = ComputeSha256(source.FullName, cancellationToken);
         var existing = document.Assets.FirstOrDefault(asset =>
             string.Equals(asset.Sha256, sourceHash, StringComparison.OrdinalIgnoreCase));
@@ -141,8 +141,8 @@ public sealed class JsonArtWorkspaceRepository
 
         var extension = source.Extension.ToLowerInvariant();
         var assetId = Guid.NewGuid().ToString("N");
-        var destination = Path.GetFullPath(Path.Combine(target.ReferenceDirectory, $"{assetId}{extension}"));
-        if (!IsWithin(target.ReferenceDirectory, destination))
+        var destination = Path.GetFullPath(Path.Combine(target.WriteReferenceDirectory, $"{assetId}{extension}"));
+        if (!IsWithin(target.WriteReferenceDirectory, destination))
         {
             throw new InvalidDataException("导入素材目标路径试图离开受管参考目录。");
         }
@@ -202,12 +202,14 @@ public sealed class JsonArtWorkspaceRepository
         if (string.IsNullOrWhiteSpace(projectRoot))
         {
             EnsureManagedDirectory(_workspaceRoot, _draftDirectory);
+            var referenceDirectory = Path.Combine(_draftDirectory, "References");
             return new ArtWorkspaceStorageTarget(
                 _workspaceRoot,
                 _draftDirectory,
                 Path.Combine(_draftDirectory, "art-workspace.v1.json"),
                 Path.Combine(_draftDirectory, "art-workspace.v1.json.bak"),
-                Path.Combine(_draftDirectory, "References"));
+                referenceDirectory,
+                [referenceDirectory]);
         }
 
         if (!_projectWorkspaceService.TryLoad(
@@ -225,7 +227,11 @@ public sealed class JsonArtWorkspaceRepository
             projectPaths.ArtWorkspaceDirectory,
             projectPaths.ArtWorkspacePath,
             projectPaths.ArtWorkspaceBackupPath,
-            projectPaths.ArtWorkspaceReferenceDirectory);
+            projectPaths.ArtWorkspaceReferenceDirectory,
+            [
+                projectPaths.ArtWorkspaceReferenceDirectory,
+                projectPaths.LegacyArtWorkspaceReferenceDirectory
+            ]);
     }
 
     private bool TryRead(
@@ -477,9 +483,10 @@ public sealed class JsonArtWorkspaceRepository
         var candidate = Path.GetFullPath(Path.Combine(
             target.StorageRoot,
             relativePath.Replace('/', Path.DirectorySeparatorChar)));
-        if (!IsWithin(target.ReferenceDirectory, candidate))
+        if (!target.ReadableReferenceDirectories.Any(referenceRoot => IsWithin(referenceRoot, candidate)))
         {
-            throw new InvalidDataException("美术工作区素材路径必须位于受管参考图片目录内。");
+            throw new InvalidDataException(
+                "美术工作区素材路径必须位于当前或兼容的受管参考图片目录内。");
         }
 
         EnsureExistingPathSegmentsAreNotReparsePoints(target.StorageRoot, candidate);
@@ -613,5 +620,6 @@ public sealed class JsonArtWorkspaceRepository
         string DocumentDirectory,
         string DocumentPath,
         string BackupPath,
-        string ReferenceDirectory);
+        string WriteReferenceDirectory,
+        IReadOnlyList<string> ReadableReferenceDirectories);
 }

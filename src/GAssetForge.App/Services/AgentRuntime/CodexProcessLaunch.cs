@@ -94,6 +94,16 @@ internal static class CodexProcessLaunch
         }
     }
 
+    internal static string DescribeNetworkEnvironment(IReadOnlyDictionary<string, string?> variables)
+    {
+        var hasProxy = WindowsSystemProxyEnvironment.HasExplicitProxy(variables);
+        var hasApiKey = TryGetEnvironmentVariable(variables, "OPENAI_API_KEY", out var apiKey) &&
+                        !string.IsNullOrWhiteSpace(apiKey);
+        return "Agent 子进程网络：" + (hasProxy ? "已配置代理" : "未显式配置代理") +
+               "；" + (hasApiKey ? "已提供 API 兜底凭据（有效性未验证）" : "未配置 API 兜底凭据") +
+               "。此项只检查配置，绘图服务网络可达性未验证；MCP 就绪不等于图片服务可用。";
+    }
+
     internal static void AddMcpConfiguration(
         ProcessStartInfo startInfo,
         AgentSessionStartOptions options)
@@ -108,6 +118,11 @@ internal static class CodexProcessLaunch
         AddConfig(
             startInfo,
             $"{serverPrefix}.bearer_token_env_var={TomlString(options.McpBearerTokenEnvironmentVariableName!)}");
+        AddConfig(startInfo, $"{serverPrefix}.enabled=true");
+        // Keep the user's global configuration untouched. Only this app-owned child process
+        // disables the historical alias, whose stale endpoint/token otherwise causes a duplicate
+        // authentication failure beside the healthy canonical MCP connection.
+        AddConfig(startInfo, $"mcp_servers.{ProductIdentity.LegacyMcpServerName}.enabled=false");
         AddConfig(startInfo, $"{serverPrefix}.required=true");
         AddConfig(
             startInfo,

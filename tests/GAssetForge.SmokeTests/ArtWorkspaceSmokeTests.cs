@@ -8,6 +8,7 @@ using GAssetForge.Core.ArtWorkspaces;
 using GAssetForge.Core.Generation;
 using System.Diagnostics;
 using System.IO;
+using System.Security.Cryptography;
 using System.Text.Json.Nodes;
 using System.Windows;
 using System.Windows.Controls;
@@ -34,6 +35,7 @@ internal static class ArtWorkspaceSmokeTests
         var projectB = projectService.Create(projectParent, "ArtWorkspaceB", "tilemap");
         var cleanupProject = projectService.Create(projectParent, "ArtWorkspaceCleanup", "ui");
         var geometryProject = projectService.Create(projectParent, "ArtWorkspaceGeometry", "ui");
+        var legacyProject = projectService.Create(projectParent, "ArtWorkspaceLegacy", "ui");
         var fixtureA = Path.Combine(fixtureDirectory, "reference-a.png");
         var fixtureB = Path.Combine(fixtureDirectory, "reference-b.png");
         var extremeTallFixture = Path.Combine(fixtureDirectory, "reference-extreme-tall.png");
@@ -44,6 +46,11 @@ internal static class ArtWorkspaceSmokeTests
         SavePngFixture(extremeWideFixture, 8192, 8, 0xD0, 0x78, 0x42);
 
         var repository = new JsonArtWorkspaceRepository(workspacePaths);
+        LegacyReferenceDocumentLoadsAndFreezesWithoutMovingFile(
+            workspacePaths,
+            repository,
+            legacyProject,
+            fixtureA);
         ImportPersistenceAndProjectIsolationStayStable(
             workspacePaths,
             repository,
@@ -77,8 +84,78 @@ internal static class ArtWorkspaceSmokeTests
             workspacePaths,
             repository,
             fixtureA);
+        DeferredGenerationReleasesConversationAndImportsLateResultOnce(
+            workspacePaths,
+            repository);
+        ClearConversationReleasesUncooperativeGeneration(workspacePaths, repository, fixtureA);
         FailedSaveKeepsActiveGenerationAlive(workspacePaths, repository);
         DockDocumentUsesArtWorkspaceContexts(Path.Combine(root, "dock-ui"));
+    }
+
+    private static void LegacyReferenceDocumentLoadsAndFreezesWithoutMovingFile(
+        WorkspacePaths workspacePaths,
+        JsonArtWorkspaceRepository repository,
+        ProjectWorkspace project,
+        string fixturePath)
+    {
+        const string legacyFileName = "legacy-reference.png";
+        const string legacyRelativePath = "Assets/ArtWorkspace/References/legacy-reference.png";
+        Directory.CreateDirectory(project.Paths.LegacyArtWorkspaceReferenceDirectory);
+        var legacyPath = Path.Combine(project.Paths.LegacyArtWorkspaceReferenceDirectory, legacyFileName);
+        File.Copy(fixturePath, legacyPath);
+        var file = new FileInfo(legacyPath);
+        var asset = CreateManagedAsset(legacyRelativePath, pixelWidth: 8, pixelHeight: 4);
+        asset.OriginalFileName = legacyFileName;
+        asset.Sha256 = Convert.ToHexString(SHA256.HashData(File.ReadAllBytes(legacyPath))).ToLowerInvariant();
+        asset.SizeBytes = file.Length;
+        var image = new ArtWorkspaceImageItem
+        {
+            AssetId = asset.Id,
+            Name = "旧参考图",
+            Width = 320d,
+            Height = 160d
+        };
+        var document = ArtWorkspaceDocumentFactory.Create();
+        document.Assets.Add(asset);
+        document.Images.Add(image);
+        repository.Save(project.Paths.RootDirectory, document);
+
+        var loaded = repository.LoadOrCreate(project.Paths.RootDirectory).Document;
+        Equal(legacyRelativePath, loaded.Assets.Single().RelativePath,
+            "旧参考图文档应原样保留历史相对路径");
+        Equal(Path.GetFullPath(legacyPath), repository.ResolveAssetPath(
+                project.Paths.RootDirectory,
+                legacyRelativePath),
+            "旧参考图文档应继续从 Assets/ArtWorkspace/References 解析");
+
+        using var console = new WorkbenchConsoleService(workspacePaths);
+        using var viewModel = new ArtWorkspaceViewModel(repository, new StubImagePicker(), console);
+        True(viewModel.Activate(project.Paths.RootDirectory), "旧参考图文档应可激活");
+        Equal("Assets/Final", viewModel.OutputRelativeDirectory,
+            "旧参考图文档加载后新生成应使用 Assets/Final 默认分类");
+        ArtWorkspaceGenerationRequest? frozenRequest = null;
+        var gateway = new StubGenerationGateway();
+        gateway.GenerateHandler = (request, _, _) =>
+        {
+            frozenRequest = request;
+            return Task.FromResult(new ArtWorkspaceGenerationResult
+            {
+                IsSuccess = false,
+                ErrorMessage = "兼容冻结测试到此结束。"
+            });
+        };
+        viewModel.ConfigureGenerationGateway(gateway);
+        viewModel.InstructionDraft = "验证旧参考图仍可冻结到新生成请求。";
+        viewModel.SubmitInstructionCommand.Execute(null);
+        WaitUntilWithDispatcher(
+            () => frozenRequest is not null && !viewModel.IsGenerating,
+            TimeSpan.FromSeconds(5),
+            "旧参考图应可完成生成请求冻结");
+        Equal(Path.GetFullPath(legacyPath), frozenRequest!.VisibleReferences.Single().AbsolutePath,
+            "冻结请求应继续引用原有旧参考文件");
+        True(File.Exists(legacyPath), "兼容加载与冻结不得移动旧参考文件");
+        False(File.Exists(Path.Combine(project.Paths.ArtWorkspaceReferenceDirectory, legacyFileName)),
+            "兼容加载不得把旧参考文件迁移到 Assets/User");
     }
 
     private static void InvalidSelectedRegionsDoNotSurviveProjectReload(
@@ -198,14 +275,14 @@ internal static class ArtWorkspaceSmokeTests
             "ui");
         var maximumPixelDocument = ArtWorkspaceDocumentFactory.Create();
         maximumPixelDocument.Assets.Add(CreateManagedAsset(
-            "Assets/ArtWorkspace/References/maximum.png",
+            "Assets/User/ArtWorkspace/References/maximum.png",
             pixelWidth: 8192,
             pixelHeight: 8192));
         ArtWorkspaceValidator.Validate(maximumPixelDocument);
 
         var oversizedPixelDocument = ArtWorkspaceDocumentFactory.Create();
         oversizedPixelDocument.Assets.Add(CreateManagedAsset(
-            "Assets/ArtWorkspace/References/oversized.png",
+            "Assets/User/ArtWorkspace/References/oversized.png",
             pixelWidth: 8193,
             pixelHeight: 8192));
         Throws<InvalidDataException>(
@@ -213,7 +290,7 @@ internal static class ArtWorkspaceSmokeTests
             "素材总像素超过 67,108,864 时必须被拒绝");
 
         var escapedOutputDocument = ArtWorkspaceDocumentFactory.Create();
-        escapedOutputDocument.OutputFrame.OutputRelativeDirectory = "Generated/ArtWorkspace";
+        escapedOutputDocument.OutputFrame.OutputRelativeDirectory = "Final";
         Throws<InvalidDataException>(
             () => ArtWorkspaceValidator.Validate(escapedOutputDocument),
             "输出目录不在 Assets 根目录时必须被拒绝");
@@ -230,7 +307,7 @@ internal static class ArtWorkspaceSmokeTests
 
         var regionDocument = ArtWorkspaceDocumentFactory.Create();
         var regionAsset = CreateManagedAsset(
-            "Assets/ArtWorkspace/References/region.png",
+            "Assets/User/ArtWorkspace/References/region.png",
             pixelWidth: 64,
             pixelHeight: 32);
         var regionImage = new ArtWorkspaceImageItem
@@ -276,7 +353,7 @@ internal static class ArtWorkspaceSmokeTests
             OutputPixelWidth = 16384,
             OutputPixelHeight = 16384,
             OutputBackgroundHex = "#20242C",
-            OutputRelativeDirectory = "Generated/ArtWorkspace"
+            OutputRelativeDirectory = "Final"
         };
         _ = ArtWorkspaceGenerationConstraintPackageBuilder.Build(maximumConstraintInput);
         Throws<ArgumentOutOfRangeException>(
@@ -536,6 +613,8 @@ internal static class ArtWorkspaceSmokeTests
         using (var viewModel = new ArtWorkspaceViewModel(repository, new StubImagePicker(), console))
         {
             True(viewModel.Activate(projectA.Paths.RootDirectory), "项目 A 美术工作区应可激活");
+            Equal("Assets/Final", viewModel.OutputRelativeDirectory,
+                "新美术工作区默认最终产物分类");
             viewModel.ConfigureGenerationGateway(new StubGenerationGateway());
             Equal(2, viewModel.AddImagesAt([fixtureA, fixtureB], 120d, 240d),
                 "两张有效参考图应同时加入画布");
@@ -566,6 +645,10 @@ internal static class ArtWorkspaceSmokeTests
             var stored = ArtWorkspaceJson.Deserialize(serialized);
             Equal(2, stored.Assets.Count, "工作区 JSON 应记录两个受管素材");
             Equal(2, stored.Images.Count, "工作区 JSON 应记录两个画布对象");
+            True(stored.Assets.All(asset => asset.RelativePath.StartsWith(
+                    "Assets/User/ArtWorkspace/References/",
+                    StringComparison.OrdinalIgnoreCase)),
+                "新导入参考图应写入 Assets/User/ArtWorkspace/References");
             True(stored.Assets.All(asset => !Path.IsPathRooted(asset.RelativePath)),
                 "工作区 JSON 只允许保存相对素材路径");
             False(serialized.Contains(projectA.Paths.RootDirectory, StringComparison.OrdinalIgnoreCase),
@@ -605,7 +688,7 @@ internal static class ArtWorkspaceSmokeTests
                 "对话输入区引用摘要应显示图片名称和局部语义，不暴露坐标");
             viewModel.SetOutputFrame(700d, 820d, 512d, 768d, commit: true);
             viewModel.OutputFrameName = "角色立绘输出";
-            viewModel.OutputRelativeDirectory = "Assets/Generated/ArtWorkspace/Characters";
+            viewModel.OutputRelativeDirectory = "Assets/Final/Characters";
             ArtWorkspaceCreationRequestedEventArgs? capturedRequest = null;
             viewModel.CreationRequested += (_, request) => capturedRequest = request;
             var explicitReference = viewModel.InsertSelectedImageReference()
@@ -663,7 +746,7 @@ internal static class ArtWorkspaceSmokeTests
             Near(512d, viewModel.OutputFrameWidth, "项目切换后应恢复输出框宽度");
             Near(768d, viewModel.OutputFrameHeight, "项目切换后应恢复输出框高度");
             Equal("角色立绘输出", viewModel.OutputFrameName, "项目切换后应恢复输出框名称");
-            Equal("Assets/Generated/ArtWorkspace/Characters", viewModel.OutputRelativeDirectory,
+            Equal("Assets/Final/Characters", viewModel.OutputRelativeDirectory,
                 "项目切换后应恢复相对输出目录");
             True(viewModel.Conversation.Any(message => message.Text == projectAInstruction),
                 "项目 A 创作对话应完成持久化往返");
@@ -736,11 +819,11 @@ internal static class ArtWorkspaceSmokeTests
             "属性输入超过生成合同上限时输出框高度应收束到 16384");
         viewModel.SetOutputFrame(640d, 720d, 512d, 384d, commit: true);
         viewModel.OutputFrameName = "徽章输出";
+        var finalBatchId = Guid.NewGuid().ToString("N");
         var finalDirectory = Path.Combine(
-            projectA.Paths.RootDirectory,
-            "Assets",
-            "Generated",
-            "ArtWorkspace");
+            projectA.Paths.FinalAssetDirectory,
+            "ArtWorkspace",
+            finalBatchId);
         Directory.CreateDirectory(finalDirectory);
         var finalPath = Path.Combine(finalDirectory, "badge-final.png");
         SavePngFixture(finalPath, 12, 9, 0x29, 0x78, 0xD1);
@@ -761,7 +844,7 @@ internal static class ArtWorkspaceSmokeTests
                 IsSuccess = true,
                 AgentDescription = "已生成轴对齐的蓝色游戏徽章。",
                 OutputPaths = [finalPath],
-                BatchId = Guid.NewGuid().ToString("N"),
+                BatchId = finalBatchId,
                 TaskId = Guid.NewGuid().ToString("N")
             });
         };
@@ -791,6 +874,8 @@ internal static class ArtWorkspaceSmokeTests
             "冻结请求应绑定项目 A Assets 根目录");
         Equal(512, capturedRequest.OutputFrame.PixelWidth, "冻结请求输出像素宽度");
         Equal(384, capturedRequest.OutputFrame.PixelHeight, "冻结请求输出像素高度");
+        Equal("Assets/Final", capturedRequest.OutputFrame.OutputRelativeDirectory,
+            "默认新生成应冻结 Assets/Final 分类根");
         Equal(1, capturedRequest.VisibleReferences.Length, "冻结请求应只包含当前可见参考图");
         True(capturedRequest.InstructionReference is null,
             "新版内联 token 请求不得同时写入会覆盖顺序的旧单图片指代字段");
@@ -809,11 +894,11 @@ internal static class ArtWorkspaceSmokeTests
             "冻结请求内联 token 局部区域高度");
         True(Path.IsPathRooted(capturedRequest.VisibleReferences[0].AbsolutePath),
             "冻结参考图必须使用绝对受管路径");
-        True(File.Exists(finalPath), "导入画布后必须保留 Generated 正式原件");
+        True(File.Exists(finalPath), "导入画布后必须保留 Final 正式原件");
         Equal(2, viewModel.Images.Count, "生成成功后画布应增加一张受管预览副本");
         var generated = viewModel.Images.Single(image => image.Name == "徽章输出");
         False(string.Equals(generated.AbsolutePath, finalPath, StringComparison.OrdinalIgnoreCase),
-            "画布应引用受管预览副本而不是移动 Generated 原件");
+            "画布应引用受管预览副本而不是移动 Final 原件");
         True(File.Exists(generated.AbsolutePath), "画布受管预览副本应真实存在");
         Near(640d, generated.X, "生成预览应精确放入输出框 X");
         Near(720d, generated.Y, "生成预览应精确放入输出框 Y");
@@ -866,6 +951,208 @@ internal static class ArtWorkspaceSmokeTests
             "迟到结果返回后应释放单飞状态");
         Equal(0, viewModel.Images.Count,
             "项目 A 的迟到结果不得污染已切换到项目 B 的画布");
+    }
+
+    private static void DeferredGenerationReleasesConversationAndImportsLateResultOnce(
+        WorkspacePaths workspacePaths,
+        JsonArtWorkspaceRepository repository)
+    {
+        var project = new ProjectWorkspaceService().Create(
+            workspacePaths.ProjectDirectory,
+            $"ArtWorkspaceDeferred-{Guid.NewGuid():N}",
+            "ui");
+        using var console = new WorkbenchConsoleService(workspacePaths);
+        using var viewModel = new ArtWorkspaceViewModel(repository, new StubImagePicker(), console);
+        True(viewModel.Activate(project.Paths.RootDirectory),
+            "Deferred 回归应激活正式项目");
+
+        var gateway = new StubGenerationGateway();
+        viewModel.ConfigureGenerationGateway(gateway);
+        var batchId = Guid.NewGuid().ToString("N");
+        var taskId = Guid.NewGuid().ToString("N");
+        ArtWorkspaceGenerationRequest? deferredRequest = null;
+        gateway.GenerateHandler = (request, _, _) =>
+        {
+            deferredRequest = request;
+            return Task.FromResult(new ArtWorkspaceGenerationResult
+            {
+                IsSuccess = false,
+                IsDeferred = true,
+                ErrorMessage = "上游响应流中断；原任务已转入后台等待恢复。",
+                BatchId = batchId,
+                TaskId = taskId
+            });
+        };
+
+        const string firstInstruction = "生成一枚稍后恢复交付的蓝色徽章。";
+        viewModel.InstructionDraft = firstInstruction;
+        True(viewModel.SubmitInstructionCommand.CanExecute(null),
+            "Deferred 回归的首条指令应可提交");
+        viewModel.SubmitInstructionCommand.Execute(null);
+        WaitUntilWithDispatcher(
+            () => deferredRequest is not null &&
+                  !viewModel.IsGenerating &&
+                  viewModel.Conversation.Any(message => message.IsAgent && message.State == "deferred"),
+            TimeSpan.FromSeconds(10),
+            "网关返回 Deferred 后应退出生成状态并保留后台等待消息");
+
+        var originalAgentMessage = viewModel.Conversation.Last(message =>
+            message.IsAgent && message.State == "deferred");
+        var originalAgentMessageId = originalAgentMessage.Id;
+        var conversationCountBeforeCompletion = viewModel.Conversation.Count;
+        var imageCountBeforeCompletion = viewModel.Images.Count;
+        const string secondInstruction = "在下一条指令中继续尝试另一种徽章配色。";
+        viewModel.InstructionDraft = secondInstruction;
+        WaitUntilWithDispatcher(
+            () => viewModel.SubmitInstructionCommand.CanExecute(null),
+            TimeSpan.FromSeconds(2),
+            "Deferred 释放后第二条对话指令必须可继续发送");
+
+        var frozenRequest = deferredRequest!;
+        var finalDirectory = Path.Combine(
+            frozenRequest.OutputFrame.OutputDirectoryPath,
+            "ArtWorkspace",
+            batchId);
+        Directory.CreateDirectory(finalDirectory);
+        var finalPath = Path.Combine(finalDirectory, "deferred-badge-final.png");
+        SavePngFixture(finalPath, 10, 10, 0x29, 0x78, 0xD1);
+        var completion = new ArtWorkspaceGenerationResult
+        {
+            IsSuccess = true,
+            AgentDescription = "后台恢复后已完成蓝色徽章。",
+            OutputPaths = [finalPath],
+            BatchId = batchId,
+            TaskId = taskId
+        };
+
+        gateway.ReportDeferredCompletion(frozenRequest, completion);
+        gateway.ReportDeferredCompletion(frozenRequest, completion);
+        WaitUntilWithDispatcher(
+            () => viewModel.Images.Count == imageCountBeforeCompletion + 1 &&
+                  originalAgentMessage.State == "completed",
+            TimeSpan.FromSeconds(10),
+            "后台成功事件应导入原冻结产物并完成原 Agent 消息");
+
+        gateway.ReportDeferredCompletion(frozenRequest, completion);
+        PumpDispatcher();
+        Equal(imageCountBeforeCompletion + 1, viewModel.Images.Count,
+            "重复后台完成事件不得重复导入同一冻结产物");
+        Equal(conversationCountBeforeCompletion, viewModel.Conversation.Count,
+            "后台完成应更新原消息而不是追加重复 Agent 消息");
+        True(ReferenceEquals(
+                originalAgentMessage,
+                viewModel.Conversation.Single(message => message.Id == originalAgentMessageId)),
+            "后台完成必须更新原 Deferred Agent 消息实例");
+        Equal("completed", originalAgentMessage.State,
+            "原 Deferred Agent 消息应进入 completed 状态");
+        Equal("后台恢复后已完成蓝色徽章。", originalAgentMessage.Text,
+            "原 Deferred Agent 消息应显示晚到成功描述");
+        Equal(secondInstruction, viewModel.InstructionDraft,
+            "晚到完成不得覆盖用户正在编辑的第二条指令");
+    }
+
+    private static void ClearConversationReleasesUncooperativeGeneration(
+        WorkspacePaths workspacePaths,
+        JsonArtWorkspaceRepository repository,
+        string fixturePath)
+    {
+        var project = new ProjectWorkspaceService().Create(
+            workspacePaths.ProjectDirectory, $"ArtWorkspaceClear-{Guid.NewGuid():N}", "ui");
+        using var console = new WorkbenchConsoleService(workspacePaths);
+        using var viewModel = new ArtWorkspaceViewModel(repository, new StubImagePicker(), console);
+        True(viewModel.Activate(project.Paths.RootDirectory), "清除回归应激活正式项目");
+        viewModel.AddImagesAt([fixturePath], 120d, 180d);
+        var imagePath = viewModel.Images.Single().AbsolutePath;
+        var first = new TaskCompletionSource<ArtWorkspaceGenerationResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var second = new TaskCompletionSource<ArtWorkspaceGenerationResult>(TaskCreationOptions.RunContinuationsAsynchronously);
+        ArtWorkspaceGenerationRequest? firstRequest = null;
+        IProgress<ArtWorkspaceGenerationProgress>? firstProgress = null;
+        var calls = 0;
+        var gateway = new StubGenerationGateway
+        {
+            GenerateHandler = (request, progress, _) =>
+            {
+                calls++;
+                if (calls == 1)
+                {
+                    firstRequest = request;
+                    firstProgress = progress;
+                    return first.Task; // Deliberately ignores cancellation like a stuck provider.
+                }
+
+                return second.Task;
+            }
+        };
+        viewModel.ConfigureGenerationGateway(gateway);
+        viewModel.InstructionDraft = "首轮永不响应取消的任务";
+        viewModel.SubmitInstructionCommand.Execute(null);
+        True(viewModel.IsGenerating, "首轮应进入执行态");
+        True(viewModel.SaveNow(), "执行中的旧对话应可持久化");
+        using (var restored = new ArtWorkspaceViewModel(repository, new StubImagePicker(), console))
+        {
+            restored.Activate(project.Paths.RootDirectory);
+            restored.ConfigureGenerationGateway(new StubGenerationGateway());
+            True(restored.Conversation.Any(message => message.IsAgent && message.State == "interrupted"),
+                "重启恢复的未完成 Agent 消息应标注中断而非永久执行中");
+            restored.InstructionDraft = "重启后的新任务";
+            True(restored.SubmitInstructionCommand.CanExecute(null), "旧消息不得锁定新会话");
+        }
+
+        var clear = viewModel.ClearConversationCommand;
+        var reset = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        viewModel.ConfigureConversationResetHandler((root, _) =>
+        {
+            Equal(project.Paths.RootDirectory, root, "清理回调必须使用冻结的当前项目根");
+            return reset.Task;
+        });
+        True(clear.CanExecute(null), "生成卡住时清除按钮必须可用");
+        clear.Execute(null);
+        viewModel.InstructionDraft = "清除后重新提交";
+        True(viewModel.IsClearingConversation, "后台清理尚未收束时应保持清理态");
+        False(clear.CanExecute(null), "同一清理不得重复进入");
+        False(viewModel.SubmitInstructionCommand.CanExecute(null), "清理未结束前不得启动新任务");
+        reset.SetResult();
+        WaitUntilWithDispatcher(() => !viewModel.IsGenerating && viewModel.SubmitInstructionCommand.CanExecute(null),
+            TimeSpan.FromSeconds(3), "上游忽略取消时仍必须释放 AsyncRelayCommand 的执行锁");
+        Equal(0, viewModel.Conversation.Count, "清除后不应残留旧对话");
+        Equal(1, viewModel.Images.Count, "清除对话不得清除画布图片");
+        True(File.Exists(imagePath), "清除对话不得删除受管原件");
+        Equal(0, repository.LoadOrCreate(project.Paths.RootDirectory).Document.Conversation.Count,
+            "清除必须立即持久化，重启不得回填旧消息");
+
+        var properties = new ArtWorkspacePropertiesView { DataContext = viewModel };
+        PumpDispatcher();
+        var button = properties.FindName("ArtWorkspaceClearConversationButton") as Button;
+        True(button is not null && ReferenceEquals(button.Command, clear), "实际对话面板必须绑定清除命令");
+        viewModel.SubmitInstructionCommand.Execute(null);
+        Equal(2, calls, "清除后必须真正启动第二轮而不仅 CanExecute 为真");
+        True(viewModel.IsGenerating, "第二轮应保持独立执行态");
+        firstProgress!.Report(new ArtWorkspaceGenerationProgress { State = "late", Message = "旧进度不得覆盖" });
+        first.SetResult(new ArtWorkspaceGenerationResult { IsSuccess = false, ErrorMessage = "旧失败" });
+        gateway.ReportDeferredCompletion(firstRequest!, new ArtWorkspaceGenerationResult
+        {
+            IsSuccess = true, OutputPaths = [imagePath], AgentDescription = "旧成功也不得回填"
+        });
+        PumpDispatcher();
+        True(viewModel.IsGenerating, "首轮迟到 finally 不得解锁第二轮");
+        Equal(2, viewModel.Conversation.Count, "旧完成事件不得回填清除后的新会话");
+        Equal(1, viewModel.Images.Count, "被清除任务的迟到产物不得自动导入");
+        second.SetResult(new ArtWorkspaceGenerationResult { IsSuccess = false, ErrorMessage = "第二轮失败" });
+        viewModel.InstructionDraft = "失败后第三轮";
+        WaitUntilWithDispatcher(() => !viewModel.IsGenerating && viewModel.SubmitInstructionCommand.CanExecute(null),
+            TimeSpan.FromSeconds(3), "失败后必须恢复发送");
+        Equal(100d, viewModel.GenerationProgressPercentage,
+            "终态失败必须由 ViewModel 收束进度，不能依赖可能迟到并失效的网关 progress");
+        var countBeforeFailedReset = viewModel.Conversation.Count;
+        viewModel.ConfigureConversationResetHandler((_, _) => Task.FromException(new IOException("测试停止失败")));
+        clear.Execute(null);
+        WaitUntilWithDispatcher(() => !viewModel.IsClearingConversation, TimeSpan.FromSeconds(3), "清理失败必须退出清理态");
+        Equal(countBeforeFailedReset, viewModel.Conversation.Count, "后台停止失败不得伪报成功并删除历史");
+        True(viewModel.GenerationProgressText.Contains("测试停止失败", StringComparison.Ordinal), "清理失败必须显示具体原因");
+        viewModel.ConfigureConversationResetHandler((_, _) => Task.CompletedTask);
+        clear.Execute(null);
+        Equal(0, viewModel.Conversation.Count, "清理失败后按钮应仍可再次清理");
+        Equal("失败后第三轮", viewModel.InstructionDraft, "手动清除必须保留当前输入草稿");
     }
 
     private static void FailedSaveKeepsActiveGenerationAlive(
@@ -979,7 +1266,7 @@ internal static class ArtWorkspaceSmokeTests
             projectA,
             validBackupJson,
             root => root["assets"]!.AsArray()[0]!.AsObject()["relativePath"] =
-                "Assets/ArtWorkspace/References/contains\0nul.png",
+                "Assets/User/ArtWorkspace/References/contains\0nul.png",
             "含 NUL 的素材路径");
         File.WriteAllText(projectA.Paths.ArtWorkspacePath, validBackupJson);
 
@@ -1418,7 +1705,7 @@ internal static class ArtWorkspaceSmokeTests
         }
 
         var outsideDirectory = Path.Combine(testRoot, "reparse-outside");
-        var linkParent = Path.Combine(project.Paths.AssetDirectory, "ArtWorkspace");
+        var linkParent = project.Paths.ArtWorkspaceReferenceDirectory;
         var linkPath = Path.Combine(linkParent, "LinkedReferences");
         Directory.CreateDirectory(outsideDirectory);
         Directory.CreateDirectory(linkParent);
@@ -1440,7 +1727,7 @@ internal static class ArtWorkspaceSmokeTests
         ThrowsOneOf<IOException, InvalidDataException>(
             () => repository.ResolveAssetPath(
                 project.Paths.RootDirectory,
-                "Assets/ArtWorkspace/LinkedReferences/outside.png"),
+                "Assets/User/ArtWorkspace/References/LinkedReferences/outside.png"),
             "工作区素材解析必须拒绝项目根内指向外部的重解析点");
     }
 
@@ -1612,6 +1899,9 @@ internal static class ArtWorkspaceSmokeTests
 
         public event EventHandler? StateChanged;
 
+        public event EventHandler<ArtWorkspaceDeferredGenerationCompletedEventArgs>?
+            DeferredGenerationCompleted;
+
         public Task<ArtWorkspaceGenerationResult> GenerateAsync(
             ArtWorkspaceGenerationRequest frozenRequest,
             IProgress<ArtWorkspaceGenerationProgress>? progress = null,
@@ -1630,6 +1920,13 @@ internal static class ArtWorkspaceSmokeTests
             StatusText = statusText;
             StateChanged?.Invoke(this, EventArgs.Empty);
         }
+
+        public void ReportDeferredCompletion(
+            ArtWorkspaceGenerationRequest request,
+            ArtWorkspaceGenerationResult result) =>
+            DeferredGenerationCompleted?.Invoke(
+                this,
+                new ArtWorkspaceDeferredGenerationCompletedEventArgs(request, result));
     }
 
     private sealed class ArtWorkspaceSmokeTestException(string message) : Exception(message);

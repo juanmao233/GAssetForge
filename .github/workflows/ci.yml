@@ -19,6 +19,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Verify source text format
+        shell: pwsh
+        run: .\scripts\verify-text-format.ps1
+
       - name: Setup .NET
         uses: actions/setup-dotnet@v4
         with:
@@ -31,6 +35,12 @@ jobs:
 
       - name: Build Release
         run: dotnet build .\GAssetForge.sln -c Release --no-restore
+
+      - name: Build and verify engineering entry
+        shell: pwsh
+        run: |
+          .\scripts\build-engineering-entry.ps1 -Verify
+          dotnet restore .\GAssetForge.sln --locked-mode
 
       - name: Run smoke suite
         run: dotnet run --project .\tests\GAssetForge.SmokeTests\GAssetForge.SmokeTests.csproj -c Release --no-build

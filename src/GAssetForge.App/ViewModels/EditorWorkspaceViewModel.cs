@@ -48,9 +48,7 @@ public sealed class EditorWorkspaceViewModel : ObservableObject
         _history = history;
         _dispatcher = Dispatcher.CurrentDispatcher;
         _project = repository.LoadOrCreate();
-        _activeTool = string.Equals(_project.EditorSession.ActiveTool, "text", StringComparison.OrdinalIgnoreCase)
-            ? EditorTool.Text
-            : EditorTool.Move;
+        _activeTool = ParseEditorTool(_project.EditorSession.ActiveTool);
 
         SelectToolCommand = new RelayCommand<string>(SelectTool);
         NewLayerCommand = new RelayCommand(NewLayer);
@@ -212,14 +210,30 @@ public sealed class EditorWorkspaceViewModel : ObservableObject
         {
             if (SetProperty(ref _activeTool, value))
             {
-                _project.EditorSession.ActiveTool = value == EditorTool.Text ? "text" : "move";
+                _project.EditorSession.ActiveTool = ToEditorToolKey(value);
                 OnPropertyChanged(nameof(ActiveToolLabel));
+                OnPropertyChanged(nameof(ActiveShapeType));
                 ScheduleSessionSave();
             }
         }
     }
 
-    public string ActiveToolLabel => ActiveTool == EditorTool.Text ? "文字" : "选择 / 移动";
+    public string ActiveToolLabel => ActiveTool switch
+    {
+        EditorTool.Text => "文字",
+        EditorTool.Rectangle => "矩形",
+        EditorTool.Circle => "圆形",
+        EditorTool.Polygon => "多边形",
+        _ => "选择 / 移动"
+    };
+
+    public string? ActiveShapeType => ActiveTool switch
+    {
+        EditorTool.Rectangle => UiShapeTypes.Rectangle,
+        EditorTool.Circle => UiShapeTypes.Circle,
+        EditorTool.Polygon => UiShapeTypes.Polygon,
+        _ => null
+    };
 
     public double Zoom
     {
@@ -382,6 +396,175 @@ public sealed class EditorWorkspaceViewModel : ObservableObject
             document.RootIds.Insert(0, id);
             project.EditorSession.SelectedLayerId = id;
         });
+    }
+
+    public UiBoundsModel? GetShapeBoundsFromDrag(
+        string shapeType,
+        double startX,
+        double startY,
+        double endX,
+        double endY)
+    {
+        if (!UiShapeTypes.IsSupported(shapeType) ||
+            !double.IsFinite(startX) || !double.IsFinite(startY) ||
+            !double.IsFinite(endX) || !double.IsFinite(endY))
+        {
+            return null;
+        }
+
+        var canvasWidth = ActiveDocument.Canvas.Width;
+        var canvasHeight = ActiveDocument.Canvas.Height;
+        startX = Math.Clamp(startX, 0, canvasWidth);
+        startY = Math.Clamp(startY, 0, canvasHeight);
+        endX = Math.Clamp(endX, 0, canvasWidth);
+        endY = Math.Clamp(endY, 0, canvasHeight);
+
+        if (string.Equals(shapeType, UiShapeTypes.Circle, StringComparison.Ordinal))
+        {
+            var directionX = endX < startX ? -1d : 1d;
+            var directionY = endY < startY ? -1d : 1d;
+            var availableX = directionX < 0 ? startX : canvasWidth - startX;
+            var availableY = directionY < 0 ? startY : canvasHeight - startY;
+            var side = Math.Min(
+                Math.Max(Math.Abs(endX - startX), Math.Abs(endY - startY)),
+                Math.Min(availableX, availableY));
+            if (side <= 0)
+            {
+                return null;
+            }
+
+            return new UiBoundsModel
+            {
+                X = Math.Round(directionX < 0 ? startX - side : startX),
+                Y = Math.Round(directionY < 0 ? startY - side : startY),
+                Width = Math.Round(side),
+                Height = Math.Round(side)
+            };
+        }
+
+        var width = Math.Abs(endX - startX);
+        var height = Math.Abs(endY - startY);
+        if (width <= 0 || height <= 0)
+        {
+            return null;
+        }
+
+        return new UiBoundsModel
+        {
+            X = Math.Round(Math.Min(startX, endX)),
+            Y = Math.Round(Math.Min(startY, endY)),
+            Width = Math.Round(width),
+            Height = Math.Round(height)
+        };
+    }
+
+    public void CreateShapeFromDrag(
+        string shapeType,
+        double startX,
+        double startY,
+        double endX,
+        double endY)
+    {
+        var bounds = GetShapeBoundsFromDrag(shapeType, startX, startY, endX, endY);
+        if (bounds is null || bounds.Width < 8 || bounds.Height < 8)
+        {
+            StatusText = "图形尺寸过小，未创建图层";
+            return;
+        }
+
+        CreateShape(shapeType, bounds);
+    }
+
+    public void CreateDefaultShapeAt(string shapeType, double x, double y)
+    {
+        if (!UiShapeTypes.IsSupported(shapeType) || !double.IsFinite(x) || !double.IsFinite(y))
+        {
+            return;
+        }
+
+        var (defaultWidth, defaultHeight) = shapeType switch
+        {
+            UiShapeTypes.Circle => (120d, 120d),
+            UiShapeTypes.Polygon => (150d, 130d),
+            _ => (160d, 100d)
+        };
+        var canvas = ActiveDocument.Canvas;
+        var width = Math.Min(defaultWidth, canvas.Width);
+        var height = Math.Min(defaultHeight, canvas.Height);
+        if (string.Equals(shapeType, UiShapeTypes.Circle, StringComparison.Ordinal))
+        {
+            width = height = Math.Min(width, height);
+        }
+
+        CreateShape(shapeType, new UiBoundsModel
+        {
+            X = Math.Round(Math.Clamp(x, 0, Math.Max(0, canvas.Width - width))),
+            Y = Math.Round(Math.Clamp(y, 0, Math.Max(0, canvas.Height - height))),
+            Width = Math.Min(width, canvas.Width),
+            Height = Math.Min(height, canvas.Height)
+        });
+    }
+
+    private void CreateShape(string shapeType, UiBoundsModel bounds)
+    {
+        var typeLabel = shapeType switch
+        {
+            UiShapeTypes.Circle => "圆形",
+            UiShapeTypes.Polygon => "多边形",
+            _ => "矩形"
+        };
+
+        Mutate($"创建{typeLabel}图层", project =>
+        {
+            var document = project.DocumentsById[project.ActiveDocumentId];
+            var id = $"layer-shape-{Guid.NewGuid():N}";
+            var index = document.LayersById.Values.Count(layer =>
+                string.Equals(layer.Shape?.Type, shapeType, StringComparison.Ordinal)) + 1;
+            document.LayersById[id] = new UiLayerModel
+            {
+                Id = id,
+                Kind = "shape",
+                Name = $"{typeLabel} {index}",
+                Transform = new UiTransformModel
+                {
+                    X = bounds.X,
+                    Y = bounds.Y,
+                    Width = bounds.Width,
+                    Height = bounds.Height
+                },
+                Style = new UiStyleModel
+                {
+                    Radius = string.Equals(shapeType, UiShapeTypes.Rectangle, StringComparison.Ordinal) ? 8 : 0,
+                    Fill = "#367FD8",
+                    Border = "#83B9F7"
+                },
+                Shape = new UiShapeModel
+                {
+                    Type = shapeType,
+                    Points = string.Equals(shapeType, UiShapeTypes.Polygon, StringComparison.Ordinal)
+                        ? CreateRegularPolygonPoints(6)
+                        : null
+                }
+            };
+            document.RootIds.Insert(0, id);
+            project.EditorSession.SelectedLayerId = id;
+        });
+    }
+
+    private static List<UiShapePointModel> CreateRegularPolygonPoints(int sideCount)
+    {
+        var points = new List<UiShapePointModel>(sideCount);
+        for (var index = 0; index < sideCount; index++)
+        {
+            var angle = -Math.PI / 2 + index * Math.PI * 2 / sideCount;
+            points.Add(new UiShapePointModel
+            {
+                X = Math.Round((Math.Cos(angle) + 1) / 2, 6),
+                Y = Math.Round((Math.Sin(angle) + 1) / 2, 6)
+            });
+        }
+
+        return points;
     }
 
     public bool BeginMove(string layerId)
@@ -824,9 +1007,15 @@ public sealed class EditorWorkspaceViewModel : ObservableObject
             .OrderBy(layer => layer.Name, StringComparer.CurrentCultureIgnoreCase)
             .Take(80)
             .Select(layer =>
-                $"- {layer.Name} | 类型={layer.Kind}/{layer.Component?.Type ?? "none"} | " +
-                $"位置=({layer.Transform?.X:0.#},{layer.Transform?.Y:0.#}) | " +
-                $"尺寸={layer.Transform?.Width:0.#}×{layer.Transform?.Height:0.#}");
+            {
+                var subtype = layer.Shape?.Type ?? layer.Component?.Type ?? "none";
+                var polygonDetail = string.Equals(subtype, UiShapeTypes.Polygon, StringComparison.Ordinal)
+                    ? $" | 边数={layer.Shape?.Points?.Count ?? 0}"
+                    : string.Empty;
+                return $"- {layer.Name} | 类型={layer.Kind}/{subtype}{polygonDetail} | " +
+                       $"位置=({layer.Transform?.X:0.#},{layer.Transform?.Y:0.#}) | " +
+                       $"尺寸={layer.Transform?.Width:0.#}×{layer.Transform?.Height:0.#}";
+            });
 
         var prompt = new StringBuilder()
             .AppendLine("你正在协助 GAssetForge 的“页面UI制作”工作区。")
@@ -920,9 +1109,34 @@ public sealed class EditorWorkspaceViewModel : ObservableObject
 
     private void SelectTool(string? tool)
     {
-        ActiveTool = string.Equals(tool, "text", StringComparison.OrdinalIgnoreCase) ? EditorTool.Text : EditorTool.Move;
-        StatusText = ActiveTool == EditorTool.Text ? "文字工具：点击画布创建文字" : "移动工具：拖拽画布图层";
+        ActiveTool = ParseEditorTool(tool);
+        StatusText = ActiveTool switch
+        {
+            EditorTool.Text => "文字工具：点击画布创建文字",
+            EditorTool.Rectangle => "矩形工具：拖拽画布创建矩形",
+            EditorTool.Circle => "圆形工具：拖拽画布创建圆形",
+            EditorTool.Polygon => "多边形工具：拖拽画布创建规则多边形",
+            _ => "移动工具：拖拽画布图层"
+        };
     }
+
+    private static EditorTool ParseEditorTool(string? tool) => tool?.Trim().ToLowerInvariant() switch
+    {
+        "text" => EditorTool.Text,
+        UiShapeTypes.Rectangle => EditorTool.Rectangle,
+        UiShapeTypes.Circle => EditorTool.Circle,
+        UiShapeTypes.Polygon => EditorTool.Polygon,
+        _ => EditorTool.Move
+    };
+
+    private static string ToEditorToolKey(EditorTool tool) => tool switch
+    {
+        EditorTool.Text => "text",
+        EditorTool.Rectangle => UiShapeTypes.Rectangle,
+        EditorTool.Circle => UiShapeTypes.Circle,
+        EditorTool.Polygon => UiShapeTypes.Polygon,
+        _ => "move"
+    };
 
     private void NewLayer()
     {
@@ -1224,9 +1438,7 @@ public sealed class EditorWorkspaceViewModel : ObservableObject
             : LayerRoots.FirstOrDefault();
         _project.EditorSession.SelectedLayerId = SelectedLayer?.Id;
         RefreshProjectLibrary();
-        _activeTool = string.Equals(_project.EditorSession.ActiveTool, "text", StringComparison.OrdinalIgnoreCase)
-            ? EditorTool.Text
-            : EditorTool.Move;
+        _activeTool = ParseEditorTool(_project.EditorSession.ActiveTool);
         RefreshPageUiConversation();
 
         OnPropertyChanged(nameof(Project));
@@ -1239,6 +1451,7 @@ public sealed class EditorWorkspaceViewModel : ObservableObject
         OnPropertyChanged(nameof(LayerCountText));
         OnPropertyChanged(nameof(ActiveTool));
         OnPropertyChanged(nameof(ActiveToolLabel));
+        OnPropertyChanged(nameof(ActiveShapeType));
         OnPropertyChanged(nameof(PageUiInstructionDraft));
         OnPropertyChanged(nameof(PageUiInstructionCharacterCountText));
         _submitPageUiInstructionCommand.RaiseCanExecuteChanged();

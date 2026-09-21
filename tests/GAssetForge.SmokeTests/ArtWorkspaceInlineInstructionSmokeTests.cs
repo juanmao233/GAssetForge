@@ -651,6 +651,13 @@ internal static class ArtWorkspaceInlineInstructionSmokeTests
             remove { }
         }
 
+        public event EventHandler<ArtWorkspaceDeferredGenerationCompletedEventArgs>?
+            DeferredGenerationCompleted
+        {
+            add { }
+            remove { }
+        }
+
         public Task<ArtWorkspaceGenerationResult> GenerateAsync(
             ArtWorkspaceGenerationRequest frozenRequest,
             IProgress<ArtWorkspaceGenerationProgress>? progress = null,

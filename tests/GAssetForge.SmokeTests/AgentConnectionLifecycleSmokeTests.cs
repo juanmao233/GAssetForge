@@ -41,6 +41,7 @@ internal static class AgentConnectionLifecycleSmokeTests
         RuntimeSessionRestartsWhenApiOrProxyEnvironmentChanges(temporaryRoot);
         RunTurnRefreshesRuntimeWhenFreshPathChanges(temporaryRoot);
         GenerationBatchCanRotateToFreshThread(temporaryRoot);
+        GenerationTurnWaitsForCurrentThreadMcp(temporaryRoot);
         DeferredFreshThreadDoesNotResumePreviousBatch(temporaryRoot);
         SlowRuntimeStartupCanBeDisposedWithoutUiDeadlock(temporaryRoot);
     }
@@ -696,8 +697,8 @@ internal static class AgentConnectionLifecycleSmokeTests
         var fixture = CreateFixture(
             temporaryRoot,
             "generation-batch-deferred-fresh-thread",
+            _ => FakeAgentSessionTransport.Failing("fixture app-server unavailable"),
             _ => transport = FakeAgentSessionTransport.ReadyWithDeferredThreadStart(),
-            _ => FakeAgentSessionTransport.Failing("exec fallback should not start"),
             resumeThreadId: "previous-batch-thread");
         using var viewModel = fixture.ViewModel;
 
@@ -721,6 +722,34 @@ internal static class AgentConnectionLifecycleSmokeTests
             "延迟创建通道的下一 Turn 必须建立新线程");
         Equal(1, transport!.ResumeThreadCallCount,
             "批次轮换后不得因 UI Dispatcher 延迟而再次恢复上一批次线程");
+    }
+
+    private static void GenerationTurnWaitsForCurrentThreadMcp(string temporaryRoot)
+    {
+        FakeAgentSessionTransport? transport = null;
+        var fixture = CreateFixture(
+            temporaryRoot,
+            "generation-turn-waits-current-thread-mcp",
+            _ => transport = FakeAgentSessionTransport.Ready(),
+            _ => FakeAgentSessionTransport.Failing("MCP starting must not trigger fallback"));
+        using var viewModel = fixture.ViewModel;
+        viewModel.StartCommand.Execute(null);
+        PumpUntil(() => viewModel.IsConnected, CommandTimeout, "fixture Runtime 未启动。");
+        transport!.AutoReportThreadReady = false;
+        var fresh = viewModel.StartFreshGenerationThreadAsync();
+        False(fresh.IsCompleted, "批次切换必须等待新线程的 MCP ready。");
+        transport.ReportMcp("ready", transport.CurrentThreadId);
+        PumpUntil(() => fresh.IsCompleted, CommandTimeout, "新线程 ready 后未释放批次准备。");
+        fresh.GetAwaiter().GetResult();
+
+        transport.ReportMcp("starting", transport.CurrentThreadId);
+        var turn = viewModel.RunTurnAsync("fixture generation instruction");
+        False(turn.IsCompleted, "正常的 MCP starting 不得被 Turn 入口当作未认证或断连立即拒绝。");
+        Equal(0, transport.TurnCallCount, "MCP ready 前不可提交模型 Turn。");
+        transport.ReportMcp("ready", transport.CurrentThreadId);
+        PumpUntil(() => turn.IsCompleted, CommandTimeout, "当前线程 ready 后没有继续原 Turn。");
+        True(turn.GetAwaiter().GetResult().IsSuccess, "就绪恢复后 Turn 必须正常完成。");
+        Equal(1, transport.TurnCallCount, "就绪恢复后只能提交一次原 Turn。");
     }
 
     private static void RuntimeSessionRestartsWhenApiOrProxyEnvironmentChanges(string temporaryRoot)
@@ -1158,6 +1187,14 @@ internal static class AgentConnectionLifecycleSmokeTests
 
         public int ResumeThreadCallCount { get; private set; }
 
+        public bool AutoReportThreadReady { get; set; } = true;
+
+        public int TurnCallCount { get; private set; }
+
+        public void ReportMcp(string status, string? threadId) =>
+            McpStatusChanged?.Invoke(this,
+                new AgentMcpStatusChangedEventArgs(ProductIdentity.McpServerName, status, null, threadId));
+
         public event EventHandler<AgentTransportStateChangedEventArgs>? StateChanged;
 
         public event EventHandler<AgentTransportLogEventArgs>? LogReceived
@@ -1263,6 +1300,12 @@ internal static class AgentConnectionLifecycleSmokeTests
 
             var sequence = Interlocked.Increment(ref _threadSequence);
             CurrentThreadId = sequence == 1 ? "fixture-thread" : $"fixture-thread-{sequence}";
+            ReportMcp("starting", CurrentThreadId);
+            if (AutoReportThreadReady)
+            {
+                ReportMcp("ready", CurrentThreadId);
+            }
+
             return Task.FromResult(new AgentThreadResult(CurrentThreadId));
         }
 
@@ -1281,6 +1324,7 @@ internal static class AgentConnectionLifecycleSmokeTests
             CancellationToken cancellationToken = default)
         {
             cancellationToken.ThrowIfCancellationRequested();
+            TurnCallCount++;
             if (string.IsNullOrWhiteSpace(CurrentThreadId) && _deferredThreadStart)
             {
                 CurrentThreadId = "fixture-deferred-thread";

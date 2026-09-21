@@ -1,5 +1,6 @@
 using System.IO;
 using GAssetForge.Core;
+using GAssetForge.Core.Projects;
 
 namespace GAssetForge.App.Services;
 
@@ -16,7 +17,13 @@ public sealed class WorkspacePaths
         RootDirectory = Path.GetFullPath(rootDirectory);
         ProjectDirectory = Path.Combine(RootDirectory, "Projects");
         AssetDirectory = Path.Combine(RootDirectory, "Assets");
-        GeneratedAssetDirectory = Path.Combine(AssetDirectory, "Generated");
+        AiAssetDirectory = ProjectAssetLayout.GetAiRootFullPath(AssetDirectory);
+        FinalAssetDirectory = ProjectAssetLayout.GetFinalRootFullPath(AssetDirectory);
+        UserAssetDirectory = ProjectAssetLayout.GetUserRootFullPath(AssetDirectory);
+        LegacyGeneratedAssetDirectory = Path.Combine(
+            AssetDirectory,
+            ProjectAssetLayout.LegacyGeneratedDirectoryName);
+        GeneratedAssetDirectory = LegacyGeneratedAssetDirectory;
         GenerationDirectory = Path.Combine(RootDirectory, "Generation");
         GenerationReferenceSnapshotDirectory = Path.Combine(GenerationDirectory, "ReferenceSnapshots");
         WorkspaceDirectory = Path.Combine(RootDirectory, "Workspace");
@@ -24,7 +31,9 @@ public sealed class WorkspacePaths
 
         Directory.CreateDirectory(ProjectDirectory);
         Directory.CreateDirectory(AssetDirectory);
-        Directory.CreateDirectory(GeneratedAssetDirectory);
+        Directory.CreateDirectory(AiAssetDirectory);
+        Directory.CreateDirectory(FinalAssetDirectory);
+        Directory.CreateDirectory(UserAssetDirectory);
         Directory.CreateDirectory(GenerationDirectory);
         Directory.CreateDirectory(GenerationReferenceSnapshotDirectory);
         Directory.CreateDirectory(WorkspaceDirectory);
@@ -34,6 +43,17 @@ public sealed class WorkspacePaths
     public string RootDirectory { get; }
     public string ProjectDirectory { get; }
     public string AssetDirectory { get; }
+
+    public string AiAssetDirectory { get; }
+
+    public string FinalAssetDirectory { get; }
+
+    public string UserAssetDirectory { get; }
+
+    /// <summary>Historical Assets/Generated location retained for compatibility reads.</summary>
+    public string LegacyGeneratedAssetDirectory { get; }
+
+    /// <summary>Compatibility alias for <see cref="LegacyGeneratedAssetDirectory"/>.</summary>
     public string GeneratedAssetDirectory { get; }
     public string GenerationDirectory { get; }
     public string GenerationReferenceSnapshotDirectory { get; }

@@ -35,9 +35,7 @@ public sealed class JsonArtStyleLibraryRepository
     private readonly TimeProvider _timeProvider;
 
     public JsonArtStyleLibraryRepository(WorkspacePaths paths, TimeProvider? timeProvider = null)
-        : this(Path.Combine(
-            (paths ?? throw new ArgumentNullException(nameof(paths))).AssetDirectory,
-            "StyleLibrary"), timeProvider)
+        : this(ResolveWorkspaceStorageRoot(paths), timeProvider)
     {
     }
 
@@ -569,6 +567,142 @@ public sealed class JsonArtStyleLibraryRepository
         if (!valid)
         {
             throw new InvalidDataException($"文件 {Path.GetFileName(path)} 的内容与图片扩展名不匹配。");
+        }
+    }
+
+    private static string ResolveWorkspaceStorageRoot(WorkspacePaths paths)
+    {
+        ArgumentNullException.ThrowIfNull(paths);
+        var canonicalRoot = Path.Combine(paths.UserAssetDirectory, "StyleLibrary");
+        var legacyRoot = Path.Combine(paths.AssetDirectory, "StyleLibrary");
+        var canonicalIsValid = HasValidLibraryDocument(canonicalRoot);
+        var legacyIsValid = HasValidLibraryDocument(legacyRoot);
+        if (canonicalIsValid || !legacyIsValid)
+        {
+            return canonicalRoot;
+        }
+
+        if (Directory.Exists(canonicalRoot) || File.Exists(canonicalRoot))
+        {
+            // Never overwrite a residual canonical directory automatically. Keep the valid legacy
+            // library visible and writable until a later explicit repair can reconcile both roots.
+            return legacyRoot;
+        }
+
+        var stagingRoot = Path.Combine(
+            paths.UserAssetDirectory,
+            $".StyleLibrary.migration.{Guid.NewGuid():N}");
+        try
+        {
+            EnsureManagedDirectory(paths.UserAssetDirectory);
+            EnsureNotReparsePoint(legacyRoot);
+            CopyDirectoryVerified(legacyRoot, stagingRoot);
+            Directory.Move(stagingRoot, canonicalRoot);
+            return canonicalRoot;
+        }
+        catch (Exception exception) when (exception is
+            IOException or
+            UnauthorizedAccessException or
+            InvalidDataException or
+            NotSupportedException or
+            ArgumentException or
+            System.Text.Json.JsonException or
+            System.Security.SecurityException)
+        {
+            TryDeleteDirectory(stagingRoot);
+            return Directory.Exists(canonicalRoot) ? canonicalRoot : legacyRoot;
+        }
+    }
+
+    private static bool HasValidLibraryDocument(string storageRoot)
+    {
+        try
+        {
+            if (!Directory.Exists(storageRoot) ||
+                (File.GetAttributes(storageRoot) & FileAttributes.ReparsePoint) != 0)
+            {
+                return false;
+            }
+
+            foreach (var path in new[]
+                     {
+                         Path.Combine(storageRoot, LibraryFileName),
+                         Path.Combine(storageRoot, BackupFileName)
+                     })
+            {
+                var file = new FileInfo(path);
+                if (!file.Exists || file.Length is <= 0 or > MaximumLibraryFileBytes ||
+                    (file.Attributes & FileAttributes.ReparsePoint) != 0)
+                {
+                    continue;
+                }
+
+                var library = ArtStyleJson.Deserialize(File.ReadAllText(path));
+                ArtStyleLibraryValidator.Validate(library);
+                return true;
+            }
+        }
+        catch (Exception exception) when (exception is
+            IOException or
+            UnauthorizedAccessException or
+            InvalidDataException or
+            NotSupportedException or
+            ArgumentException or
+            System.Text.Json.JsonException or
+            System.Security.SecurityException)
+        {
+            return false;
+        }
+
+        return false;
+    }
+
+    private static void CopyDirectoryVerified(string sourceRoot, string destinationRoot)
+    {
+        var fullSourceRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(sourceRoot));
+        var fullDestinationRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(destinationRoot));
+        EnsureNotReparsePoint(fullSourceRoot);
+        if (Directory.Exists(fullDestinationRoot) || File.Exists(fullDestinationRoot))
+        {
+            throw new IOException("美术风格素材库迁移暂存目录已存在。");
+        }
+
+        Directory.CreateDirectory(fullDestinationRoot);
+        var pending = new Stack<(string Source, string Destination)>();
+        pending.Push((fullSourceRoot, fullDestinationRoot));
+        while (pending.Count > 0)
+        {
+            var (sourceDirectory, destinationDirectory) = pending.Pop();
+            EnsureNotReparsePoint(sourceDirectory);
+            foreach (var sourceEntry in Directory.EnumerateFileSystemEntries(sourceDirectory))
+            {
+                var attributes = File.GetAttributes(sourceEntry);
+                if ((attributes & FileAttributes.ReparsePoint) != 0)
+                {
+                    throw new IOException($"美术风格素材库迁移拒绝符号链接或重解析点：{sourceEntry}");
+                }
+
+                var relativePath = Path.GetRelativePath(fullSourceRoot, sourceEntry);
+                var destinationEntry = GetSafePath(fullDestinationRoot, relativePath);
+                if ((attributes & FileAttributes.Directory) != 0)
+                {
+                    Directory.CreateDirectory(destinationEntry);
+                    pending.Push((sourceEntry, destinationEntry));
+                    continue;
+                }
+
+                CopyFileDurable(sourceEntry, destinationEntry);
+                var sourceInfo = new FileInfo(sourceEntry);
+                var destinationInfo = new FileInfo(destinationEntry);
+                if (sourceInfo.Length != destinationInfo.Length ||
+                    !string.Equals(
+                        ComputeSha256(sourceEntry),
+                        ComputeSha256(destinationEntry),
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new IOException($"美术风格素材库迁移复制校验失败：{relativePath}");
+                }
+            }
         }
     }
 

@@ -44,7 +44,7 @@ internal static class Program
     private static string _temporaryRoot = string.Empty;
 
     [STAThread]
-    private static int Main()
+    private static int Main(string[] args)
     {
         _temporaryRoot = Path.Combine(
             Path.GetTempPath(),
@@ -58,6 +58,60 @@ internal static class Program
             application.InitializeComponent();
             application.ShutdownMode = ShutdownMode.OnExplicitShutdown;
 
+            if (args is ["--mcp-readiness"])
+            {
+                AgentMcpReadinessSmokeTests.Run();
+                Console.WriteLine("PASS  MCP readiness regression tests");
+                return 0;
+            }
+            if (args is ["--agent-diagnostics"])
+            {
+                AgentExecutionDiagnosticsSmokeTests.Run(_temporaryRoot);
+                Console.WriteLine("PASS  Agent entry diagnostics regression tests");
+                return 0;
+            }
+            if (args is ["--dispatch-diagnostics"])
+            {
+                GenerationBatchDispatchCoordinatorSmokeTests.RunAllAsync().GetAwaiter().GetResult();
+                GenerationBatchTurnReconcilerSmokeTests.RunAllAsync().GetAwaiter().GetResult();
+                Console.WriteLine("PASS  Generation dispatch diagnostics regression tests");
+                return 0;
+            }
+            if (args is ["--reconciliation"])
+            {
+                GenerationBatchTurnReconcilerSmokeTests.RunAllAsync().GetAwaiter().GetResult();
+                Console.WriteLine("PASS  Generation reconciliation regression tests");
+                return 0;
+            }
+            if (args is ["--log-diagnostics"])
+            {
+                CommandConsoleSmokeTests.Run();
+                Console.WriteLine("PASS  Workbench logging reliability regression tests");
+                return 0;
+            }
+
+            AgentExecutionDiagnosticsSmokeTests.Run(_temporaryRoot);
+            Console.WriteLine("PASS  Agent 入口失败在 UI 回调前记录真实时间、状态和可操作诊断");
+            AgentMcpReadinessSmokeTests.Run();
+            Console.WriteLine("PASS  新线程独立等待 MCP 就绪，旧周期状态不能提前放行");
+
+            GenerationBatchTurnReconcilerSmokeTests.RunAllAsync().GetAwaiter().GetResult();
+            Console.WriteLine("PASS  Turn completed 保留并汇总真实图片失败，未认领与断流任务保持 Pending");
+
+            WindowsSystemProxyEnvironmentSmokeTests.Run();
+            Console.WriteLine("PASS  系统手动代理安全传入子进程，显式代理优先且本地 MCP 保持直连");
+
+            GenerationDispatchSuspensionSmokeTests.RunAsync(_temporaryRoot).GetAwaiter().GetResult();
+            Console.WriteLine("PASS  手动暂停调度持久化且保留任务状态、租约与冻结产物合同");
+            ArtWorkspaceDispatchRecoveryPolicySmokeTests.RunAll();
+            Console.WriteLine("PASS  旧美术任务无活跃会话不自动续跑，清除范围严格隔离项目与工作流");
+            ArtWorkspaceConversationResetIntegrationSmokeTests.Run(_temporaryRoot);
+            Console.WriteLine("PASS  美术对话清除从界面命令贯通持久队列、活动 Turn 取消和项目文件保留");
+
+            UserSettingsPersistenceSmokeTests.Run(_temporaryRoot);
+            Console.WriteLine("PASS  用户设置写入失败保持工作台可用，并同时进入可见控制台与会话诊断日志");
+            EngineeringLauncherSmokeTests.Run(_temporaryRoot);
+            Console.WriteLine("PASS  根目录工程启动器只构建当前 App/MCP，并禁止回退旧 dist");
             TilemapZeroRotationUsesCartesianScreenAxes();
             Console.WriteLine("PASS  Tilemap 0° 使用水平/垂直屏幕坐标基准，45° 再整体顺时针旋转");
             TilemapGeometryDiagnosticsSmokeTests.Run(_temporaryRoot);
@@ -77,6 +131,8 @@ internal static class Program
             Console.WriteLine("PASS  美术工作区对话可按光标顺序插入多图片 token，并冻结局部区域、持久化历史与严格预算");
             PageUiCreationSmokeTests.Run(_temporaryRoot);
             Console.WriteLine("PASS  页面UI制作显示名、稳定工作流身份、左对话右画布、Agent 提交与对话持久化可用");
+            PageUiShapeToolSmokeTests.Run(_temporaryRoot);
+            Console.WriteLine("PASS  页面UI制作矩形、圆形与多边形工具支持预览合同、单次历史、校验和持久化");
             ProductIdentityCompatibilitySmokeTests.Run();
             Console.WriteLine("PASS  GAssetForge 新标识与旧数据、项目、MCP 和调度身份兼容");
             ReleaseVersionConsistencySmokeTests.RunAsync(_temporaryRoot).GetAwaiter().GetResult();
@@ -179,8 +235,6 @@ internal static class Program
             Console.WriteLine("PASS  素材批次通过单消费者队列串行派发 Agent Turn，失败不触发隐式重试");
             GenerationResumeRaceSmokeTests.Run();
             Console.WriteLine("PASS  显式重新连接在恢复锁内复核当前批次，避免续派已切换的旧批次");
-            GenerationBatchTurnReconcilerSmokeTests.RunAllAsync().GetAwaiter().GetResult();
-            Console.WriteLine("PASS  Agent Turn 结束后仅按持久化真相收束，未认领与断流任务保持 Pending");
             CodexManualFallbackPromptSmokeTests.Run();
             Console.WriteLine("PASS  Codex 人工兜底提示自包含连接与批次闭环且不泄露令牌");
             DirectToolInvocationSmokeTests.RunAllAsync().GetAwaiter().GetResult();
@@ -2119,7 +2173,11 @@ internal static class Program
                  FindDockContent(manager, MainWindow.ParallelPerspectiveWorkspaceContentId) is LayoutDocument,
                 "创建项目不得替换或销毁其它业务窗口");
             True(Directory.Exists(projectPaths.AssetDirectory), "新项目应创建 Assets");
-            True(Directory.Exists(projectPaths.GeneratedAssetDirectory), "新项目应创建 Assets/Generated");
+            True(Directory.Exists(projectPaths.AiAssetDirectory), "新项目应创建 Assets/AI");
+            True(Directory.Exists(projectPaths.FinalAssetDirectory), "新项目应创建 Assets/Final");
+            True(Directory.Exists(projectPaths.UserAssetDirectory), "新项目应创建 Assets/User");
+            False(Directory.Exists(projectPaths.LegacyGeneratedAssetDirectory),
+                "新项目不得创建旧 Assets/Generated 目录");
             True(Directory.Exists(projectPaths.PackagesDirectory), "新项目应创建 Packages");
             True(Directory.Exists(projectPaths.ProjectSettingsDirectory), "新项目应创建 ProjectSettings");
             True(File.Exists(projectPaths.ManifestPath), "新项目应创建项目 manifest");
@@ -2132,8 +2190,8 @@ internal static class Program
             }
             True(AssetRootService.PathEquals(projectPaths.AssetDirectory, shell.ProjectBrowser.RootPath),
                 "Project 区根应固定为当前项目 Assets");
-            True(AssetRootService.PathEquals(projectPaths.GeneratedAssetDirectory, shell.ProjectBrowser.CurrentPath),
-                "Project 区默认当前目录应为 Assets/Generated");
+            True(AssetRootService.PathEquals(projectPaths.UserAssetDirectory, shell.ProjectBrowser.CurrentPath),
+                "Project 区默认当前目录应为 Assets/User");
             True(shell.ProjectBrowser.IsRootSelectionLocked,
                 "正式项目激活后不得从 Project 区跳出项目 Assets");
             False(shell.ProjectBrowser.TrySetRootPath(paths.AssetDirectory),
@@ -2148,6 +2206,8 @@ internal static class Program
                 "用户设置应保存最近项目根");
             True(AssetRootService.PathEquals(projectPaths.AssetDirectory, persistedSettings.AssetRootPath!),
                 "用户设置应保存当前项目 Assets");
+            True(AssetRootService.PathEquals(projectPaths.UserAssetDirectory, persistedSettings.AssetCurrentPath!),
+                "用户设置应保存当前项目 User 目录");
             Equal("tilemap", persistedSettings.ActiveWorkflowKey,
                 "用户设置应保存项目业务模板");
             Equal<string?>(null, persistedSettings.CodexThreadId,
@@ -2232,6 +2292,29 @@ internal static class Program
 
         var service = new ProjectWorkspaceService();
         var workspace = service.Create(projectsParent, "Recovery Project", "tilemap");
+        var legacyWorkspace = service.Create(projectsParent, "Generated Only Legacy", "ui");
+        Directory.Delete(legacyWorkspace.Paths.AiAssetDirectory, recursive: true);
+        Directory.Delete(legacyWorkspace.Paths.FinalAssetDirectory, recursive: true);
+        Directory.Delete(legacyWorkspace.Paths.UserAssetDirectory, recursive: true);
+        Directory.CreateDirectory(legacyWorkspace.Paths.LegacyGeneratedAssetDirectory);
+        SequenceEqual(
+            new[] { "Generated" },
+            Directory.EnumerateDirectories(legacyWorkspace.Paths.AssetDirectory)
+                .Select(Path.GetFileName),
+            "旧项目 fixture 的 Assets 应只含 Generated");
+        True(service.TryLoad(
+                legacyWorkspace.Paths.RootDirectory,
+                out var loadedLegacyManifest,
+                out _,
+                out var legacyLoadReason),
+            $"只含 Generated 的旧项目仍应可加载：{legacyLoadReason}");
+        Equal(legacyWorkspace.Manifest.Id, loadedLegacyManifest.Id,
+            "旧项目加载应保留 manifest 身份");
+        False(Directory.Exists(legacyWorkspace.Paths.AiAssetDirectory) ||
+              Directory.Exists(legacyWorkspace.Paths.FinalAssetDirectory) ||
+              Directory.Exists(legacyWorkspace.Paths.UserAssetDirectory),
+            "兼容加载旧项目时不得隐式新建 AI、Final 或 User");
+
         File.Copy(workspace.Paths.ManifestPath, workspace.Paths.ManifestBackupPath, overwrite: true);
         File.WriteAllText(workspace.Paths.ManifestPath, "{\"schemaVersion\":1,\"id\":null}");
         True(service.TryLoad(
@@ -2281,7 +2364,7 @@ internal static class Program
             new DesktopFileDialogService(),
             editor,
             workspace.Paths.AssetDirectory,
-            workspace.Paths.GeneratedAssetDirectory);
+            workspace.Paths.UserAssetDirectory);
         browser.SetRootSelectionLock(true);
         try
         {
@@ -3455,13 +3538,17 @@ internal static class Program
     {
         var paths = new WorkspacePaths(Path.Combine(_temporaryRoot, "project-file-browser"));
         True(Directory.Exists(paths.AssetDirectory), "WorkspacePaths 应创建默认 Assets 目录");
-        True(Directory.Exists(paths.GeneratedAssetDirectory), "WorkspacePaths 应创建 Generated 目录");
+        True(Directory.Exists(paths.AiAssetDirectory), "WorkspacePaths 应创建 AI 目录");
+        True(Directory.Exists(paths.FinalAssetDirectory), "WorkspacePaths 应创建 Final 目录");
+        True(Directory.Exists(paths.UserAssetDirectory), "WorkspacePaths 应创建 User 目录");
+        False(Directory.Exists(paths.LegacyGeneratedAssetDirectory),
+            "WorkspacePaths 不应创建旧 Generated 目录");
 
-        var charactersDirectory = Path.Combine(paths.AssetDirectory, "Characters");
+        var charactersDirectory = Path.Combine(paths.UserAssetDirectory, "Characters");
         var heroesDirectory = Path.Combine(charactersDirectory, "Heroes");
         Directory.CreateDirectory(heroesDirectory);
-        File.WriteAllText(Path.Combine(paths.AssetDirectory, "preview.PNG"), "image-placeholder");
-        File.WriteAllText(Path.Combine(paths.AssetDirectory, "notes.json"), "{}");
+        File.WriteAllText(Path.Combine(paths.UserAssetDirectory, "preview.PNG"), "image-placeholder");
+        File.WriteAllText(Path.Combine(paths.UserAssetDirectory, "notes.json"), "{}");
 
         var editor = new EditorWorkspaceViewModel(
             new JsonProjectRepository(paths),
@@ -3475,33 +3562,51 @@ internal static class Program
             var browser = shell.ProjectBrowser;
             True(AssetRootService.PathEquals(paths.AssetDirectory, browser.RootPath),
                 "Project 浏览器应使用默认 Assets 根目录");
-            True(AssetRootService.PathEquals(paths.GeneratedAssetDirectory, browser.CurrentPath),
-                "首次启动应把 Generated 作为默认生成输出目录");
-            True(browser.SelectDirectory(paths.AssetDirectory), "应能导航到默认 Assets 根目录");
+            True(AssetRootService.PathEquals(paths.UserAssetDirectory, browser.CurrentPath),
+                "首次启动应把 User 作为默认用户内容目录");
 
-            Equal(5, browser.Entries.Count, "Assets 根目录项目数");
-            Equal(3, browser.Entries.Count(entry => entry.IsDirectory), "Assets 根目录文件夹数");
-            True(browser.Entries.Take(3).All(entry => entry.IsDirectory),
+            Equal(4, browser.Entries.Count, "User 目录项目数");
+            Equal(2, browser.Entries.Count(entry => entry.IsDirectory), "User 目录文件夹数");
+            True(browser.Entries.Take(2).All(entry => entry.IsDirectory),
                 "Project 列表应把文件夹排在文件之前");
-            True(browser.Entries.Skip(3).All(entry => !entry.IsDirectory),
+            True(browser.Entries.Skip(2).All(entry => !entry.IsDirectory),
                 "Project 列表中文件不应穿插在文件夹之前");
-            True(browser.Entries.Any(entry => entry.IsDirectory && entry.Name == "Generated"),
-                "Project 列表应显示 Generated 目录");
             True(browser.Entries.Any(entry => entry.IsDirectory && entry.Name == "Characters"),
                 "Project 列表应显示用户创建的目录");
             True(browser.Entries.Any(entry => entry.IsDirectory && entry.Name == "StyleLibrary"),
-                "Project 列表应显示应用管理的美术风格素材库目录");
+                "User 目录应显示应用管理的美术风格素材库目录");
             Equal("图像", browser.Entries.Single(entry => entry.Name == "preview.PNG").KindLabel,
                 "图片扩展名分类应忽略大小写");
-            Equal("3 个文件夹 · 2 个文件", browser.EntryCountText, "Project 根目录计数文案");
+            Equal("2 个文件夹 · 2 个文件", browser.EntryCountText, "Project User 目录计数文案");
             Equal(1, browser.FolderRoots.Count, "Project 文件夹树根节点数");
-            True(browser.FolderRoots[0].Children.Any(node => !node.IsPlaceholder && node.Name == "Characters"),
-                "Project 文件夹树应枚举 Assets 子目录");
+            True(browser.FolderRoots[0].Children.Any(node => !node.IsPlaceholder && node.Name == "User"),
+                "Project 文件夹树应枚举 Assets/User");
+
+            True(browser.SelectDirectory(paths.AssetDirectory), "应能导航到默认 Assets 根目录");
+            Equal(3, browser.Entries.Count, "Assets 根目录应只含三个新受管目录");
+            True(browser.Entries.All(entry => entry.IsDirectory),
+                "Assets 根目录的 AI、Final、User 均应为目录");
+            True(browser.Entries.Any(entry => entry.Name == "AI") &&
+                 browser.Entries.Any(entry => entry.Name == "Final") &&
+                 browser.Entries.Any(entry => entry.Name == "User"),
+                "Project 列表应显示 AI、Final、User 三个受管目录");
+            False(browser.Entries.Any(entry => entry.Name == "Generated"),
+                "Project 列表不应为新工作区显示旧 Generated 目录");
+
+            True(browser.CreateFolderCommand.CanExecute(null), "Project 新建文件夹命令应可执行");
+            browser.CreateFolderCommand.Execute(null);
+            var redirectedFolder = Path.Combine(paths.UserAssetDirectory, "New Folder");
+            True(Directory.Exists(redirectedFolder),
+                "从 Assets 根新建用户文件夹时应重定向到 User");
+            False(Directory.Exists(Path.Combine(paths.AssetDirectory, "New Folder")),
+                "新建用户文件夹不得落在 Assets 根");
+            True(AssetRootService.PathEquals(paths.UserAssetDirectory, browser.CurrentPath),
+                "从系统管理区新建用户文件夹后应切换到 User");
 
             True(browser.SelectDirectory(charactersDirectory), "应能进入 Characters 目录");
             True(browser.SelectDirectory(heroesDirectory), "应能进入 Heroes 目录");
             SequenceEqual(
-                new[] { "Assets", "Characters", "Heroes" },
+                new[] { "Assets", "User", "Characters", "Heroes" },
                 browser.Breadcrumbs.Select(breadcrumb => breadcrumb.Label),
                 "Project 面包屑路径");
             True(browser.NavigateUpCommand.CanExecute(null), "Heroes 目录应允许返回上一级");
@@ -3516,10 +3621,58 @@ internal static class Program
             True(AssetRootService.PathEquals(currentPathBeforeRejectedNavigation, browser.CurrentPath),
                 "越界导航被拒绝后当前目录不应改变");
 
-            True(browser.CreateFolderCommand.CanExecute(null), "Project 新建文件夹命令应可执行");
+            var outsideLinkedChild = Path.Combine(outsideDirectory, "LinkedChild");
+            Directory.CreateDirectory(Path.Combine(outsideLinkedChild, "EscapedGrandchild"));
+            var linkedDirectory = Path.Combine(paths.UserAssetDirectory, "OutsideLink");
+            try
+            {
+                Directory.CreateSymbolicLink(linkedDirectory, outsideDirectory);
+                False(browser.SelectDirectory(linkedDirectory),
+                    "Project 浏览器必须拒绝选择 Assets/User 下指向项目外的目录符号链接");
+                True(AssetRootService.PathEquals(currentPathBeforeRejectedNavigation, browser.CurrentPath),
+                    "拒绝选择目录符号链接后当前目录不应改变");
+                False(browser.SelectDirectory(Path.Combine(linkedDirectory, "LinkedChild")),
+                    "Project 浏览器必须拒绝经过中间目录联接的项目外导航");
+                True(AssetRootService.PathEquals(currentPathBeforeRejectedNavigation, browser.CurrentPath),
+                    "拒绝目录联接导航后当前目录不应改变");
+
+                var linkedNode = new AssetFolderNodeViewModel(
+                    linkedDirectory,
+                    "OutsideLink",
+                    hasChildren: true);
+                browser.LoadChildren(linkedNode);
+                Equal(0, linkedNode.Children.Count,
+                    "Project 文件夹树必须拒绝展开 Assets/User 下指向项目外的目录符号链接");
+
+                var linkedChildNode = new AssetFolderNodeViewModel(
+                    Path.Combine(linkedDirectory, "LinkedChild"),
+                    "LinkedChild",
+                    hasChildren: true);
+                browser.LoadChildren(linkedChildNode);
+                Equal(0, linkedChildNode.Children.Count,
+                    "Project 文件夹树必须拒绝展开项目外目录符号链接下的 child");
+            }
+            catch (Exception exception) when (exception is
+                UnauthorizedAccessException or
+                IOException or
+                PlatformNotSupportedException or
+                NotSupportedException)
+            {
+                Console.WriteLine(
+                    $"SKIP  Project 浏览器符号链接边界回归：当前环境无法创建目录符号链接（{exception.GetType().Name}）");
+            }
+            finally
+            {
+                if (Directory.Exists(linkedDirectory))
+                {
+                    Directory.Delete(linkedDirectory);
+                }
+            }
+
+            True(browser.CreateFolderCommand.CanExecute(null), "User 子目录内新建文件夹命令应可执行");
             browser.CreateFolderCommand.Execute(null);
             var createdFolder = Path.Combine(charactersDirectory, "New Folder");
-            True(Directory.Exists(createdFolder), "Project 新建文件夹命令应创建真实目录");
+            True(Directory.Exists(createdFolder), "Project 新建文件夹命令应在 User 子树创建真实目录");
             True(browser.Entries.Any(entry => entry.IsDirectory && entry.Name == "New Folder"),
                 "新建目录后 Project 列表应立即刷新");
 
@@ -3915,6 +4068,40 @@ internal static class Program
         finally
         {
             restored.Shutdown();
+        }
+
+        foreach (var canonicalState in new[]
+                 {
+                     (Name: "empty", HasCorruptDocument: false),
+                     (Name: "corrupt", HasCorruptDocument: true)
+                 })
+        {
+            var legacyFallbackPaths = new WorkspacePaths(Path.Combine(
+                _temporaryRoot,
+                $"art-style-library-{canonicalState.Name}-canonical-fallback"));
+            var legacyStyleRoot = Path.Combine(legacyFallbackPaths.AssetDirectory, "StyleLibrary");
+            var legacyRepository = new JsonArtStyleLibraryRepository(legacyStyleRoot);
+            var legacyModel = legacyRepository.LoadOrCreate();
+            var legacyGroupName = $"旧库仍然可见-{canonicalState.Name}";
+            legacyModel.Groups[0].Name = legacyGroupName;
+            legacyRepository.Save(legacyModel);
+
+            var invalidCanonicalRoot = Path.Combine(
+                legacyFallbackPaths.UserAssetDirectory,
+                "StyleLibrary");
+            Directory.CreateDirectory(invalidCanonicalRoot);
+            if (canonicalState.HasCorruptDocument)
+            {
+                File.WriteAllText(
+                    Path.Combine(invalidCanonicalRoot, JsonArtStyleLibraryRepository.LibraryFileName),
+                    "{broken canonical library");
+            }
+
+            var fallbackRepository = new JsonArtStyleLibraryRepository(legacyFallbackPaths);
+            True(AssetRootService.PathEquals(legacyStyleRoot, fallbackRepository.StorageRoot),
+                $"{canonicalState.Name} canonical 风格库不得遮蔽有效 legacy 库");
+            Equal(legacyGroupName, fallbackRepository.LoadOrCreate().Groups[0].Name,
+                $"{canonicalState.Name} canonical 无效时应继续加载有效 legacy 风格内容");
         }
     }
 
@@ -4537,16 +4724,14 @@ internal static class Program
             var importedReferenceSha256 = styleGroup.Assets.Single().Sha256;
             True(File.Exists(managedReferencePath), "风格参考图导入后应存在于受管素材库");
 
-            var outputDirectory = Path.Combine(paths.GeneratedAssetDirectory, "TilemapWorkflow");
+            var outputDirectory = Path.Combine(paths.FinalAssetDirectory, "TilemapWorkflow");
             Directory.CreateDirectory(outputDirectory);
-            True(shell.ProjectBrowser.SelectDirectory(outputDirectory),
-                "素材生成闭环应能选择 Assets 内的指定输出目录");
 
             var generation = shell.AssetGeneration;
             generation.SelectedStyleGroup = styleGroup;
             generation.ContentPrompt = "单个长满苔藓的古代砂岩地表瓦片";
             generation.NegativePrompt = "文字、水印、棋盘格背景、画布外溢";
-            generation.UseProjectCurrentDirectoryCommand.Execute(null);
+            generation.DraftRows.Single().OutputDirectory = outputDirectory;
 
             Equal("512 × 256 px · PNG · 透明背景", generation.CanvasSizeText,
                 "素材生成 Tilemap 画布摘要");
@@ -4694,9 +4879,9 @@ internal static class Program
                 "delivery 必须保存任务创建时的 Assets 根目录");
             True(
                 deliveryPlan.OutputDirectory.StartsWith(
-                    "Generated/TilemapWorkflow/Tilemap/",
+                    "Final/TilemapWorkflow/Tilemap/",
                     StringComparison.Ordinal) &&
-                deliveryPlan.OutputDirectory.EndsWith("/Final", StringComparison.Ordinal),
+                !deliveryPlan.OutputDirectory.EndsWith("/Final", StringComparison.Ordinal),
                 "delivery 输出目录应冻结到 Assets 内的批次 Final 分类目录");
             Equal(1, deliveryPlan.TargetPaths.Length, "delivery 预分配目标数量");
             var targetRelativePath = deliveryPlan.TargetPaths.Single();
@@ -5061,7 +5246,7 @@ internal static class Program
                 $"MCP 必须在解压前拒绝超出像素预算的 PNG；实际错误：{oversizedDecodeError}");
 
             var expectedWrongTarget = GetDeliveryTarget(secondStore, invalidTaskIds["wrong-target"]);
-            var unallocatedTarget = $"Generated/TilemapWorkflow/unallocated-{Guid.NewGuid():N}.png";
+            var unallocatedTarget = $"Final/TilemapWorkflow/unallocated-{Guid.NewGuid():N}.png";
             var unallocatedFullPath = ResolveDeliveryTargetFullPath(paths.AssetDirectory, unallocatedTarget);
             WritePngFixture(
                 unallocatedFullPath,

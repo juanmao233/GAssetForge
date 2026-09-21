@@ -40,6 +40,9 @@
           "SixLabors.ImageSharp": "[3.1.12, )"
         }
       },
+      "gassetforge.engineeringlauncher": {
+        "type": "Project"
+      },
       "gassetforge.mcpserver": {
         "type": "Project",
         "dependencies": {

@@ -1,12 +1,13 @@
 using System.Collections.ObjectModel;
 using System.Text.Json;
+using GAssetForge.Core.Generation;
 
 namespace GAssetForge.App.Services;
 
 public static class GenerationMcpToolPolicy
 {
     public const string DefaultToolsApprovalMode = "approve";
-    public const int ToolTimeoutSeconds = 900;
+    public const int ToolTimeoutSeconds = GenerationMcpRuntimePolicy.ToolTimeoutSeconds;
 
     public static ReadOnlyCollection<string> EnabledTools { get; } = Array.AsReadOnly(
     [

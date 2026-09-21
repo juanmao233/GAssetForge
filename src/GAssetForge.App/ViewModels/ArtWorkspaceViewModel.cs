@@ -2,6 +2,7 @@ using GAssetForge.App.Infrastructure;
 using GAssetForge.App.Services;
 using GAssetForge.Core.ArtWorkspaces;
 using GAssetForge.Core.Generation;
+using GAssetForge.Core.Projects;
 using System.ComponentModel;
 using System.Collections.ObjectModel;
 using System.IO;
@@ -50,6 +51,7 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
     private readonly DispatcherTimer _referenceAvailabilityTimer;
     private readonly AsyncRelayCommand _importImagesCommand;
     private readonly AsyncRelayCommand _submitInstructionCommand;
+    private readonly AsyncRelayCommand _clearConversationCommand;
     private readonly RelayCommand _removeSelectedImageCommand;
     private readonly RelayCommand _bringSelectedToFrontCommand;
     private readonly RelayCommand _imageRegionSelectToolCommand;
@@ -58,6 +60,8 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
     private readonly Dispatcher _dispatcher;
     private readonly List<ArtWorkspaceManagedAsset> _assets = [];
     private readonly List<ArtWorkspaceInstructionDraftSegment> _instructionDraftSegments = [];
+    private readonly Dictionary<string, DeferredGenerationContext> _generationContexts =
+        new(StringComparer.Ordinal);
     private ArtWorkspaceDocument _document = ArtWorkspaceDocumentFactory.Create();
     private string? _projectRoot;
     private string _currentFilePath = string.Empty;
@@ -79,7 +83,7 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
     private double _outputFrameHeight = 1024d;
     private string _outputFrameName = "新美术资源输出框";
     private string _outputBackgroundHex = "#20242C";
-    private string _outputRelativeDirectory = "Assets/Generated/ArtWorkspace";
+    private string _outputRelativeDirectory = "Assets/Final";
     private bool _hasPendingSave;
     private int _autoSaveRetryCount;
     private bool _suppressAutoSave;
@@ -89,6 +93,8 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
     private CancellationTokenSource? _generationCancellation;
     private string? _activeGenerationRequestId;
     private bool _isGenerating;
+    private bool _isClearingConversation;
+    private Func<string, CancellationToken, Task>? _clearConversationHandler;
     private string _generationProgressText = "尚未启动生成";
     private double _generationProgressPercentage;
     private bool _lastHasMissingVisibleImages;
@@ -104,12 +110,15 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         _imagePicker = imagePicker ?? throw new ArgumentNullException(nameof(imagePicker));
         _console = console ?? throw new ArgumentNullException(nameof(console));
         _dispatcher = Dispatcher.CurrentDispatcher;
-        _importImagesCommand = new AsyncRelayCommand(ImportImagesAsync, () => !IsImporting);
+        _importImagesCommand = new AsyncRelayCommand(ImportImagesAsync, () => !IsImporting && !IsClearingConversation);
         ImportImagesCommand = _importImagesCommand;
         _cancelImportCommand = new RelayCommand(CancelImport, () => IsImporting);
         CancelImportCommand = _cancelImportCommand;
         _submitInstructionCommand = new AsyncRelayCommand(SubmitInstructionAsync, CanSubmitInstruction);
         SubmitInstructionCommand = _submitInstructionCommand;
+        _clearConversationCommand = new AsyncRelayCommand(
+            ClearConversationAsync, () => !_disposed && !IsImporting && !IsClearingConversation);
+        ClearConversationCommand = _clearConversationCommand;
         SaveCommand = new RelayCommand(() => SaveNow());
         ResetViewportCommand = new RelayCommand(ResetViewportToOrigin);
         FocusOutputFrameCommand = new RelayCommand(FocusOutputFrame);
@@ -176,6 +185,7 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
             _importImagesCommand.RaiseCanExecuteChanged();
             _cancelImportCommand.RaiseCanExecuteChanged();
             _submitInstructionCommand.RaiseCanExecuteChanged();
+            _clearConversationCommand.RaiseCanExecuteChanged();
             OnPropertyChanged(nameof(CanSubmitInstructionText));
             if (!value && _hasPendingSave)
             {
@@ -292,7 +302,26 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         _instructionDraftSegments.Count(segment => segment.IsImageReference) <
         ArtWorkspaceGenerationConstraintPackageBuilder.MaximumInlineInstructionReferenceCount;
 
-    public string CanSubmitInstructionText => IsImporting
+    public bool IsClearingConversation
+    {
+        get => _isClearingConversation;
+        private set
+        {
+            if (SetProperty(ref _isClearingConversation, value))
+            {
+                OnPropertyChanged(nameof(CanSubmitInstructionText));
+                _submitInstructionCommand.RaiseCanExecuteChanged();
+                _clearConversationCommand.RaiseCanExecuteChanged();
+                _importImagesCommand.RaiseCanExecuteChanged();
+            }
+        }
+    }
+
+    public ICommand ClearConversationCommand { get; }
+
+    public string CanSubmitInstructionText => IsClearingConversation
+        ? "正在停止旧美术任务并清除对话，请稍候。"
+        : IsImporting
         ? "参考图片正在导入；完成或取消后即可发送生成指令。"
         : IsGenerating
             ? "当前指令正在由 Agent 执行，请等待本轮完成。"
@@ -309,7 +338,7 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
                                 : HasInvalidInstructionReferences
                                     ? "对话中存在已删除、隐藏或文件缺失的图片引用；请删除对应标签或恢复图片后再发送。"
                                 : Conversation.Count > ArtWorkspaceValidator.MaximumMessages - 2
-                                    ? "对话记录已达到上限，请先归档或创建新的工作区会话。"
+                                    ? "对话记录已达到上限，请使用“清除对话并停止任务”后继续。"
                                     : !HasInstructionDraftContent()
                                         ? "输入希望创建的内容，并可在光标处插入一张或多张画布图片。"
                                         : InstructionDraftSemanticLength > ArtWorkspaceConversationMessageViewModel.MaximumTextLength
@@ -377,11 +406,13 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         set
         {
             var normalized = string.IsNullOrWhiteSpace(value)
-                ? "Assets/Generated/ArtWorkspace"
+                ? "Assets/Final"
                 : value.Trim().Replace('\\', '/').TrimEnd('/');
-            if (!IsSafeAssetsDirectory(normalized))
+            if (!IsSafeAssetsDirectory(normalized) ||
+                (!string.Equals(normalized, "Assets/Final", StringComparison.OrdinalIgnoreCase) &&
+                 !normalized.StartsWith("Assets/Final/", StringComparison.OrdinalIgnoreCase)))
             {
-                _statusMessage = "输出目录必须是 Assets 根目录内且不含 . 或 .. 跳转的相对路径";
+                _statusMessage = "最终产物分类目录必须位于 Assets/Final 内且不含 . 或 .. 跳转";
                 OnPropertyChanged();
                 NotifySummaryChanged();
                 return;
@@ -513,23 +544,31 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         if (_generationGateway is not null)
         {
             _generationGateway.StateChanged -= OnGenerationGatewayStateChanged;
+            _generationGateway.DeferredGenerationCompleted -= OnDeferredGenerationCompleted;
         }
 
         _generationGateway = gateway;
         if (_generationGateway is not null)
         {
             _generationGateway.StateChanged += OnGenerationGatewayStateChanged;
+            _generationGateway.DeferredGenerationCompleted += OnDeferredGenerationCompleted;
         }
 
         RefreshGenerationGatewayState();
     }
 
+    public void ConfigureConversationResetHandler(Func<string, CancellationToken, Task> handler)
+    {
+        ArgumentNullException.ThrowIfNull(handler);
+        _clearConversationHandler = handler;
+    }
+
     public bool Activate(string? projectRoot)
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
-        if (IsImporting)
+        if (IsImporting || IsClearingConversation)
         {
-            _statusMessage = "参考图片仍在导入，请等待完成或先取消导入后再切换项目";
+            _statusMessage = "参考图片导入或对话清理仍在进行，请等待完成后再切换项目";
             NotifySummaryChanged();
             return false;
         }
@@ -550,14 +589,10 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
             return false;
         }
 
-        if (IsGenerating && !PathsEqual(_projectRoot, normalizedProjectRoot))
-        {
-            _generationCancellation?.Cancel();
-        }
-
         try
         {
             var result = _repository.LoadOrCreate(normalizedProjectRoot);
+            InvalidateGenerationWait();
             ApplyDocument(normalizedProjectRoot, result);
             if (!string.IsNullOrWhiteSpace(result.ErrorMessage))
             {
@@ -646,7 +681,7 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(sourcePaths);
-        if (IsImporting)
+        if (IsImporting || IsClearingConversation)
         {
             _statusMessage = "已有参考图片导入任务正在执行";
             NotifySummaryChanged();
@@ -704,7 +739,7 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
     {
         ObjectDisposedException.ThrowIf(_disposed, this);
         ArgumentNullException.ThrowIfNull(sourcePaths);
-        if (IsImporting)
+        if (IsImporting || IsClearingConversation)
         {
             _statusMessage = "已有参考图片导入任务正在执行";
             NotifySummaryChanged();
@@ -1161,7 +1196,10 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         if (_generationGateway is not null)
         {
             _generationGateway.StateChanged -= OnGenerationGatewayStateChanged;
+            _generationGateway.DeferredGenerationCompleted -= OnDeferredGenerationCompleted;
         }
+
+        _generationContexts.Clear();
 
         var importChangedDocument = IsImporting &&
                                     (Images.Count != _document.Images.Count ||
@@ -1230,6 +1268,7 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
 
     private bool CanSubmitInstruction() =>
         !IsImporting &&
+        !IsClearingConversation &&
         !IsGenerating &&
         !string.IsNullOrWhiteSpace(_projectRoot) &&
         _generationGateway is { IsConnected: true, IsBusy: false } &&
@@ -1238,6 +1277,66 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         Conversation.Count <= ArtWorkspaceValidator.MaximumMessages - 2 &&
         HasInstructionDraftContent() &&
         InstructionDraftSemanticLength <= ArtWorkspaceConversationMessageViewModel.MaximumTextLength;
+
+    private void InvalidateGenerationWait()
+    {
+        var cancellation = _generationCancellation;
+        _activeGenerationRequestId = null;
+        _generationCancellation = null;
+        _generationContexts.Clear();
+        IsGenerating = false;
+        cancellation?.Cancel();
+    }
+
+    private async Task ClearConversationAsync()
+    {
+        if (_disposed || IsImporting || IsClearingConversation)
+        {
+            return;
+        }
+
+        IsClearingConversation = true;
+        InvalidateGenerationWait();
+        try
+        {
+            if (_clearConversationHandler is not null && !string.IsNullOrWhiteSpace(_projectRoot))
+            {
+                await _clearConversationHandler(_projectRoot, CancellationToken.None);
+            }
+
+            if (_disposed)
+            {
+                return;
+            }
+
+            Conversation.Clear();
+            // Keep the draft so a user can retry the instruction they were already composing.
+            GenerationProgressPercentage = 0d;
+            GenerationProgressText = "对话已清除，旧美术任务已停止自动调度";
+            MarkDirty();
+            if (SaveNow())
+            {
+                _statusMessage = "已清除对话并暂停旧美术任务；当前草稿、画布图片与已落盘产物均保留";
+            }
+        }
+        catch (Exception exception)
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _statusMessage = $"停止旧任务未完成，对话记录保留，请重试清除：{exception.Message}";
+            GenerationProgressText = _statusMessage;
+            _console.WriteError("ArtWorkspace", _statusMessage, exception);
+        }
+        finally
+        {
+            IsClearingConversation = false;
+            RefreshGenerationGatewayState();
+            NotifySummaryChanged();
+        }
+    }
 
     private async Task SubmitInstructionAsync()
     {
@@ -1321,9 +1420,12 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         var cancellation = new CancellationTokenSource();
         _generationCancellation = cancellation;
         _activeGenerationRequestId = frozenRequest.RequestId;
+        _generationContexts[frozenRequest.RequestId] =
+            new DeferredGenerationContext(frozenRequest, agentMessage);
         GenerationProgressPercentage = 0d;
         GenerationProgressText = "正在提交生成请求";
         IsGenerating = true;
+        var keepContextForDeferredCompletion = false;
 
         var progress = new Progress<ArtWorkspaceGenerationProgress>(update =>
             ApplyGenerationProgress(frozenRequest, agentMessage, update));
@@ -1331,7 +1433,8 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         {
             var gateway = _generationGateway
                 ?? throw new InvalidOperationException("Agent 生成网关在提交前已被移除。");
-            var result = await gateway.GenerateAsync(frozenRequest, progress, cancellation.Token);
+            var result = await gateway.GenerateAsync(frozenRequest, progress, cancellation.Token)
+                .WaitAsync(cancellation.Token);
             if (!IsRequestStillCurrent(frozenRequest))
             {
                 _console.WriteWarning(
@@ -1344,10 +1447,24 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
             {
                 var failure = string.IsNullOrWhiteSpace(result.ErrorMessage)
                     ? "Agent 未提供失败原因"
-                    : result.ErrorMessage.Trim();
-                agentMessage.Update($"生成失败：{failure}", "failed");
+                    : WorkbenchConsoleService.RedactCommonCredentials(result.ErrorMessage.Trim());
+                if (result.IsDeferred)
+                {
+                    keepContextForDeferredCompletion = true;
+                    agentMessage.Update(
+                        $"生成已转入后台等待恢复：{failure} 你可以继续发送新的创作指令；" +
+                        "原任务完成后会在当前软件会话中自动导入，重启后仍会保留 Final 原件。",
+                        "deferred");
+                    GenerationProgressText = "本轮已转入后台，可继续发送";
+                    _statusMessage = "生成调度已中断；持久任务保留，当前对话已恢复可编辑";
+                    MarkDirty();
+                    return;
+                }
+
+                agentMessage.Update($"生成未完成：{failure} 输入框已恢复；请按上述原因处理后重试。", "failed");
+                GenerationProgressPercentage = 100d;
                 GenerationProgressText = failure;
-                _statusMessage = "Agent 未能完成本次美术生成";
+                _statusMessage = "Agent 未能完成本次美术生成，已恢复发送功能";
                 MarkDirty();
                 return;
             }
@@ -1388,6 +1505,7 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
             if (IsRequestStillCurrent(frozenRequest))
             {
                 agentMessage.Update($"生成失败：{exception.Message}", "failed");
+                GenerationProgressPercentage = 100d;
                 GenerationProgressText = exception.Message;
                 _statusMessage = "美术生成执行失败";
                 MarkDirty();
@@ -1408,6 +1526,11 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
                 NotifySummaryChanged();
             }
 
+            if (!keepContextForDeferredCompletion)
+            {
+                _generationContexts.Remove(frozenRequest.RequestId);
+            }
+
             cancellation.Dispose();
         }
     }
@@ -1424,10 +1547,17 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         var projectRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(_projectRoot));
         var projectPaths = new ProjectPaths(projectRoot);
         var assetRoot = Path.TrimEndingDirectorySeparator(Path.GetFullPath(projectPaths.AssetDirectory));
+        var canonicalOutputRelativeDirectory = NormalizeOutputDirectoryForNewGeneration(
+            OutputRelativeDirectory);
         var outputDirectory = Path.GetFullPath(Path.Combine(
             projectRoot,
-            OutputRelativeDirectory.Replace('/', Path.DirectorySeparatorChar)));
-        EnsurePathWithinRoot(assetRoot, outputDirectory, "美术工作区输出目录");
+            canonicalOutputRelativeDirectory.Replace('/', Path.DirectorySeparatorChar)));
+        if (!AssetRootService.PathEquals(projectPaths.FinalAssetDirectory, outputDirectory) &&
+            !IsPathWithinRoot(projectPaths.FinalAssetDirectory, outputDirectory))
+        {
+            throw new InvalidDataException("美术工作区最终产物目录必须位于 Assets/Final 内。");
+        }
+
         EnsureExistingSegmentsAreNotReparsePoints(projectRoot, outputDirectory, "美术工作区输出目录");
 
         var assetsById = _assets.ToDictionary(asset => asset.Id, StringComparer.Ordinal);
@@ -1440,7 +1570,13 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
             }
 
             var absolutePath = Path.GetFullPath(image.AbsolutePath);
-            EnsurePathWithinRoot(projectPaths.ArtWorkspaceReferenceDirectory, absolutePath, $"参考图片 {image.Name}");
+            EnsurePathWithinAnyRoot(
+                [
+                    projectPaths.ArtWorkspaceReferenceDirectory,
+                    projectPaths.LegacyArtWorkspaceReferenceDirectory
+                ],
+                absolutePath,
+                $"参考图片 {image.Name}");
             EnsureExistingSegmentsAreNotReparsePoints(projectRoot, absolutePath, $"参考图片 {image.Name}");
             if (!File.Exists(absolutePath))
             {
@@ -1499,7 +1635,7 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
                 PixelWidth = checked((int)Math.Round(OutputFrameWidth, MidpointRounding.AwayFromZero)),
                 PixelHeight = checked((int)Math.Round(OutputFrameHeight, MidpointRounding.AwayFromZero)),
                 BackgroundHex = OutputBackgroundHex,
-                OutputRelativeDirectory = OutputRelativeDirectory,
+                OutputRelativeDirectory = canonicalOutputRelativeDirectory,
                 OutputDirectoryPath = outputDirectory
             },
             VisibleReferences = references.ToArray(),
@@ -1537,7 +1673,8 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
     private async Task<int> ImportGeneratedOutputsAsync(
         ArtWorkspaceGenerationRequest request,
         IEnumerable<string> outputPaths,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool requireActiveRequest = true)
     {
         ArgumentNullException.ThrowIfNull(outputPaths);
         var validatedPaths = outputPaths
@@ -1553,7 +1690,7 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         }
 
         cancellationToken.ThrowIfCancellationRequested();
-        if (!IsRequestStillCurrent(request))
+        if (!IsGenerationRequestApplicable(request, requireActiveRequest))
         {
             return 0;
         }
@@ -1561,7 +1698,7 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         var previousCount = Images.Count;
         var added = await AddImagesAtAsync(validatedPaths, request.OutputFrame.X, request.OutputFrame.Y);
         cancellationToken.ThrowIfCancellationRequested();
-        if (!IsRequestStillCurrent(request))
+        if (!IsGenerationRequestApplicable(request, requireActiveRequest))
         {
             return 0;
         }
@@ -1591,7 +1728,7 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
             SelectImage(generatedImages[^1]);
         }
 
-        _statusMessage = $"已保留 Generated 原件，并复制 {added} 张受管画布预览到输出框";
+        _statusMessage = $"已保留 Final 原件，并复制 {added} 张受管画布预览到输出框";
         MarkDirty();
         return added;
     }
@@ -1621,6 +1758,111 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         string.Equals(_activeGenerationRequestId, request.RequestId, StringComparison.Ordinal) &&
         PathsEqual(_projectRoot, request.ProjectRoot);
 
+    private bool IsGenerationRequestApplicable(
+        ArtWorkspaceGenerationRequest request,
+        bool requireActiveRequest) =>
+        PathsEqual(_projectRoot, request.ProjectRoot) &&
+        (!requireActiveRequest ||
+         string.Equals(_activeGenerationRequestId, request.RequestId, StringComparison.Ordinal));
+
+    private void OnDeferredGenerationCompleted(
+        object? sender,
+        ArtWorkspaceDeferredGenerationCompletedEventArgs e)
+    {
+        if (_disposed || _dispatcher.HasShutdownStarted || _dispatcher.HasShutdownFinished)
+        {
+            return;
+        }
+
+        void BeginApply() => _ = ApplyDeferredGenerationCompletedAsync(e);
+        if (_dispatcher.CheckAccess())
+        {
+            BeginApply();
+        }
+        else
+        {
+            _dispatcher.BeginInvoke((Action)BeginApply, DispatcherPriority.DataBind);
+        }
+    }
+
+    private async Task ApplyDeferredGenerationCompletedAsync(
+        ArtWorkspaceDeferredGenerationCompletedEventArgs e)
+    {
+        if (!_generationContexts.Remove(e.Request.RequestId, out var context))
+        {
+            return;
+        }
+
+        try
+        {
+            if (!PathsEqual(_projectRoot, e.Request.ProjectRoot) ||
+                !Conversation.Contains(context.AgentMessage))
+            {
+                _console.WriteInfo(
+                    "ArtWorkspace",
+                    $"后台美术任务 {e.Result.TaskId ?? e.Request.RequestId} 已结束；" +
+                    "原项目当前未激活，Final 原件保持在冻结目录中，可稍后手动导入。");
+                return;
+            }
+
+            if (!e.Result.IsSuccess)
+            {
+                var failure = string.IsNullOrWhiteSpace(e.Result.ErrorMessage)
+                    ? "后台任务未提供失败原因"
+                    : e.Result.ErrorMessage.Trim();
+                context.AgentMessage.Update($"后台生成最终失败：{failure} 可以继续修改指令后再次发送。", "failed");
+                _statusMessage = "后台美术任务失败；当前对话仍可继续";
+                MarkDirty();
+                return;
+            }
+
+            var importedCount = await ImportGeneratedOutputsAsync(
+                e.Request,
+                e.Result.OutputPaths,
+                CancellationToken.None,
+                requireActiveRequest: false);
+            if (!PathsEqual(_projectRoot, e.Request.ProjectRoot) ||
+                !Conversation.Contains(context.AgentMessage))
+            {
+                return;
+            }
+            var description = string.IsNullOrWhiteSpace(e.Result.AgentDescription)
+                ? $"后台图片已生成并导入输出框，共 {importedCount} 张。"
+                : e.Result.AgentDescription.Trim();
+            context.AgentMessage.Update(description, "completed");
+            _statusMessage = $"后台 Agent 生成完成，{importedCount} 张产物已进入输出框";
+            if (!IsGenerating)
+            {
+                GenerationProgressPercentage = 100d;
+                GenerationProgressText = $"后台生成完成 · 已导入 {importedCount} 张图片";
+            }
+
+            MarkDirty();
+        }
+        catch (Exception exception)
+        {
+            if (!PathsEqual(_projectRoot, e.Request.ProjectRoot) ||
+                !Conversation.Contains(context.AgentMessage))
+            {
+                return;
+            }
+
+            context.AgentMessage.Update(
+                $"后台图片已落盘，但自动导入画布失败：{exception.Message} Final 原件仍保留。",
+                "failed");
+            _statusMessage = "后台产物自动导入失败；Final 原件仍保留";
+            MarkDirty();
+            _console.WriteError(
+                "ArtWorkspace",
+                $"后台生成请求 {e.Request.RequestId} 的产物导入失败：{exception.Message}",
+                exception);
+        }
+        finally
+        {
+            NotifySummaryChanged();
+        }
+    }
+
     private void OnGenerationGatewayStateChanged(object? sender, EventArgs e)
     {
         if (_disposed || _dispatcher.HasShutdownStarted || _dispatcher.HasShutdownFinished)
@@ -1647,18 +1889,38 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         _submitInstructionCommand.RaiseCanExecuteChanged();
     }
 
+    private sealed record DeferredGenerationContext(
+        ArtWorkspaceGenerationRequest Request,
+        ArtWorkspaceConversationMessageViewModel AgentMessage);
+
     private static void EnsurePathWithinRoot(string rootPath, string candidatePath, string label)
+    {
+        if (!IsPathWithinRoot(rootPath, candidatePath))
+        {
+            throw new InvalidDataException($"{label}必须位于受信根目录内。");
+        }
+    }
+
+    private static void EnsurePathWithinAnyRoot(
+        IReadOnlyList<string> rootPaths,
+        string candidatePath,
+        string label)
+    {
+        if (!rootPaths.Any(rootPath => IsPathWithinRoot(rootPath, candidatePath)))
+        {
+            throw new InvalidDataException($"{label}必须位于当前或兼容的受信根目录内。");
+        }
+    }
+
+    private static bool IsPathWithinRoot(string rootPath, string candidatePath)
     {
         var root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(rootPath));
         var candidate = Path.GetFullPath(candidatePath);
         var relative = Path.GetRelativePath(root, candidate);
-        if (Path.IsPathRooted(relative) ||
-            relative is "." or ".." ||
-            relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal) ||
-            relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal))
-        {
-            throw new InvalidDataException($"{label}必须位于受信根目录内。");
-        }
+        return !Path.IsPathRooted(relative) &&
+               relative is not ("." or "..") &&
+               !relative.StartsWith($"..{Path.DirectorySeparatorChar}", StringComparison.Ordinal) &&
+               !relative.StartsWith($"..{Path.AltDirectorySeparatorChar}", StringComparison.Ordinal);
     }
 
     private static void EnsureExistingSegmentsAreNotReparsePoints(
@@ -1751,6 +2013,17 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         var nextConversation = nextDocument.Conversation
             .Select(message => new ArtWorkspaceConversationMessageViewModel(CloneMessage(message)))
             .ToList();
+        var restoredInterruptedMessages = false;
+        foreach (var message in nextConversation.Where(message => message.IsAgent))
+        {
+            if (message.State.ToLowerInvariant() is "completed" or "failed" or "canceled" or "cancelled" or "interrupted")
+            {
+                continue;
+            }
+
+            message.Update(message.Text, "interrupted");
+            restoredInterruptedMessages = true;
+        }
         var nextSelectedImage = nextImages.FirstOrDefault(image =>
             string.Equals(image.Id, nextDocument.SelectedImageId, StringComparison.Ordinal));
         var nextSelectedRegion = nextSelectedImage is { IsVisible: true, IsMissing: false } &&
@@ -1793,7 +2066,8 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
             _outputFrameHeight = nextDocument.OutputFrame.Height;
             _outputFrameName = nextDocument.OutputFrame.Name;
             _outputBackgroundHex = nextDocument.OutputFrame.BackgroundHex;
-            _outputRelativeDirectory = nextDocument.OutputFrame.OutputRelativeDirectory;
+            _outputRelativeDirectory = NormalizeOutputDirectoryForNewGeneration(
+                nextDocument.OutputFrame.OutputRelativeDirectory);
             _assets.AddRange(nextAssets);
 
             foreach (var item in nextImages)
@@ -1833,6 +2107,12 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         }
 
         NotifyAllChanged();
+        GenerationProgressPercentage = 0d;
+        GenerationProgressText = restoredInterruptedMessages ? "旧会话已中断，可继续发送新指令" : "尚未启动生成";
+        if (restoredInterruptedMessages)
+        {
+            MarkDirty();
+        }
         if (discardedInvalidSelectedRegion)
         {
             _statusMessage = "已清除隐藏或缺失图片上的无效框选区域";
@@ -2099,6 +2379,35 @@ public sealed class ArtWorkspaceViewModel : ObservableObject, IDisposable
         }
 
         return Math.Max(preferredScale, minimum <= 0 ? 1d : 1d / minimum);
+    }
+
+    private static string NormalizeOutputDirectoryForNewGeneration(string? value)
+    {
+        var normalized = (value ?? string.Empty).Trim().Replace('\\', '/').TrimEnd('/');
+        if (string.IsNullOrWhiteSpace(normalized) ||
+            string.Equals(normalized, "Assets/Generated/ArtWorkspace", StringComparison.OrdinalIgnoreCase))
+        {
+            return "Assets/Final";
+        }
+
+        const string legacyPrefix = "Assets/Generated/ArtWorkspace/";
+        if (normalized.StartsWith(legacyPrefix, StringComparison.OrdinalIgnoreCase))
+        {
+            return $"Assets/Final/{normalized[legacyPrefix.Length..]}";
+        }
+
+        if (string.Equals(normalized, "Assets/Final", StringComparison.OrdinalIgnoreCase) ||
+            normalized.StartsWith("Assets/Final/", StringComparison.OrdinalIgnoreCase))
+        {
+            return normalized;
+        }
+
+        if (IsSafeAssetsDirectory(normalized))
+        {
+            return $"Assets/Final/{normalized["Assets/".Length..]}";
+        }
+
+        throw new InvalidDataException("美术工作区最终产物目录必须位于 Assets/Final 内。");
     }
 
     private static bool IsSafeAssetsDirectory(string path)
@@ -2748,6 +3057,39 @@ public sealed class ArtWorkspaceConversationMessageViewModel : ObservableObject
 
     public bool HasStructuredSegments => Segments.Count > 0;
 
+    /// <summary>
+    /// User-safe text used by the conversation copy action. Structured image references are
+    /// represented only by their visible labels; managed paths, IDs, hashes and coordinates never
+    /// enter the clipboard payload.
+    /// </summary>
+    public string ClipboardText
+    {
+        get
+        {
+            if (!HasStructuredSegments)
+            {
+                return HasReferenceSummary
+                    ? $"{Text}{Environment.NewLine}[{ReferenceSummary}]"
+                    : Text;
+            }
+
+            var builder = new StringBuilder();
+            foreach (var segment in Segments)
+            {
+                if (segment.IsText)
+                {
+                    builder.Append(segment.Text);
+                }
+                else if (segment.IsImageReference)
+                {
+                    builder.Append('[').Append(segment.ReferenceText).Append(']');
+                }
+            }
+
+            return builder.ToString();
+        }
+    }
+
     public string TimeText => _model.CreatedAtUtc.ToLocalTime().ToString("HH:mm:ss");
 
     public string State => _model.State;
@@ -2774,6 +3116,7 @@ public sealed class ArtWorkspaceConversationMessageViewModel : ObservableObject
         {
             _model.Text = normalizedText;
             OnPropertyChanged(nameof(Text));
+            OnPropertyChanged(nameof(ClipboardText));
         }
 
         if (!string.Equals(_model.State, normalizedState, StringComparison.Ordinal))

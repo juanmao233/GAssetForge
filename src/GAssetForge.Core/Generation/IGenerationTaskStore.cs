@@ -19,6 +19,16 @@ public interface IGenerationTaskStore
         string reason,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Withdraws desktop automatic dispatch for the exact task IDs without changing task status,
+    /// claim ownership, frozen constraints, or delivered files.
+    /// </summary>
+    Task<IReadOnlyList<GenerationTask>> SuspendAutomaticDispatchAsync(
+        IReadOnlyList<string> taskIds,
+        string reason,
+        CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException("当前任务存储不支持暂停自动调度。");
+
     Task<IReadOnlyList<GenerationTask>> ListBatchAsync(
         string batchId,
         CancellationToken cancellationToken = default);

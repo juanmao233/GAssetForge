@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
 using System.Text;
+using System.Text.RegularExpressions;
 
 namespace GAssetForge.App.Services.AgentRuntime;
 
@@ -25,13 +26,118 @@ internal sealed record CodexExecutableCandidateDiagnostic(
     CodexExecutableCandidateStatus Status,
     string Reason);
 
-internal readonly record struct CodexExecutableProbeResult(bool IsSuccess, string Reason)
+internal sealed record CodexCliSemanticVersion(
+    int Major,
+    int Minor,
+    int Patch,
+    IReadOnlyList<string> PreReleaseIdentifiers,
+    string Raw) : IComparable<CodexCliSemanticVersion>
 {
-    internal static CodexExecutableProbeResult Successful(string reason) =>
-        new(true, NormalizeReason(reason, "--version 探测成功。"));
+    private static readonly Regex VersionPattern = new(
+        @"\bcodex(?:-cli)?\s+(?<version>\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)",
+        RegexOptions.CultureInvariant | RegexOptions.IgnoreCase | RegexOptions.Compiled);
+
+    internal static CodexCliSemanticVersion? TryParseFromProbeText(string text)
+    {
+        var match = VersionPattern.Match(text ?? string.Empty);
+        if (!match.Success)
+        {
+            return null;
+        }
+
+        var raw = match.Groups["version"].Value;
+        var withoutBuild = raw.Split('+', 2)[0];
+        var versionParts = withoutBuild.Split('-', 2);
+        var core = versionParts[0].Split('.');
+        if (core.Length != 3 ||
+            !int.TryParse(core[0], out var major) ||
+            !int.TryParse(core[1], out var minor) ||
+            !int.TryParse(core[2], out var patch))
+        {
+            return null;
+        }
+
+        var preRelease = versionParts.Length == 2
+            ? versionParts[1].Split('.', StringSplitOptions.RemoveEmptyEntries)
+            : [];
+        return new CodexCliSemanticVersion(major, minor, patch, preRelease, raw);
+    }
+
+    public int CompareTo(CodexCliSemanticVersion? other)
+    {
+        if (other is null)
+        {
+            return 1;
+        }
+
+        var coreComparison = Major.CompareTo(other.Major);
+        if (coreComparison == 0)
+        {
+            coreComparison = Minor.CompareTo(other.Minor);
+        }
+
+        if (coreComparison == 0)
+        {
+            coreComparison = Patch.CompareTo(other.Patch);
+        }
+
+        if (coreComparison != 0)
+        {
+            return coreComparison;
+        }
+
+        var isStable = PreReleaseIdentifiers.Count == 0;
+        var otherIsStable = other.PreReleaseIdentifiers.Count == 0;
+        if (isStable != otherIsStable)
+        {
+            return isStable ? 1 : -1;
+        }
+
+        for (var index = 0;
+             index < Math.Min(PreReleaseIdentifiers.Count, other.PreReleaseIdentifiers.Count);
+             index++)
+        {
+            var left = PreReleaseIdentifiers[index];
+            var right = other.PreReleaseIdentifiers[index];
+            var leftIsNumeric = int.TryParse(left, out var leftNumber);
+            var rightIsNumeric = int.TryParse(right, out var rightNumber);
+            int identifierComparison;
+            if (leftIsNumeric && rightIsNumeric)
+            {
+                identifierComparison = leftNumber.CompareTo(rightNumber);
+            }
+            else if (leftIsNumeric != rightIsNumeric)
+            {
+                identifierComparison = leftIsNumeric ? -1 : 1;
+            }
+            else
+            {
+                identifierComparison = string.Compare(left, right, StringComparison.Ordinal);
+            }
+
+            if (identifierComparison != 0)
+            {
+                return identifierComparison;
+            }
+        }
+
+        return PreReleaseIdentifiers.Count.CompareTo(other.PreReleaseIdentifiers.Count);
+    }
+}
+
+internal readonly record struct CodexExecutableProbeResult(
+    bool IsSuccess,
+    string Reason,
+    CodexCliSemanticVersion? Version)
+{
+    internal static CodexExecutableProbeResult Successful(string reason)
+    {
+        var normalized = NormalizeReason(reason, "--version 探测成功。");
+        return new(true, normalized, CodexCliSemanticVersion.TryParseFromProbeText(normalized));
+    }
 
     internal static CodexExecutableProbeResult Failed(string reason) =>
-        new(false, NormalizeReason(reason, "--version 探测失败。"));
+        new(false, NormalizeReason(reason, "--version 探测失败。"), null);
 
     private static string NormalizeReason(string reason, string fallback) =>
         string.IsNullOrWhiteSpace(reason) ? fallback : reason.Trim();
@@ -63,11 +169,16 @@ internal static class CodexExecutableResolver
     internal const string CodeModeHostFileName = "codex-code-mode-host.exe";
     private const string AutomaticExecutableName = "codex";
     private const string AppDataNpmSource = "APPDATA npm shim";
+    private const string LocalAppDataDesktopInstallSource = "LOCALAPPDATA Codex Desktop";
     private const string LocalAppDataOfficialInstallSource = "LOCALAPPDATA 官方安装";
     private const string PathShimSource = "PATH shim";
     private static readonly TimeSpan LaunchProbeTimeout = TimeSpan.FromSeconds(5);
     private static readonly ConcurrentDictionary<string, CodexExecutableProbeResult>
         SuccessfulLaunchProbeCache = new(StringComparer.OrdinalIgnoreCase);
+
+    private sealed record EvaluatedCandidate(
+        CodexExecutableLaunch Launch,
+        CodexCliSemanticVersion? Version);
 
     internal static CodexExecutableLaunch Resolve(
         string requestedExecutable,
@@ -123,6 +234,7 @@ internal static class CodexExecutableResolver
             .ToArray();
         var diagnostics = new List<CodexExecutableCandidateDiagnostic>();
         var seenCandidates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var availableCandidates = new List<EvaluatedCandidate>();
 
         if (!string.IsNullOrWhiteSpace(appDataPath))
         {
@@ -137,13 +249,27 @@ internal static class CodexExecutableResolver
                     seenCandidates);
                 if (accepted is not null)
                 {
-                    return CreateSuccessfulResolution(accepted, diagnostics);
+                    availableCandidates.Add(accepted);
                 }
             }
         }
 
         if (!string.IsNullOrWhiteSpace(localAppDataPath))
         {
+            foreach (var desktopInstall in EnumerateDesktopInstalls(localAppDataPath))
+            {
+                var accepted = EvaluateCandidate(
+                    desktopInstall,
+                    LocalAppDataDesktopInstallSource,
+                    canLaunch,
+                    diagnostics,
+                    seenCandidates);
+                if (accepted is not null)
+                {
+                    availableCandidates.Add(accepted);
+                }
+            }
+
             var officialInstallDirectory = Path.Combine(
                 localAppDataPath,
                 "Programs",
@@ -161,7 +287,7 @@ internal static class CodexExecutableResolver
                     seenCandidates);
                 if (accepted is not null)
                 {
-                    return CreateSuccessfulResolution(accepted, diagnostics);
+                    availableCandidates.Add(accepted);
                 }
             }
         }
@@ -178,7 +304,7 @@ internal static class CodexExecutableResolver
                     seenCandidates);
                 if (accepted is not null)
                 {
-                    return CreateSuccessfulResolution(accepted, diagnostics);
+                    availableCandidates.Add(accepted);
                 }
             }
         }
@@ -199,7 +325,7 @@ internal static class CodexExecutableResolver
                 seenCandidates);
             if (accepted is not null)
             {
-                return CreateSuccessfulResolution(accepted, diagnostics);
+                availableCandidates.Add(accepted);
             }
         }
 
@@ -214,7 +340,7 @@ internal static class CodexExecutableResolver
                 seenCandidates);
             if (accepted is not null)
             {
-                return CreateSuccessfulResolution(accepted, diagnostics);
+                availableCandidates.Add(accepted);
             }
         }
 
@@ -234,7 +360,7 @@ internal static class CodexExecutableResolver
                 seenCandidates);
             if (accepted is not null)
             {
-                return CreateSuccessfulResolution(accepted, diagnostics);
+                availableCandidates.Add(accepted);
             }
         }
 
@@ -242,6 +368,12 @@ internal static class CodexExecutableResolver
             applicationPath,
             diagnostics,
             seenCandidates);
+        if (availableCandidates.Count > 0)
+        {
+            var selected = SelectBestCandidate(availableCandidates);
+            return CreateSuccessfulResolution(selected.Launch, diagnostics, selected.Version);
+        }
+
         return CreateFailedResolution(diagnostics);
     }
 
@@ -314,10 +446,10 @@ internal static class CodexExecutableResolver
             new HashSet<string>(StringComparer.OrdinalIgnoreCase));
         return accepted is null
             ? CreateFailedResolution(diagnostics)
-            : CreateSuccessfulResolution(accepted, diagnostics);
+            : CreateSuccessfulResolution(accepted.Launch, diagnostics, accepted.Version);
     }
 
-    private static CodexExecutableLaunch? EvaluateCandidate(
+    private static EvaluatedCandidate? EvaluateCandidate(
         CodexExecutableLaunch candidate,
         string source,
         Func<CodexExecutableLaunch, CodexExecutableProbeResult> launchProbe,
@@ -357,7 +489,9 @@ internal static class CodexExecutableResolver
                 ? CodexExecutableCandidateStatus.Accepted
                 : CodexExecutableCandidateStatus.Rejected,
             probeResult.Reason));
-        return probeResult.IsSuccess ? candidate : null;
+        return probeResult.IsSuccess
+            ? new EvaluatedCandidate(candidate, probeResult.Version)
+            : null;
     }
 
     private static IEnumerable<CodexExecutableLaunch> EnumeratePathShims(string directory)
@@ -390,6 +524,48 @@ internal static class CodexExecutableResolver
             ["/d", "/s", "/c", "call", Path.GetFullPath(scriptPath)],
             Path.GetFullPath(scriptPath),
             HasCodeModeCompanion: false);
+
+    private static IEnumerable<CodexExecutableLaunch> EnumerateDesktopInstalls(
+        string localApplicationDataPath)
+    {
+        var desktopBinDirectory = Path.Combine(
+            localApplicationDataPath,
+            "OpenAI",
+            "Codex",
+            "bin");
+        var directInstall = TryCreateOfficialInstall(desktopBinDirectory);
+        if (directInstall is not null)
+        {
+            yield return directInstall;
+        }
+
+        string[] revisionDirectories;
+        try
+        {
+            revisionDirectories = Directory.Exists(desktopBinDirectory)
+                ? Directory.GetDirectories(desktopBinDirectory)
+                : [];
+        }
+        catch (Exception exception) when (exception is
+            IOException or
+            UnauthorizedAccessException or
+            ArgumentException or
+            NotSupportedException or
+            PathTooLongException)
+        {
+            revisionDirectories = [];
+        }
+
+        foreach (var revisionDirectory in revisionDirectories.OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+        {
+            var revisionInstall = TryCreateCompleteRuntime(revisionDirectory) ??
+                                  TryCreateOfficialInstall(revisionDirectory);
+            if (revisionInstall is not null)
+            {
+                yield return revisionInstall;
+            }
+        }
+    }
 
     private static string GetCommandProcessorPath()
     {
@@ -605,15 +781,52 @@ internal static class CodexExecutableResolver
             $"检测到不完整的 Codex Runtime；缺少同目录组件：{Path.GetFullPath(companionPath)}。该本地副本会遮蔽完整安装，请移除它或发布完整 Runtime。"));
     }
 
+    private static EvaluatedCandidate SelectBestCandidate(
+        IReadOnlyList<EvaluatedCandidate> candidates)
+    {
+        var selected = candidates[0];
+        for (var index = 1; index < candidates.Count; index++)
+        {
+            var candidate = candidates[index];
+            if (selected.Version is null)
+            {
+                if (candidate.Version is not null)
+                {
+                    selected = candidate;
+                }
+
+                continue;
+            }
+
+            if (candidate.Version is null)
+            {
+                continue;
+            }
+
+            var comparison = candidate.Version.CompareTo(selected.Version);
+            if (comparison > 0 ||
+                comparison == 0 &&
+                candidate.Launch.HasCodeModeCompanion &&
+                !selected.Launch.HasCodeModeCompanion)
+            {
+                selected = candidate;
+            }
+        }
+
+        return selected;
+    }
+
     private static CodexExecutableResolution CreateSuccessfulResolution(
         CodexExecutableLaunch launch,
-        IEnumerable<CodexExecutableCandidateDiagnostic> diagnostics)
+        IEnumerable<CodexExecutableCandidateDiagnostic> diagnostics,
+        CodexCliSemanticVersion? version = null)
     {
         var candidateArray = diagnostics.ToArray();
+        var versionDetail = version is null ? string.Empty : $"（版本 {version.Raw}）";
         return new CodexExecutableResolution(
             launch,
             candidateArray,
-            $"已找到可用的 Codex Runtime：{launch.CodexExecutablePath}");
+            $"已选择可用的 Codex Runtime{versionDetail}：{launch.CodexExecutablePath}");
     }
 
     private static CodexExecutableResolution CreateFailedResolution(
@@ -621,7 +834,7 @@ internal static class CodexExecutableResolver
     {
         var candidateArray = diagnostics.ToArray();
         var message = new StringBuilder(
-            "未找到可用的 Codex Runtime。请安装 Codex CLI、确认 %APPDATA%\\npm\\codex.cmd 或 %LOCALAPPDATA%\\Programs\\OpenAI\\Codex\\bin\\codex.exe 可执行，或手动指定 Codex CLI 路径。");
+            "未找到可用的 Codex Runtime。请安装 Codex CLI、确认 %APPDATA%\\npm\\codex.cmd、%LOCALAPPDATA%\\OpenAI\\Codex\\bin\\codex.exe 或旧版 %LOCALAPPDATA%\\Programs\\OpenAI\\Codex\\bin\\codex.exe 可执行，或手动指定 Codex CLI 路径。");
         if (candidateArray.Length == 0)
         {
             message.AppendLine()

@@ -139,6 +139,7 @@ internal static class BatchGenerationCoreSmokeTests
             {
                 BatchId = Guid.NewGuid().ToString("N"),
                 DisplayName = "自动重做谱系",
+                DispatchRequested = true,
                 Items =
                 [
                     new CreateGenerationBatchItemRequest

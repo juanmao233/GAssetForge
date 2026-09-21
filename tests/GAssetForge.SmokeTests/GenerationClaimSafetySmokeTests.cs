@@ -1,4 +1,5 @@
 using GAssetForge.Core.Generation;
+using GAssetForge.Core.Projects;
 using GAssetForge.McpServer;
 using System.IO;
 using System.Security.Cryptography;
@@ -286,7 +287,12 @@ internal static class GenerationClaimSafetySmokeTests
         MaterialGenerationStyleReference[]? styleReferences = null)
     {
         var runId = Guid.NewGuid().ToString("N");
-        var rootPath = $"Generated/GAssetForge/Runs/{runId}";
+        var rootPath = ProjectAssetLayout.BuildAiRunRelativePath(
+            ProjectAssetLayout.TilemapCategory,
+            runId);
+        var finalDirectory = ProjectAssetLayout.BuildFinalBatchRelativePath(
+            ProjectAssetLayout.TilemapCategory,
+            runId);
         var itemId = Guid.NewGuid().ToString("N");
         var basePackage = new GenerationConstraintPackage
         {
@@ -317,8 +323,8 @@ internal static class GenerationClaimSafetySmokeTests
             new GenerationDeliveryPlan
             {
                 AssetRoot = assetRoot,
-                OutputDirectory = $"{rootPath}/Final",
-                TargetPaths = [$"{rootPath}/Final/{itemId}.png"],
+                OutputDirectory = finalDirectory,
+                TargetPaths = [$"{finalDirectory}/{itemId}.png"],
                 StagingPaths = includeWorkspace
                     ? [$"{rootPath}/35-normalized-input/{itemId}.normalized.png"]
                     : [],

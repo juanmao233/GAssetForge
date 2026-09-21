@@ -50,6 +50,14 @@ internal sealed record GenerationBatchDispatchProgressSnapshot(
     long? ElapsedMilliseconds = null,
     string? FailureCode = null)
 {
+    public DateTimeOffset OccurredAt { get; init; } = DateTimeOffset.Now;
+
+    public string? ObservedThreadId { get; init; }
+
+    public string? ObservedTurnId { get; init; }
+
+    public GenerationDispatchFailure? Diagnostic { get; init; }
+
     public bool IsTerminal => Stage is
         GenerationBatchDispatchStage.Completed or
         GenerationBatchDispatchStage.Interrupted or
@@ -74,6 +82,10 @@ internal sealed class GenerationBatchDispatchCompletedEventArgs(
 
     public string? FailureMessage { get; } = failureMessage;
 
+    public GenerationDispatchFailure? Diagnostic { get; init; }
+
+    public DateTimeOffset OccurredAt { get; init; } = DateTimeOffset.Now;
+
     public bool IsSuccess => Result?.IsSuccess == true && string.IsNullOrWhiteSpace(FailureMessage);
 }
 
@@ -90,8 +102,8 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
     private const double WaitingForClaimProgress = 55d;
     private static readonly TimeSpan DefaultClaimHeartbeatInterval = TimeSpan.FromMinutes(5);
 
-    private readonly Channel<GenerationBatchDispatchRequest> _requests =
-        Channel.CreateUnbounded<GenerationBatchDispatchRequest>(new UnboundedChannelOptions
+    private readonly Channel<DispatchLifecycle> _requests =
+        Channel.CreateUnbounded<DispatchLifecycle>(new UnboundedChannelOptions
         {
             SingleReader = true,
             SingleWriter = false,
@@ -99,14 +111,18 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
         });
     private readonly Func<string, CancellationToken, Task<AgentTurnResult>> _runTurn;
     private readonly Func<GenerationBatchDispatchRequest, CancellationToken, Task>? _prepareBatch;
+    private readonly Func<string?>? _currentThreadIdProvider;
     private readonly IGenerationTaskStore? _taskStore;
     private readonly IImageDeliveryPreflight? _imageDeliveryPreflight;
     private readonly TimeSpan _claimHeartbeatInterval;
     private readonly Func<TimeSpan, CancellationToken, Task> _heartbeatDelay;
     private readonly object _scheduledBatchLock = new();
-    private readonly HashSet<string> _scheduledBatchIds = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, TaskCompletionSource> _batchReleaseSignals =
+    private readonly object _turnObservationLock = new();
+    private readonly Queue<string> _finishedTurnIds = new();
+    private TurnDispatchObservation? _activeTurnObservation;
+    private readonly Dictionary<string, DispatchLifecycle> _scheduledBatches =
         new(StringComparer.Ordinal);
+    private readonly HashSet<DispatchLifecycle> _unfinishedDispatches = [];
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Task _worker;
     private int _disposed;
@@ -117,10 +133,12 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
         IImageDeliveryPreflight? imageDeliveryPreflight = null,
         TimeSpan? claimHeartbeatInterval = null,
         Func<TimeSpan, CancellationToken, Task>? heartbeatDelay = null,
-        Func<GenerationBatchDispatchRequest, CancellationToken, Task>? prepareBatch = null)
+        Func<GenerationBatchDispatchRequest, CancellationToken, Task>? prepareBatch = null,
+        Func<string?>? currentThreadIdProvider = null)
     {
         _runTurn = runTurn ?? throw new ArgumentNullException(nameof(runTurn));
         _prepareBatch = prepareBatch;
+        _currentThreadIdProvider = currentThreadIdProvider;
         _taskStore = taskStore;
         _imageDeliveryPreflight = imageDeliveryPreflight;
         _claimHeartbeatInterval = claimHeartbeatInterval ?? DefaultClaimHeartbeatInterval;
@@ -138,6 +156,37 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
     public event EventHandler<GenerationBatchDispatchCompletedEventArgs>? DispatchCompleted;
 
     public event EventHandler<GenerationBatchDispatchProgressChangedEventArgs>? DispatchProgressChanged;
+
+    public bool NotifyTurnStarted(string? threadId, string? turnId, DateTimeOffset? occurredAt = null)
+    {
+        // A Task returned by RunTurnAsync is not a server acknowledgement. Only a matching live
+        // TurnStarted notification may advance dispatch to the claim-wait stage.
+        lock (_turnObservationLock)
+        {
+            var observation = _activeTurnObservation;
+            if (observation is null || observation.CancellationToken.IsCancellationRequested ||
+                string.IsNullOrWhiteSpace(threadId) || string.IsNullOrWhiteSpace(turnId) ||
+                string.IsNullOrWhiteSpace(observation.ExpectedThreadId) ||
+                !string.Equals(threadId, observation.ExpectedThreadId, StringComparison.Ordinal) ||
+                observation.TurnId is not null ||
+                _finishedTurnIds.Contains($"{threadId}/{turnId}", StringComparer.Ordinal))
+            {
+                return false;
+            }
+
+            observation.TurnId = turnId;
+            observation.LastProgress = ReportProgress(
+                observation.Request,
+                GenerationBatchDispatchStage.WaitingForTaskClaim,
+                observation.WaitingProgress,
+                "gasset_forge.claim_generation_task(taskId)",
+                $"{observation.ChunkLabel} 已收到 Agent Turn 启动确认，等待任务通过 MCP 被认领。",
+                observedThreadId: threadId,
+                observedTurnId: turnId,
+                occurredAt: occurredAt);
+            return true;
+        }
+    }
 
     public GenerationBatchDispatchEnqueueResult TryEnqueue(
         string batchId,
@@ -169,23 +218,25 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
                 return GenerationBatchDispatchEnqueueResult.QueueStopped;
             }
 
-            if (!_scheduledBatchIds.Add(normalizedBatchId))
+            if (_scheduledBatches.ContainsKey(normalizedBatchId))
             {
                 return GenerationBatchDispatchEnqueueResult.AlreadyScheduled;
             }
 
-            var releaseSignal = new TaskCompletionSource(
-                TaskCreationOptions.RunContinuationsAsynchronously);
-            _batchReleaseSignals.Add(normalizedBatchId, releaseSignal);
-            if (_requests.Writer.TryWrite(
-                    new GenerationBatchDispatchRequest(normalizedBatchId, normalizedTaskIds, isRetry)))
+            var lifecycle = new DispatchLifecycle(
+                new GenerationBatchDispatchRequest(normalizedBatchId, normalizedTaskIds, isRetry));
+            _scheduledBatches.Add(normalizedBatchId, lifecycle);
+            _unfinishedDispatches.Add(lifecycle);
+            if (_requests.Writer.TryWrite(lifecycle))
             {
                 return GenerationBatchDispatchEnqueueResult.Enqueued;
             }
 
-            _scheduledBatchIds.Remove(normalizedBatchId);
-            _batchReleaseSignals.Remove(normalizedBatchId);
-            releaseSignal.TrySetResult();
+            _scheduledBatches.Remove(normalizedBatchId);
+            _unfinishedDispatches.Remove(lifecycle);
+            lifecycle.Released.TrySetResult();
+            lifecycle.WorkerExited.TrySetResult();
+            lifecycle.Dispose();
             return GenerationBatchDispatchEnqueueResult.QueueStopped;
         }
     }
@@ -203,12 +254,12 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
         Task releaseTask;
         lock (_scheduledBatchLock)
         {
-            if (!_batchReleaseSignals.TryGetValue(batchId.Trim(), out var releaseSignal))
+            if (!_scheduledBatches.TryGetValue(batchId.Trim(), out var lifecycle))
             {
                 return Task.CompletedTask;
             }
 
-            releaseTask = releaseSignal.Task;
+            releaseTask = lifecycle.Released.Task;
         }
 
         return cancellationToken.CanBeCanceled
@@ -223,25 +274,113 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
             return;
         }
 
-        TaskCompletionSource? releaseSignal;
+        DispatchLifecycle? lifecycle;
         lock (_scheduledBatchLock)
         {
             var normalizedBatchId = batchId.Trim();
-            _scheduledBatchIds.Remove(normalizedBatchId);
-            _batchReleaseSignals.Remove(normalizedBatchId, out releaseSignal);
+            _scheduledBatches.Remove(normalizedBatchId, out lifecycle);
         }
 
-        releaseSignal?.TrySetResult();
+        lifecycle?.Released.TrySetResult();
+    }
+
+    public async Task CancelBatchesAsync(
+        IReadOnlyList<string> batchIds,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(batchIds);
+        cancellationToken.ThrowIfCancellationRequested();
+        var requestedIds = batchIds
+            .Where(batchId => !string.IsNullOrWhiteSpace(batchId))
+            .Select(batchId => batchId.Trim())
+            .ToHashSet(StringComparer.Ordinal);
+        DispatchLifecycle[] lifecycles;
+        lock (_scheduledBatchLock)
+        {
+            // Include a released but still unwinding turn. Each queued item owns its own token,
+            // so a later enqueue of the same batch ID cannot be canceled by this snapshot.
+            lifecycles = _unfinishedDispatches.Concat(_scheduledBatches.Values)
+                .Where(lifecycle => requestedIds.Contains(lifecycle.Request.BatchId))
+                .Distinct()
+                .ToArray();
+            foreach (var lifecycle in lifecycles)
+            {
+                lifecycle.CancellationRequested = true;
+                if (!lifecycle.IsRunning)
+                {
+                    _unfinishedDispatches.Remove(lifecycle);
+                    lifecycle.WorkerExited.TrySetResult();
+                }
+
+                ReleaseLifecycle(lifecycle);
+            }
+        }
+
+        // Cancellation callbacks can call back into the coordinator; never run them under its
+        // scheduling lock. Cancellation of this caller only stops waiting, not the chosen stop.
+        await Task.WhenAll(lifecycles.Select(lifecycle => lifecycle.CancelAsync()))
+            .ConfigureAwait(false);
+        await Task.WhenAll(lifecycles.Select(lifecycle => lifecycle.WorkerExited.Task))
+            .WaitAsync(cancellationToken)
+            .ConfigureAwait(false);
+        foreach (var lifecycle in lifecycles)
+        {
+            lifecycle.Dispose();
+        }
+    }
+
+    private void ReleaseLifecycle(DispatchLifecycle lifecycle)
+    {
+        if (_scheduledBatches.TryGetValue(lifecycle.Request.BatchId, out var scheduled) &&
+            ReferenceEquals(scheduled, lifecycle))
+        {
+            _scheduledBatches.Remove(lifecycle.Request.BatchId);
+        }
+
+        lifecycle.Released.TrySetResult();
     }
 
     private async Task ProcessRequestsAsync()
     {
         try
         {
-            await foreach (var request in _requests.Reader.ReadAllAsync(_shutdown.Token)
+            await foreach (var lifecycle in _requests.Reader.ReadAllAsync(_shutdown.Token)
                                .ConfigureAwait(false))
             {
-                await DispatchAsync(request, _shutdown.Token).ConfigureAwait(false);
+                lock (_scheduledBatchLock)
+                {
+                    if (lifecycle.CancellationRequested)
+                    {
+                        lifecycle.Dispose();
+                        continue;
+                    }
+
+                    lifecycle.IsRunning = true;
+                }
+
+                try
+                {
+                    using var cancellation = CancellationTokenSource.CreateLinkedTokenSource(
+                        _shutdown.Token,
+                        lifecycle.Cancellation.Token);
+                    await DispatchAsync(lifecycle, cancellation.Token).ConfigureAwait(false);
+                }
+                finally
+                {
+                    lock (_scheduledBatchLock)
+                    {
+                        lifecycle.IsRunning = false;
+                        _unfinishedDispatches.Remove(lifecycle);
+                        if (lifecycle.CancellationRequested)
+                        {
+                            ReleaseLifecycle(lifecycle);
+                        }
+
+                        lifecycle.WorkerExited.TrySetResult();
+                    }
+
+                    lifecycle.Dispose();
+                }
             }
         }
         catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
@@ -252,22 +391,28 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
     }
 
     private async Task DispatchAsync(
-        GenerationBatchDispatchRequest request,
+        DispatchLifecycle lifecycle,
         CancellationToken cancellationToken)
     {
+        var request = lifecycle.Request;
         AgentTurnResult? result = null;
         string? failureMessage = null;
+        GenerationDispatchFailure? diagnostic = null;
+        var failureOperation = "dispatch_preparation";
         GenerationBatchDispatchProgressSnapshot? lastProgress = null;
+        TurnDispatchObservation? turnObservation = null;
         long? activeTurnStartedTimestamp = null;
         int? activeChunkIndex = null;
         int? activeChunkCount = null;
         int? activeChunkTaskCount = null;
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             var preflight = ImageDeliveryPreflightResult.NotChecked;
             var preflightPerformed = false;
             if (_imageDeliveryPreflight is not null)
             {
+                failureOperation = "image_preflight";
                 lastProgress = ReportProgress(
                     request,
                     GenerationBatchDispatchStage.BuildingAgentInstruction,
@@ -292,6 +437,7 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
                 }
             }
 
+            failureOperation = "dispatch_preparation";
             var identityResolution = await ResolveClaimIdentitiesAsync(request, cancellationToken)
                 .ConfigureAwait(false);
             request = request with { TaskIds = identityResolution.TaskIds };
@@ -302,6 +448,7 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
                 .ToArray();
             if (_prepareBatch is not null)
             {
+                failureOperation = "session_preparation";
                 lastProgress = ReportProgress(
                     request,
                     GenerationBatchDispatchStage.BuildingAgentInstruction,
@@ -309,12 +456,19 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
                     "AgentConnection.PrepareGenerationBatchAsync(batchId)",
                     $"正在为本批次准备独立 Agent thread；随后 {chunks.Length} 个 Turn 分块将共用该 thread。");
                 await _prepareBatch(request, cancellationToken).ConfigureAwait(false);
+                cancellationToken.ThrowIfCancellationRequested();
             }
 
             var chunkProgressSpan =
                 (WaitingForClaimProgress - BuildingInstructionProgress) / chunks.Length;
             for (var chunkIndex = 0; chunkIndex < chunks.Length; chunkIndex++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
+                // The previous chunk's completed Turn must never become evidence that this
+                // chunk started when prompt construction or submission fails.
+                result = null;
+                turnObservation = null;
+                failureOperation = "dispatch_preparation";
                 var chunkTaskIds = chunks[chunkIndex];
                 var chunkRequest = request with { TaskIds = chunkTaskIds };
                 var chunkClaimIdentities = chunkTaskIds.ToDictionary(
@@ -341,24 +495,33 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
                         preflight,
                         chunkClaimIdentities)
                     : GenerationAgentPromptBuilder.Build(chunkTaskIds, chunkClaimIdentities);
+                var expectedThreadId = _currentThreadIdProvider?.Invoke();
                 lastProgress = ReportProgress(
                     chunkRequest,
                     GenerationBatchDispatchStage.StartingAgentTurn,
                     startingProgress,
                     "AgentConnection.RunTurnAsync(prompt)",
-                    $"正在提交 {chunkLabel}；本批后续分块会等待当前 Turn 收束后再启动。");
+                    $"正在提交 {chunkLabel}，等待 Agent 启动确认；本批后续分块会等待当前 Turn 收束后再启动。",
+                    observedThreadId: expectedThreadId);
                 using var turnCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
                 activeTurnStartedTimestamp = Stopwatch.GetTimestamp();
                 activeChunkIndex = chunkNumber;
                 activeChunkCount = chunks.Length;
                 activeChunkTaskCount = chunkTaskIds.Count;
-                var turnTask = _runTurn(prompt, turnCancellation.Token);
-                lastProgress = ReportProgress(
+                failureOperation = "turn_submission";
+                turnObservation = new TurnDispatchObservation(
                     chunkRequest,
-                    GenerationBatchDispatchStage.WaitingForTaskClaim,
+                    expectedThreadId,
+                    chunkLabel,
                     waitingProgress,
-                    "gasset_forge.claim_generation_task(taskId)",
-                    $"{chunkLabel} 已提交，等待这些任务通过 MCP 被认领。");
+                    lastProgress,
+                    cancellationToken);
+                lock (_turnObservationLock)
+                {
+                    _activeTurnObservation = turnObservation;
+                }
+
+                var turnTask = _runTurn(prompt, turnCancellation.Token);
                 result = await AwaitTurnWithClaimHeartbeatAsync(
                         chunkRequest,
                         chunkClaimIdentities,
@@ -366,6 +529,8 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
                         turnCancellation,
                         cancellationToken)
                     .ConfigureAwait(false);
+                lastProgress = FinishTurnObservation(turnObservation, result) ?? lastProgress;
+                cancellationToken.ThrowIfCancellationRequested();
                 var turnElapsedMilliseconds = (long)Stopwatch
                     .GetElapsedTime(activeTurnStartedTimestamp.Value)
                     .TotalMilliseconds;
@@ -381,7 +546,9 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
                         chunkIndex: chunkNumber,
                         chunkCount: chunks.Length,
                         chunkTaskCount: chunkTaskIds.Count,
-                        elapsedMilliseconds: turnElapsedMilliseconds);
+                        elapsedMilliseconds: turnElapsedMilliseconds,
+                        observedThreadId: result.ThreadId,
+                        observedTurnId: result.TurnId);
                     activeTurnStartedTimestamp = null;
                     continue;
                 }
@@ -389,11 +556,14 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
                 failureMessage = string.IsNullOrWhiteSpace(result.ErrorMessage)
                     ? $"Agent Turn 结束状态为 {result.Status}。"
                     : result.ErrorMessage;
+                diagnostic = GenerationDispatchFailure.FromTurnResult(result);
                 var failure = AgentTurnFailureClassifier.Classify(result, failureMessage);
                 var terminalStage = failure?.PreservePendingTasks == true
                     ? GenerationBatchDispatchStage.Interrupted
                     : GenerationBatchDispatchStage.Failed;
-                var terminalDetail = terminalStage == GenerationBatchDispatchStage.Interrupted
+                var terminalDetail = !diagnostic.TurnStarted
+                    ? $"{chunkLabel}：{diagnostic.UserMessage} 后续分块未启动；调度调用用时 {turnElapsedMilliseconds} ms。"
+                    : terminalStage == GenerationBatchDispatchStage.Interrupted
                     ? $"{chunkLabel} 的上游模型响应流中断，后续分块未启动；" +
                       $"原任务保持 Pending；Turn 用时 {turnElapsedMilliseconds} ms；" +
                       $"response.completed=否。{failureMessage}"
@@ -408,22 +578,34 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
                     chunkNumber,
                     chunks.Length,
                     chunkTaskIds.Count,
-                    failure?.Code);
+                    diagnostic.Code,
+                    diagnostic);
                 break;
             }
         }
-        catch (OperationCanceledException) when (_shutdown.IsCancellationRequested)
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
+            lastProgress = FinishTurnObservation(turnObservation, result) ?? lastProgress;
             ReportTerminalProgress(
                 request,
                 GenerationBatchDispatchStage.Canceled,
                 lastProgress,
-                "协调器已停止，当前 Agent Turn 已取消；持久化任务仍保留在本地队列。");
-            throw;
+                _shutdown.IsCancellationRequested
+                    ? "协调器已停止，此批次调度已取消；持久化任务仍保留在本地队列。"
+                    : "此批次调度已手动停止；持久化任务和已有文件仍保留。");
+            return;
         }
         catch (Exception exception)
         {
+            lastProgress = FinishTurnObservation(turnObservation, result) ?? lastProgress;
             failureMessage = exception.Message;
+            var turnStarted = turnObservation?.TurnId is not null;
+            diagnostic = GenerationDispatchFailure.FromException(
+                exception,
+                turnStarted ? "turn_execution" : failureOperation,
+                turnStarted,
+                turnObservation?.ExpectedThreadId,
+                turnObservation?.TurnId);
             var failure = AgentTurnFailureClassifier.Classify(null, failureMessage);
             long? elapsedMilliseconds = activeTurnStartedTimestamp is { } startedTimestamp
                 ? (long)Stopwatch.GetElapsedTime(startedTimestamp).TotalMilliseconds
@@ -434,17 +616,58 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
                     ? GenerationBatchDispatchStage.Interrupted
                     : GenerationBatchDispatchStage.Failed,
                 lastProgress,
-                failureMessage,
+                diagnostic.UserMessage,
                 elapsedMilliseconds,
                 activeChunkIndex,
                 activeChunkCount,
                 activeChunkTaskCount,
-                failure?.Code);
+                diagnostic.Code,
+                diagnostic);
         }
 
-        DispatchCompleted?.Invoke(
-            this,
-            new GenerationBatchDispatchCompletedEventArgs(request, result, failureMessage));
+        lock (_scheduledBatchLock)
+        {
+            if (!lifecycle.CancellationRequested && !cancellationToken.IsCancellationRequested)
+            {
+                DispatchCompleted?.Invoke(
+                    this,
+                    new GenerationBatchDispatchCompletedEventArgs(request, result, failureMessage)
+                    {
+                        Diagnostic = diagnostic,
+                        OccurredAt = diagnostic?.OccurredAt ?? DateTimeOffset.Now
+                    });
+            }
+        }
+    }
+
+    private GenerationBatchDispatchProgressSnapshot? FinishTurnObservation(
+        TurnDispatchObservation? observation,
+        AgentTurnResult? result)
+    {
+        lock (_turnObservationLock)
+        {
+            if (observation is null)
+            {
+                return null;
+            }
+
+            if (ReferenceEquals(_activeTurnObservation, observation))
+            {
+                _activeTurnObservation = null;
+                var threadId = result?.ThreadId ?? observation.ExpectedThreadId;
+                var turnId = result?.TurnId ?? observation.TurnId;
+                if (!string.IsNullOrWhiteSpace(threadId) && !string.IsNullOrWhiteSpace(turnId))
+                {
+                    _finishedTurnIds.Enqueue($"{threadId}/{turnId}");
+                    while (_finishedTurnIds.Count > 128)
+                    {
+                        _finishedTurnIds.Dequeue();
+                    }
+                }
+            }
+
+            return observation.LastProgress;
+        }
     }
 
     private async Task<DispatchClaimIdentityResolution> ResolveClaimIdentitiesAsync(
@@ -710,6 +933,16 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
             }
             catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
+                // The heartbeat can observe cancellation before the runtime finishes interrupting
+                // its turn. Keep serialization until that turn has actually unwound.
+                try
+                {
+                    await turnTask.ConfigureAwait(false);
+                }
+                catch (Exception) when (cancellationToken.IsCancellationRequested)
+                {
+                }
+
                 throw;
             }
             catch (Exception exception)
@@ -809,7 +1042,11 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
         int? chunkCount = null,
         int? chunkTaskCount = null,
         long? elapsedMilliseconds = null,
-        string? failureCode = null)
+        string? failureCode = null,
+        GenerationDispatchFailure? diagnostic = null,
+        string? observedThreadId = null,
+        string? observedTurnId = null,
+        DateTimeOffset? occurredAt = null)
     {
         var snapshot = new GenerationBatchDispatchProgressSnapshot(
             request,
@@ -823,7 +1060,13 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
             chunkCount,
             chunkTaskCount,
             elapsedMilliseconds,
-            failureCode);
+            failureCode)
+        {
+            Diagnostic = diagnostic,
+            OccurredAt = diagnostic?.OccurredAt ?? occurredAt ?? DateTimeOffset.Now,
+            ObservedThreadId = diagnostic?.ThreadId ?? observedThreadId,
+            ObservedTurnId = diagnostic?.TurnId ?? observedTurnId
+        };
         DispatchProgressChanged?.Invoke(
             this,
             new GenerationBatchDispatchProgressChangedEventArgs(snapshot));
@@ -839,7 +1082,8 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
         int? chunkIndex = null,
         int? chunkCount = null,
         int? chunkTaskCount = null,
-        string? failureCode = null)
+        string? failureCode = null,
+        GenerationDispatchFailure? diagnostic = null)
     {
         var failureStage = lastProgress?.Stage ?? GenerationBatchDispatchStage.BuildingAgentInstruction;
         ReportProgress(
@@ -860,7 +1104,8 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
             chunkCount,
             chunkTaskCount,
             elapsedMilliseconds,
-            failureCode);
+            failureCode,
+            diagnostic);
     }
 
     public async ValueTask DisposeAsync()
@@ -870,17 +1115,20 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
             return;
         }
 
-        TaskCompletionSource[] releaseSignals;
+        DispatchLifecycle[] lifecycles;
         lock (_scheduledBatchLock)
         {
-            _scheduledBatchIds.Clear();
-            releaseSignals = _batchReleaseSignals.Values.ToArray();
-            _batchReleaseSignals.Clear();
-        }
-
-        foreach (var releaseSignal in releaseSignals)
-        {
-            releaseSignal.TrySetResult();
+            lifecycles = _unfinishedDispatches.Concat(_scheduledBatches.Values).Distinct().ToArray();
+            _scheduledBatches.Clear();
+            foreach (var lifecycle in lifecycles)
+            {
+                lifecycle.CancellationRequested = true;
+                lifecycle.Released.TrySetResult();
+                if (!lifecycle.IsRunning)
+                {
+                    lifecycle.WorkerExited.TrySetResult();
+                }
+            }
         }
 
         _requests.Writer.TryComplete();
@@ -895,11 +1143,73 @@ internal sealed class GenerationBatchDispatchCoordinator : IAsyncDisposable
         }
         finally
         {
+            foreach (var lifecycle in lifecycles)
+            {
+                lifecycle.Dispose();
+            }
+
             _shutdown.Dispose();
+        }
+    }
+
+    private sealed class DispatchLifecycle(GenerationBatchDispatchRequest request) : IDisposable
+    {
+        private int _disposed;
+
+        public GenerationBatchDispatchRequest Request { get; } = request;
+
+        public CancellationTokenSource Cancellation { get; } = new();
+
+        public TaskCompletionSource Released { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public TaskCompletionSource WorkerExited { get; } =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        // These state flags are accessed only while holding _scheduledBatchLock.
+        public bool CancellationRequested { get; set; }
+
+        public bool IsRunning { get; set; }
+
+        public async Task CancelAsync()
+        {
+            try
+            {
+                await Cancellation.CancelAsync().ConfigureAwait(false);
+            }
+            catch (ObjectDisposedException) when (WorkerExited.Task.IsCompleted)
+            {
+                // Dispatch already finished while the caller was leaving the scheduling lock.
+            }
+        }
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0)
+            {
+                Cancellation.Dispose();
+            }
         }
     }
 
     private sealed record DispatchClaimIdentityResolution(
         IReadOnlyList<string> TaskIds,
         IReadOnlyDictionary<string, string> ClaimIdentities);
+
+    private sealed class TurnDispatchObservation(
+        GenerationBatchDispatchRequest request,
+        string? expectedThreadId,
+        string chunkLabel,
+        double waitingProgress,
+        GenerationBatchDispatchProgressSnapshot lastProgress,
+        CancellationToken cancellationToken)
+    {
+        public GenerationBatchDispatchRequest Request { get; } = request;
+        public string? ExpectedThreadId { get; } = expectedThreadId;
+        public string ChunkLabel { get; } = chunkLabel;
+        public double WaitingProgress { get; } = waitingProgress;
+        public CancellationToken CancellationToken { get; } = cancellationToken;
+        public string? TurnId { get; set; }
+        public GenerationBatchDispatchProgressSnapshot LastProgress { get; set; } = lastProgress;
+    }
 }

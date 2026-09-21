@@ -32,7 +32,7 @@ internal static class ArtWorkspaceGenerationConstraintSmokeTests
                 OutputPixelWidth = 512,
                 OutputPixelHeight = 384,
                 OutputBackgroundHex = "#20242C",
-                OutputRelativeDirectory = "Generated/ArtWorkspace",
+                OutputRelativeDirectory = "Final",
                 VisibleReferences = [upper, lower],
                 InstructionReference = new ArtWorkspaceGenerationInstructionReference
                 {
@@ -78,7 +78,7 @@ internal static class ArtWorkspaceGenerationConstraintSmokeTests
             ?? throw new InvalidOperationException("Art Workspace 约束缺少 outputFrame。");
         Equal(512, ReadInt(frame, "pixelWidth"), "冻结输出像素宽度");
         Equal(384, ReadInt(frame, "pixelHeight"), "冻结输出像素高度");
-        Equal("Generated/ArtWorkspace", ReadString(frame, "outputRelativeDirectory"),
+        Equal("Final", ReadString(frame, "outputRelativeDirectory"),
             "冻结输出相对目录");
 
         var references = workspace["references"] as JsonArray

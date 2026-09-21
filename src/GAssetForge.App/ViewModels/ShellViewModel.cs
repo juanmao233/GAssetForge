@@ -16,7 +16,7 @@ public sealed class ShellViewModel : ObservableObject
 {
     private const string ArtWorkspaceDocumentContentId = "art-workspace";
     private readonly ThemeService _themeService;
-    private readonly UserSettingsService _settingsService;
+    private readonly IUserSettingsService _settingsService;
     private readonly UserSettingsModel _settings;
     private readonly ProjectWorkspaceService _projectWorkspaceService;
     private readonly IProjectLocationPicker _projectLocationPicker;
@@ -54,7 +54,7 @@ public sealed class ShellViewModel : ObservableObject
 
     public ShellViewModel(
         ThemeService themeService,
-        UserSettingsService settingsService,
+        IUserSettingsService settingsService,
         EditorWorkspaceViewModel editorWorkspace,
         IProjectLocationPicker? projectLocationPicker = null,
         IAssetGenerationSpreadsheetPicker? assetGenerationSpreadsheetPicker = null,
@@ -241,7 +241,7 @@ public sealed class ShellViewModel : ObservableObject
                 _currentProject.Paths.AssetDirectory,
                 _settings.AssetCurrentPath ?? string.Empty)
                 ? _settings.AssetCurrentPath
-                : _currentProject.Paths.GeneratedAssetDirectory;
+                : _currentProject.Paths.UserAssetDirectory;
         ProjectBrowser = new ProjectBrowserViewModel(
             settingsService.Paths,
             new DesktopFileDialogService(),
@@ -320,6 +320,7 @@ public sealed class ShellViewModel : ObservableObject
                 isRetry),
             _workbenchConsoleService);
         ArtWorkspace.ConfigureGenerationGateway(_artWorkspaceGenerationPublisher);
+        ArtWorkspace.ConfigureConversationResetHandler(ClearArtWorkspaceConversationAsync);
         AssetGeneration.ConfigureReconnectAndContinueHandler(
             ReconnectAndContinueGenerationBatchAsync);
         _currentWorkflow = initialWorkflow;
@@ -697,7 +698,7 @@ public sealed class ShellViewModel : ObservableObject
 
             ProjectBrowser.SetRootSelectionLock(false);
             if (!ProjectBrowser.TrySetRootPath(workspace.Paths.AssetDirectory) ||
-                !ProjectBrowser.SelectDirectory(workspace.Paths.GeneratedAssetDirectory))
+                !ProjectBrowser.SelectDirectory(workspace.Paths.UserAssetDirectory))
             {
                 throw new InvalidOperationException("项目已创建，但 Project 面板无法切换到项目 Assets。 ");
             }
@@ -707,7 +708,7 @@ public sealed class ShellViewModel : ObservableObject
             projectCommitted = true;
             _settings.LastProjectPath = workspace.Paths.RootDirectory;
             _settings.AssetRootPath = workspace.Paths.AssetDirectory;
-            _settings.AssetCurrentPath = workspace.Paths.GeneratedAssetDirectory;
+            _settings.AssetCurrentPath = workspace.Paths.UserAssetDirectory;
 
             ProjectBrowser.SetRootSelectionLock(true);
             ApplyProjectTilemapSettings(workspace.Manifest.Tilemap);
@@ -901,7 +902,8 @@ public sealed class ShellViewModel : ObservableObject
             {
                 await AgentConnection.StartFreshGenerationThreadAsync(cancellationToken)
                     .ConfigureAwait(false);
-            });
+            },
+            currentThreadIdProvider: () => AgentConnection.ActiveThreadId);
         coordinator.DispatchProgressChanged += OnAgentDispatchProgressChanged;
         coordinator.DispatchCompleted += OnAgentDispatchCompleted;
         return coordinator;
@@ -1367,6 +1369,55 @@ public sealed class ShellViewModel : ObservableObject
         SaveSettings();
     }
 
+    private async Task ClearArtWorkspaceConversationAsync(string projectRoot, CancellationToken cancellationToken)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(20));
+        var token = timeout.Token;
+        await _dispatchRecoveryGate.WaitAsync(token).ConfigureAwait(true);
+        try
+        {
+            const string reason = "用户清除美术对话，暂停旧任务自动调度；冻结文件与产物保留。";
+            _artWorkspaceGenerationPublisher.CancelProjectWaiters(projectRoot, reason);
+            await _artWorkspaceGenerationPublisher.WaitForPublicationIdleAsync(token).ConfigureAwait(true);
+            _artWorkspaceGenerationPublisher.CancelProjectWaiters(projectRoot, reason);
+            var tasks = await _generationTaskStore.ListAsync(
+                workflowId: ArtWorkspaceGenerationConstraintPackageBuilder.WorkflowId,
+                cancellationToken: token).ConfigureAwait(true);
+            var projectTasks = tasks.Where(task =>
+                ArtWorkspaceDispatchRecoveryPolicy.BelongsToProject(task, projectRoot)).ToArray();
+            var selected = projectTasks.Where(task => task.Status != GenerationTaskStatus.Completed).ToArray();
+            if (selected.Length > 0)
+            {
+                // Persist user intent before stopping the turn: a late failure or next startup
+                // must not schedule an automatic successor for a manually cleared conversation.
+                await _generationTaskStore.SuspendAutomaticDispatchAsync(
+                    selected.Select(task => task.Id).ToArray(), reason, token).ConfigureAwait(true);
+            }
+
+            // A task may already be Completed while its provider turn still waits for an ending
+            // notification. Stop that batch too, without changing the completed task record.
+            var batchIds = projectTasks.Select(task => task.BatchId)
+                .Where(id => !string.IsNullOrWhiteSpace(id)).Select(id => id!)
+                .Distinct(StringComparer.Ordinal).ToArray();
+            await _agentDispatchCoordinator.CancelBatchesAsync(batchIds, token).ConfigureAwait(true);
+
+            CommandConsole.WriteInfo("ArtWorkspace",
+                $"当前项目美术对话清理完成；已暂停 {selected.Length} 个旧任务，画布图片与已落盘产物保持不变。");
+        }
+        finally
+        {
+            _dispatchRecoveryGate.Release();
+        }
+    }
+
+    private async Task<bool> CanAutomaticallyRecoverBatchAsync(string batchId)
+    {
+        var tasks = await _generationTaskStore.ListBatchAsync(batchId).ConfigureAwait(true);
+        return ArtWorkspaceDispatchRecoveryPolicy.CanAutomaticallyRecover(
+            tasks, _artWorkspaceGenerationPublisher.OwnsBatch(batchId));
+    }
+
     private async Task RecoverPendingGenerationDispatchesAsync()
     {
         if (_isShutDown || !AgentConnection.IsConnected)
@@ -1394,6 +1445,11 @@ public sealed class ShellViewModel : ObservableObject
                         ResolveAgentWorkingDirectory()))
                 {
                     return;
+                }
+
+                if (!await CanAutomaticallyRecoverBatchAsync(dispatch.BatchId).ConfigureAwait(true))
+                {
+                    continue;
                 }
 
                 try
@@ -1439,6 +1495,11 @@ public sealed class ShellViewModel : ObservableObject
                         ResolveAgentWorkingDirectory()))
                 {
                     return;
+                }
+
+                if (!await CanAutomaticallyRecoverBatchAsync(sourceBatchId).ConfigureAwait(true))
+                {
+                    continue;
                 }
 
                 var retry = await AssetGeneration.TryCreateAutomaticRetryBatchAsync(sourceBatchId)
@@ -1655,6 +1716,13 @@ public sealed class ShellViewModel : ObservableObject
             return;
         }
 
+        if (e.Category == AgentActivityCategory.TurnStarted &&
+            (AgentConnection.ActiveTurnId is null ||
+             string.Equals(e.TurnId, AgentConnection.ActiveTurnId, StringComparison.Ordinal)))
+        {
+            _agentDispatchCoordinator.NotifyTurnStarted(e.ThreadId, e.TurnId, e.Timestamp);
+        }
+
         var activityKey = BuildAgentActivityTimingKey(e);
         long? elapsedMilliseconds = null;
         if (e.Category is AgentActivityCategory.TurnStarted or
@@ -1678,9 +1746,9 @@ public sealed class ShellViewModel : ObservableObject
             }
         }
 
-        var level = e.IsWarning || e.Category == AgentActivityCategory.Error
-            ? WorkbenchLogLevel.Warning
-            : WorkbenchLogLevel.Information;
+        var level = e.Category == AgentActivityCategory.Error
+            ? WorkbenchLogLevel.Error
+            : e.IsWarning ? WorkbenchLogLevel.Warning : WorkbenchLogLevel.Information;
         _workbenchConsoleService.WriteStructured(
             level,
             "Agent Activity",
@@ -1694,8 +1762,9 @@ public sealed class ShellViewModel : ObservableObject
                 AgentTurnId = e.TurnId,
                 AgentItemId = e.ItemId,
                 Stage = $"agent.{e.Category}",
-                Status = e.IsWarning
-                    ? "warning"
+                Status = e.Category == AgentActivityCategory.Error
+                    ? "failed"
+                    : e.IsWarning ? "warning"
                     : e.IsTerminal || e.Category is AgentActivityCategory.ToolCompleted or
                         AgentActivityCategory.CommandCompleted or AgentActivityCategory.ItemCompleted
                         ? "completed"
@@ -1840,6 +1909,44 @@ public sealed class ShellViewModel : ObservableObject
         object? sender,
         GenerationBatchDispatchProgressChangedEventArgs e)
     {
+        if (_isShutDown || !ReferenceEquals(sender, _agentDispatchCoordinator))
+        {
+            return;
+        }
+
+        var snapshot = e.Snapshot;
+        // Capture ownership at the event boundary, not after an async UI callback:
+        // reconciliation may already have detached the art waiter by then.
+        var isArtWorkspaceBatch = _artWorkspaceGenerationPublisher.OwnsBatch(snapshot.Request.BatchId);
+        var diagnostic = snapshot.Diagnostic;
+        var level = snapshot.Stage == GenerationBatchDispatchStage.Failed
+            ? WorkbenchLogLevel.Error
+            : snapshot.Stage is GenerationBatchDispatchStage.Canceled or GenerationBatchDispatchStage.Interrupted
+                ? WorkbenchLogLevel.Warning : WorkbenchLogLevel.Information;
+        _workbenchConsoleService.WriteStructured(
+            level,
+            isArtWorkspaceBatch ? "ArtWorkspace" : "Generation",
+            $"批次 {CompactIdentifier(snapshot.Request.BatchId)} · {snapshot.Stage} · " +
+            $"{snapshot.ProgressPercentage:0}% · {snapshot.Detail}",
+            new WorkbenchLogContext
+            {
+                RunId = snapshot.Request.BatchId,
+                BatchId = snapshot.Request.BatchId,
+                TaskId = snapshot.Request.TaskIds.Count == 1 ? snapshot.Request.TaskIds[0] : null,
+                AgentThreadId = diagnostic?.ThreadId ?? snapshot.ObservedThreadId,
+                AgentTurnId = diagnostic?.TurnId ?? snapshot.ObservedTurnId,
+                Stage = snapshot.Stage.ToString(),
+                FailureStage = diagnostic?.Stage ?? snapshot.FailureStage?.ToString(),
+                Status = snapshot.IsTerminal ? snapshot.Stage.ToString().ToLowerInvariant() : "active",
+                ElapsedMilliseconds = snapshot.ElapsedMilliseconds,
+                ErrorCode = diagnostic?.Code ?? snapshot.FailureCode,
+                ReadinessState = diagnostic?.ReadinessState,
+                RecoveryHint = diagnostic?.RecoveryHint,
+                ExceptionType = diagnostic?.Exception?.GetType().FullName
+            },
+            snapshot.OccurredAt,
+            diagnostic?.Exception);
+
         void ApplyProgress()
         {
             if (_isShutDown || !ReferenceEquals(sender, _agentDispatchCoordinator))
@@ -1847,73 +1954,14 @@ public sealed class ShellViewModel : ObservableObject
                 return;
             }
 
-            if (_artWorkspaceGenerationPublisher.OwnsBatch(e.Snapshot.Request.BatchId))
+            if (isArtWorkspaceBatch)
             {
-                _artWorkspaceGenerationPublisher.ReportDispatchProgress(e.Snapshot);
-                var artBatchId = CompactIdentifier(e.Snapshot.Request.BatchId);
-                var artLevel = e.Snapshot.Stage == GenerationBatchDispatchStage.Failed
-                    ? WorkbenchLogLevel.Error
-                    : e.Snapshot.Stage is GenerationBatchDispatchStage.Canceled or
-                        GenerationBatchDispatchStage.Interrupted
-                        ? WorkbenchLogLevel.Warning
-                        : WorkbenchLogLevel.Information;
-                _workbenchConsoleService.WriteStructured(
-                    artLevel,
-                    "ArtWorkspace",
-                    $"美术工作区批次 {artBatchId} · {e.Snapshot.Stage} · " +
-                    $"{e.Snapshot.ProgressPercentage:0}% · {e.Snapshot.Detail}",
-                    new WorkbenchLogContext
-                    {
-                        RunId = e.Snapshot.Request.BatchId,
-                        BatchId = e.Snapshot.Request.BatchId,
-                        Stage = e.Snapshot.Stage.ToString(),
-                        Status = e.Snapshot.IsTerminal
-                            ? e.Snapshot.Stage.ToString().ToLowerInvariant()
-                            : "active",
-                        ElapsedMilliseconds = e.Snapshot.ElapsedMilliseconds,
-                        ErrorCode = e.Snapshot.FailureCode
-                    });
-                return;
+                _artWorkspaceGenerationPublisher.ReportDispatchProgress(snapshot);
             }
-
-            AssetGeneration.ReportDispatchProgress(e.Snapshot);
-            var batchId = CompactIdentifier(e.Snapshot.Request.BatchId);
-            var message =
-                $"批次 {batchId} · {e.Snapshot.Stage} · {e.Snapshot.ProgressPercentage:0}% · " +
-                $"{e.Snapshot.Instruction} · {e.Snapshot.Detail}";
-            var level = e.Snapshot.Stage == GenerationBatchDispatchStage.Failed
-                ? WorkbenchLogLevel.Error
-                : e.Snapshot.Stage is GenerationBatchDispatchStage.Canceled or
-                    GenerationBatchDispatchStage.Interrupted
-                    ? WorkbenchLogLevel.Warning
-                    : WorkbenchLogLevel.Information;
-            var transportFailure = AgentTurnFailureClassifier.Classify(
-                turnResult: null,
-                e.Snapshot.FailureMessage);
-            _workbenchConsoleService.WriteStructured(
-                level,
-                "Generation",
-                message,
-                new WorkbenchLogContext
-                {
-                    RunId = e.Snapshot.Request.BatchId,
-                    BatchId = e.Snapshot.Request.BatchId,
-                    Stage = e.Snapshot.Stage.ToString(),
-                    Status = e.Snapshot.Stage is GenerationBatchDispatchStage.Failed
-                        ? "failed"
-                        : e.Snapshot.Stage is GenerationBatchDispatchStage.Interrupted
-                            ? "interrupted"
-                        : e.Snapshot.Stage is GenerationBatchDispatchStage.Canceled
-                            ? "canceled"
-                            : e.Snapshot.Stage is GenerationBatchDispatchStage.Completed
-                                ? "completed"
-                                : "active",
-                    ElapsedMilliseconds = e.Snapshot.ElapsedMilliseconds,
-                    ErrorCode = e.Snapshot.FailureCode ?? transportFailure?.Code ??
-                                (e.Snapshot.Stage == GenerationBatchDispatchStage.Failed
-                                    ? e.Snapshot.FailureStage?.ToString()
-                                    : null)
-                });
+            else
+            {
+                AssetGeneration.ReportDispatchProgress(snapshot);
+            }
         }
 
         if (_dispatcher.CheckAccess())
@@ -1985,6 +2033,17 @@ public sealed class ShellViewModel : ObservableObject
 
         var isArtWorkspaceBatch =
             _artWorkspaceGenerationPublisher.OwnsBatch(e.Request.BatchId);
+        if (!isArtWorkspaceBatch)
+        {
+            var batchTasks = await _generationTaskStore.ListBatchAsync(e.Request.BatchId)
+                .ConfigureAwait(false);
+            // Reset may have removed the live owner while a completion callback was already
+            // queued. Never route that old art completion into the generic automatic retry path.
+            isArtWorkspaceBatch = batchTasks.Any(task => string.Equals(
+                task.Constraints.WorkflowId, ArtWorkspaceGenerationConstraintPackageBuilder.WorkflowId,
+                StringComparison.Ordinal));
+        }
+
         var turnFailure = AgentTurnFailureClassifier.Classify(e.Result, e.FailureMessage);
         GenerationBatchTurnReconciliationResult reconciliation;
         try
@@ -1992,7 +2051,8 @@ public sealed class ShellViewModel : ObservableObject
             reconciliation = await _generationBatchTurnReconciler.ReconcileAsync(
                     e.Request.BatchId,
                     e.Result,
-                    e.FailureMessage)
+                    e.FailureMessage,
+                    diagnostic: e.Diagnostic)
                 .ConfigureAwait(false);
         }
         catch (Exception exception)
@@ -2004,7 +2064,7 @@ public sealed class ShellViewModel : ObservableObject
                     return;
                 }
 
-                var failure = $"Agent Turn 已结束，但本地任务状态收束失败：{exception.Message}";
+                var failure = $"本次调度的本地任务状态核对失败，生成结果尚未确认：{exception.Message}";
                 if (isArtWorkspaceBatch)
                 {
                     if (turnFailure?.PreservePendingTasks == true)
@@ -2676,10 +2736,12 @@ public sealed class ShellViewModel : ObservableObject
         {
             _settingsService.Save(_settings);
         }
-        catch
+        catch (Exception exception)
         {
-            // A settings write must never make the editor unusable. The next
-            // successful state change or normal shutdown will retry the save.
+            _workbenchConsoleService.WriteError(
+                "Settings",
+                $"用户设置保存失败；当前编辑仍可继续，下一次设置变更或正常退出时会重试：{exception.Message}",
+                exception);
         }
     }
 
