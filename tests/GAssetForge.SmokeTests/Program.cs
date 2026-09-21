@@ -46,6 +46,12 @@ internal static class Program
     [STAThread]
     private static int Main(string[] args)
     {
+        // The pipe fixture must run before WPF initialization or any other test output.
+        if (args is [Utf8ProcessFixture.Argument])
+        {
+            return Utf8ProcessFixture.Run();
+        }
+
         _temporaryRoot = Path.Combine(
             Path.GetTempPath(),
             "GAssetForge.SmokeTests",
@@ -57,6 +63,14 @@ internal static class Program
             application = new DesktopApplication();
             application.InitializeComponent();
             application.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+
+            if (args is ["--utf8-process"])
+            {
+                AgentRuntimeTransportSmokeTests.CodexProcessLaunchRoundTripsUtf8ThroughRealChildAsync()
+                    .GetAwaiter().GetResult();
+                Console.WriteLine("PASS  UTF-8 real child process regression test");
+                return 0;
+            }
 
             if (args is ["--mcp-readiness"])
             {

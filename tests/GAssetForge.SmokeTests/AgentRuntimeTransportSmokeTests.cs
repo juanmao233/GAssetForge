@@ -1374,37 +1374,27 @@ internal static class AgentRuntimeTransportSmokeTests
         Equal(0, encoding.GetPreamble().Length, $"{channel} 不得写入 UTF-8 BOM");
     }
 
-    private static async Task CodexProcessLaunchRoundTripsUtf8ThroughRealChildAsync()
+    internal static async Task CodexProcessLaunchRoundTripsUtf8ThroughRealChildAsync()
     {
-        var powershellPath = Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.System),
-            "WindowsPowerShell",
-            "v1.0",
-            "powershell.exe");
-        True(File.Exists(powershellPath), "Windows PowerShell 子进程 fixture 必须存在");
-        const string script = """
-            $utf8 = [System.Text.UTF8Encoding]::new($false)
-            [Console]::InputEncoding = $utf8
-            [Console]::OutputEncoding = $utf8
-            [Console]::Error.WriteLine('子进程错误流中文')
-            $inputLine = [Console]::In.ReadLine()
-            $payload = @{ method = 'fixture/status'; params = @{ text = ('子进程回显：' + $inputLine) } }
-            [Console]::Out.WriteLine(($payload | ConvertTo-Json -Compress))
-            """;
+        // Exercise real redirected pipes without depending on PowerShell cold startup on CI.
+        var executablePath = Environment.ProcessPath ??
+                             throw new InvalidOperationException("无法解析 UTF-8 fixture 的测试进程路径。");
         var startInfo = new ProcessStartInfo
         {
-            FileName = powershellPath,
+            FileName = executablePath,
             UseShellExecute = false,
             CreateNoWindow = true,
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true
         };
-        startInfo.ArgumentList.Add("-NoLogo");
-        startInfo.ArgumentList.Add("-NoProfile");
-        startInfo.ArgumentList.Add("-NonInteractive");
-        startInfo.ArgumentList.Add("-Command");
-        startInfo.ArgumentList.Add(script);
+        if (string.Equals(Path.GetFileNameWithoutExtension(executablePath), "dotnet",
+                StringComparison.OrdinalIgnoreCase))
+        {
+            startInfo.ArgumentList.Add(typeof(Program).Assembly.Location);
+        }
+
+        startInfo.ArgumentList.Add(Utf8ProcessFixture.Argument);
         CodexProcessLaunch.ConfigureUtf8Redirection(startInfo);
 
         using var process = Process.Start(startInfo) ??
@@ -1414,7 +1404,18 @@ internal static class AgentRuntimeTransportSmokeTests
         process.StandardInput.Close();
         var standardOutput = process.StandardOutput.ReadToEndAsync();
         var standardError = process.StandardError.ReadToEndAsync();
-        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        try
+        {
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(10));
+        }
+        finally
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+                await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(5));
+            }
+        }
         var output = await standardOutput;
         var error = await standardError;
 
